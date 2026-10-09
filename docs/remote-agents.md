@@ -1535,14 +1535,14 @@ starts the hold again; this only delays the tombstone.
 | Active | bound to this Pod, container running | none |
 | Draining | Pod deleting, or `lifecycle=ending` with the Pod present | none |
 | Ending | `lifecycle=ending`, Pod gone | tombstone with the recorded reason (`stopped`) |
-| Completed | bound to this Pod, container terminated | checkpoint verified or unconfigured: tombstone `completed`. Checkpoint missing: Warning Event, hold 24h, then tombstone with `checkpoint=missing` |
+| Completed | bound to this Pod, container terminated | checkpoint verified or unconfigured: tombstone `completed`. No verified receipt: Warning Event, hold 24h, then tombstone with the `listed` or `inherited` key, or `checkpoint=missing` |
 | Replaced | Pod UID differs from the binding | tombstone `replaced` |
 | Lost | bound, no Pod for 60s or more | tombstone `lost` |
 | Ended | Suspended and `lifecycle=ended` | delete the Sandbox 30 days after `ended-at` (the checkpoint object expiry); before that, none |
 
 A tombstone is one JSON merge patch that carries the observed
 `metadata.resourceVersion`. It sets `spec.operatingMode: Suspended` and the
-lifecycle, reason, ended-at, and checkpoint annotations. The controller then
+lifecycle, reason, ended-at, checkpoint, and checkpoint-source annotations. The controller then
 deletes the Pod, and Kubernetes garbage collection deletes the Pod-owned
 launch Secret. If the patch conflicts, the reaper reads the Sandbox again
 and classifies it again; it does not retry the old decision. Deletion of an
@@ -1561,31 +1561,74 @@ Pod's termination message. A Pod watch keeps the message after a stop or a
 replacement deletes the Pod. The reaper accepts a key only if it is under
 `<developer prefix><generation>/` (prefix from the reaper configuration,
 generation from the Sandbox, 32 lowercase hex characters) and an S3
-`ListObjectsV2` (`s3:ListBucket` only) finds exactly that key. Otherwise it
-records `missing`. A compromised Pod therefore cannot point a tombstone at
-the checkpoint of a different session. If S3 cannot be reached, the reaper
-waits for a later pass. It never records `missing` because S3 failed.
-`buzz_sandbox_reaper_s3_errors_total{kind}` counts these failures by kind:
-`timeout` or `other` for an outage, `access_denied` or `not_found_bucket` for
-a misconfigured role or bucket.
+`ListObjectsV2` (`s3:ListBucket` only) finds exactly that key. A compromised
+Pod therefore cannot point a tombstone at the checkpoint of a different
+session. If S3 cannot be reached, the reaper waits for a later pass. It never
+records `missing` because S3 failed. `buzz_sandbox_reaper_s3_errors_total{kind}`
+counts these failures by kind: `timeout` or `other` for an outage,
+`access_denied` or `not_found_bucket` for a misconfigured role or bucket.
 
-The reaper keeps observed receipts in memory only. A reaper restart, or a
-watch gap while a stop or replacement deletes the Pod, can lose a receipt.
-When the bound Pod is gone and no receipt for it was observed, the reaper
-therefore treats the receipt as unknown, not as absent. It records the newest
-object directly under the session's own `<developer prefix><generation>/`
-prefix, by S3 `LastModified`, and records `missing` only when that listing is
-empty. The prefix again comes from the configuration and the Sandbox, never
-from the Pod. All sessions of one developer share one IAM role, so a
-compromised session of the same developer could write into that prefix; it
-cannot reach another developer's prefix.
+Without a verified receipt, the reaper records the newest object directly
+under the session's own `<developer prefix><generation>/` prefix, by S3
+`LastModified` (the greater key breaks a tie), and records `missing` only when
+that listing is empty. A session can lack a verified receipt for these
+reasons:
+
+- The reaper keeps observed receipts in memory only. A reaper restart, or a
+  watch gap while a stop or replacement deletes the Pod, can lose one.
+- A node lost without warning never writes a termination message.
+- A failed final save exits non-zero, and the reaper ignores the termination
+  message of a failed exit.
+- The receipt names a key that S3 does not list.
+
+The prefix again comes from the configuration and the Sandbox, never from the
+Pod. All sessions of one developer share one IAM role, so a compromised
+session of the same developer could write into that prefix; it cannot reach
+another developer's prefix.
+
+The tombstone records where its key came from in
+`buzz.block.xyz/checkpoint-source`, and the `SessionEnded` Event message
+repeats it. The annotation is absent when `checkpoint` is `missing` or
+`unconfigured`.
+
+| `checkpoint-source` | Key | What it holds |
+| --- | --- | --- |
+| `receipt` | the final save's receipt, confirmed by S3 | the final workspace |
+| `listed` | the newest object in the session's own prefix | possibly an older background save: work after it is not included |
+| `inherited` | the key the recovered session was restored from | the workspace at the earlier tombstone |
+
+A session's own key (`receipt`, then `listed`) has precedence over the
+inherited one. The image restores the inherited checkpoint before the harness
+starts, so a background save of a recovered session already contains that work.
+
+**Checkpoints after turns.** With `BUZZ_ACP_CHECKPOINT_ON_STOP`, the harness
+also saves in the background after completed turns, without a termination
+receipt. A save starts only at an idle point: after a turn's result, when no
+turn or heartbeat is in flight and no accepted work waits for dispatch. One
+save runs at a time, and at most one starts per
+`BUZZ_ACP_CHECKPOINT_AFTER_TURN_SECS` (default 600; 0 disables). A session
+that is never idle therefore saves nothing in the background. A background
+save does not stop the adapters: a turn that starts while it runs can change
+the workspace that it reads. Such a save is recorded only as `listed`, never
+as `receipt`. Only a successful final save after the drain attests the final
+workspace. The final save clears any earlier receipt before it starts. On
+stop, a running background save gets 60s from the start of the stop path,
+overlapping the drain; then it is cancelled (`checkpoint_failed` with reason
+`cancelled`) and the final save runs.
+
+Every background save adds one object to the session prefix: up to 144 a day
+at the default interval. The checkpoint bucket's 30-day expiration lifecycle
+rule (in voltage-terraform) bounds this growth, and the reaper's listing bound
+(10,000 objects per session prefix) assumes it. Keep that rule when you change
+the bucket.
 
 Each pass has a 60-second deadline. Liveness (`/healthz`) records when each
 pass starts, so slow S3 or apiserver responses fail only readiness
 (`/readyz`) and do not restart the reaper.
 
-A recovered session that has no verified checkpoint of its own (for example,
-its restore failed) keeps the checkpoint it was recovered from. The reaper
+A recovered session that has no checkpoint of its own, neither a receipt nor
+a listed object (for example, its restore failed), keeps the checkpoint it
+was recovered from. The reaper
 takes the key from the provider-written `restore-checkpoint` annotation,
 requires a valid generation and an object directly under the configured
 developer prefix, and confirms it with S3. The key can belong to an older
@@ -1600,7 +1643,9 @@ click only; the desktop never stores it:
 
 - `{"mode":"checkpoint"}` restores the tombstone's verified checkpoint. It is
   refused with `no_checkpoint` when the tombstone has no checkpoint key, and
-  with `no_ended_session` when the thread has no Sandbox.
+  with `no_ended_session` when the thread has no Sandbox. With
+  `checkpoint-source=listed`, that key can be a background save older than
+  the session's last work (see **Checkpoints after turns**).
 - `{"mode":"fresh"}` starts with an empty workspace. It is also accepted when
   the thread has no Sandbox.
 

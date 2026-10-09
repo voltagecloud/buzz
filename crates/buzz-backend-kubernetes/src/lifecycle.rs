@@ -48,6 +48,10 @@ pub const ENDED_REASON: &str = "buzz.block.xyz/ended-reason";
 pub const ENDED_AT: &str = "buzz.block.xyz/ended-at";
 /// `<s3 key>` | `missing` | `unconfigured`.
 pub const CHECKPOINT: &str = "buzz.block.xyz/checkpoint";
+/// Where the tombstone's [`CHECKPOINT`] key came from:
+/// [`CHECKPOINT_SOURCE_RECEIPT`] | [`CHECKPOINT_SOURCE_LISTED`] |
+/// [`CHECKPOINT_SOURCE_INHERITED`]. Absent when [`CHECKPOINT`] is not a key.
+pub const CHECKPOINT_SOURCE: &str = "buzz.block.xyz/checkpoint-source";
 /// Generation of the tombstone a recovered session replaced.
 pub const RECOVERED_FROM: &str = "buzz.block.xyz/recovered-from";
 
@@ -59,6 +63,14 @@ pub const LIFECYCLE_ENDED: &str = "ended";
 pub const CHECKPOINT_MISSING: &str = "missing";
 /// [`CHECKPOINT`] value when the session never had checkpointing.
 pub const CHECKPOINT_UNCONFIGURED: &str = "unconfigured";
+/// [`CHECKPOINT_SOURCE`]: the final save's termination receipt, confirmed by
+/// S3. Only this source attests the session's final workspace.
+pub const CHECKPOINT_SOURCE_RECEIPT: &str = "receipt";
+/// [`CHECKPOINT_SOURCE`]: the newest object S3 lists in the session's own
+/// prefix. It can be a turn checkpoint older than the final workspace.
+pub const CHECKPOINT_SOURCE_LISTED: &str = "listed";
+/// [`CHECKPOINT_SOURCE`]: the checkpoint a recovered session was restored from.
+pub const CHECKPOINT_SOURCE_INHERITED: &str = "inherited";
 /// [`CHECKPOINTING`] value written when checkpoint-on-stop is configured.
 pub const CHECKPOINTING_ENABLED: &str = "enabled";
 /// [`CHECKPOINTING`] value written when checkpoint-on-stop is not configured.

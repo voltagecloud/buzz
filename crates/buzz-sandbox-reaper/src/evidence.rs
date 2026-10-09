@@ -8,8 +8,9 @@
 //!
 //! - [`from_receipt`]: the harness's termination-message receipt. The receipt
 //!   alone is written by the (untrusted) Pod, so S3 must also list it.
-//! - [`latest`]: the newest object in the session prefix, for a session whose
-//!   receipt was never observed (the reconcile engine decides when).
+//! - [`latest`]: the newest object in the session prefix, for a session
+//!   without a verified receipt (the reconcile engine decides when). It may be
+//!   a turn checkpoint older than the final workspace.
 //! - [`inherited`]: the provider-written restore key of a recovered session.
 //!
 //! Any store failure is [`Evidence::Unavailable`]: the caller defers, and
@@ -241,7 +242,7 @@ pub async fn from_receipt<S: CheckpointStore>(
     probe(store, key, Evidence::Verified).await
 }
 
-/// Evidence for a session whose receipt was never observed: the newest object
+/// Evidence for a session without a verified receipt: the newest object
 /// directly under its own `session_prefix`, as [`Evidence::Listed`]. Nothing
 /// listed is [`Evidence::Missing`]; a failed listing is
 /// [`Evidence::Unavailable`], never `Missing`.
@@ -648,6 +649,33 @@ pub mod tests {
                 .unwrap(),
             None
         );
+    }
+
+    /// S3 lists in key order; the newest is the latest `LastModified`, and
+    /// the greater key breaks a tie.
+    #[tokio::test]
+    async fn s3_newest_orders_by_last_modified_then_key() {
+        let a = format!("{PREFIX}a.tar.gz");
+        let b = format!("{PREFIX}b.tar.gz");
+        let z = format!("{PREFIX}z.tar.gz");
+        let cases = [
+            (vec![(a.clone(), LATER), (z.clone(), AT)], a.clone()),
+            (
+                vec![(a.clone(), LATER), (b.clone(), LATER), (z, AT)],
+                b.clone(),
+            ),
+            (vec![(b.clone(), LATER), (a.clone(), LATER)], b),
+        ];
+        for (listed, expected) in cases {
+            let (url, _) = s3_endpoint(move |_| {
+                let keys: Vec<(&str, &str)> =
+                    listed.iter().map(|(k, at)| (k.as_str(), *at)).collect();
+                page(&keys, None, false)
+            })
+            .await;
+            let store = s3(&url, Duration::from_secs(5));
+            assert_eq!(store.newest(PREFIX).await.unwrap(), Some(expected));
+        }
     }
 
     #[tokio::test]

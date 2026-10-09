@@ -158,12 +158,21 @@ async fn a_completed_session_with_a_verified_receipt_is_tombstoned_once() {
     assert_eq!(annotations[LIFECYCLE], LIFECYCLE_ENDED);
     assert_eq!(annotations[ENDED_REASON], "completed");
     assert_eq!(annotations[CHECKPOINT], key());
+    assert_eq!(annotations[CHECKPOINT_SOURCE], "receipt");
     // ended-at is the apiserver's clock, not ours.
     assert_eq!(
         annotations[ENDED_AT],
         now.to_rfc3339_opts(SecondsFormat::Secs, true)
     );
-    assert_eq!(events(&state).len(), 1);
+    let sent = events(&state);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        sent[0]["message"],
+        format!(
+            "session ended (completed); checkpoint: {} (source: receipt)",
+            key()
+        )
+    );
     // The next pass sees an unexpired tombstone and does nothing.
     let summary = pass(&r, &mut memory).await.unwrap();
     assert_eq!(summary.tombstoned, 0);
@@ -240,9 +249,48 @@ async fn a_failed_recovery_carries_its_restore_checkpoint_forward() {
     assert_eq!(events(&state)[0]["reason"], "CheckpointMissing");
     state.lock().unwrap().now += chrono::Duration::seconds(24 * 3600);
     assert_eq!(pass(&r, &mut memory).await.unwrap().tombstoned, 1);
+    let annotations = &stored(&state, "s")["metadata"]["annotations"];
+    assert_eq!(annotations[CHECKPOINT], original);
+    assert_eq!(annotations[CHECKPOINT_SOURCE], "inherited");
+}
+
+/// A recovered session that saved turn checkpoints of its own records the
+/// newest of them, not the older checkpoint it was restored from: the image
+/// restores before the harness starts, so its own saves include that work.
+#[tokio::test]
+async fn a_recovered_session_prefers_its_own_listed_checkpoint_to_the_inherited_one() {
+    const PREVIOUS: &str = "fedcba9876543210fedcba9876543210";
+    let original = format!("dev/{PREVIOUS}/6f9619ff-8b86-d011-b42d-00cf4fc964ff.tar.gz");
+    let state = fake::Shared::default();
+    {
+        let mut s = state.lock().unwrap();
+        let sb = sandbox(
+            &s,
+            "s",
+            600,
+            "Suspended",
+            json!({
+                (INITIAL_POD): "pod-1",
+                (LIFECYCLE): "ending",
+                (ENDED_REASON): "stopped",
+                (RESTORE_CHECKPOINT): original,
+                (RECOVERED_FROM): PREVIOUS,
+            }),
+        );
+        s.sandboxes.insert("s".into(), sb);
+    }
+    let r = reconciler(&state, store_with(&[original, key()]));
     assert_eq!(
-        stored(&state, "s")["metadata"]["annotations"][CHECKPOINT],
-        original
+        pass(&r, &mut Memory::default()).await.unwrap().tombstoned,
+        1
+    );
+    let annotations = &stored(&state, "s")["metadata"]["annotations"];
+    assert_eq!(annotations[CHECKPOINT], key());
+    assert_eq!(annotations[CHECKPOINT_SOURCE], "listed");
+    assert_eq!(
+        r.store.probes.lock().unwrap().as_slice(),
+        [format!("dev/{GENERATION_ID}/")],
+        "the inherited key is not consulted"
     );
 }
 
@@ -361,6 +409,28 @@ async fn a_lost_pod_is_tombstoned_only_after_the_grace() {
         stored(&state, "s")["metadata"]["annotations"][ENDED_REASON],
         "lost"
     );
+}
+
+/// A node lost without warning leaves no termination receipt. The session
+/// still ends with the newest checkpoint the harness saved after a turn.
+#[tokio::test]
+async fn a_lost_session_records_its_newest_turn_checkpoint() {
+    let state = fake::Shared::default();
+    {
+        let mut s = state.lock().unwrap();
+        let sb = sandbox(&s, "s", 600, "Running", json!({(INITIAL_POD): "pod-1"}));
+        s.sandboxes.insert("s".into(), sb);
+    }
+    let older = format!("dev/{GENERATION_ID}/00000000-0000-0000-0000-000000000001.tar.gz");
+    let r = reconciler(&state, store_with(&[older, key()]));
+    let mut memory = Memory::default();
+    pass(&r, &mut memory).await.unwrap();
+    state.lock().unwrap().now += chrono::Duration::seconds(60);
+    pass(&r, &mut memory).await.unwrap();
+    let annotations = &stored(&state, "s")["metadata"]["annotations"];
+    assert_eq!(annotations[ENDED_REASON], "lost");
+    assert_eq!(annotations[CHECKPOINT], key());
+    assert_eq!(annotations[CHECKPOINT_SOURCE], "listed");
 }
 
 #[tokio::test]
@@ -712,7 +782,19 @@ fn check_writes(
                 let keys: HashSet<&str> = annotations.keys().map(String::as_str).collect();
                 prop_assert_eq!(
                     keys,
-                    HashSet::from([LIFECYCLE, ENDED_REASON, ENDED_AT, CHECKPOINT])
+                    HashSet::from([
+                        LIFECYCLE,
+                        ENDED_REASON,
+                        ENDED_AT,
+                        CHECKPOINT,
+                        CHECKPOINT_SOURCE
+                    ])
+                );
+                // Only a key carries a source; `missing` clears it.
+                prop_assert_eq!(
+                    annotations[CHECKPOINT_SOURCE].is_null(),
+                    annotations[CHECKPOINT] == "missing"
+                        || annotations[CHECKPOINT] == "unconfigured"
                 );
                 prop_assert_eq!(&original["metadata"]["annotations"][OWNER], &json!(owner()));
                 prop_assert_ne!(&original["metadata"]["annotations"][LIFECYCLE], "ended");
@@ -816,6 +898,9 @@ async fn repeated_failed_recovery_preserves_original_checkpoint() {
     );
 }
 
+/// A failed final save exits non-zero, so its leftover receipt attests
+/// nothing. The newest listed checkpoint stands in, recorded as `listed`
+/// (never as a verified `receipt`) after the 24h hold.
 #[tokio::test]
 async fn failed_final_save_does_not_verify_an_earlier_turn_receipt() {
     let state = fake::Shared::default();
@@ -832,12 +917,27 @@ async fn failed_final_save_does_not_verify_an_earlier_turn_receipt() {
         s.pods.insert("s".into(), p);
     }
     let r = reconciler(&state, store_with(&[key()]));
-    let result = pass(&r, &mut Memory::default()).await.unwrap();
+    let mut memory = Memory::default();
+    let result = pass(&r, &mut memory).await.unwrap();
     assert_eq!(
         result.held, 1,
         "retain the unsaved workspace for the 24h hold"
     );
     assert_eq!(result.tombstoned, 0);
+    state.lock().unwrap().now += chrono::Duration::seconds(MISSING_CHECKPOINT_HOLD_SECS);
+    assert_eq!(pass(&r, &mut memory).await.unwrap().tombstoned, 1);
+    let annotations = &stored(&state, "s")["metadata"]["annotations"];
+    assert_eq!(annotations[ENDED_REASON], "completed");
+    assert_eq!(annotations[CHECKPOINT], key());
+    assert_eq!(annotations[CHECKPOINT_SOURCE], "listed");
+    assert_eq!(
+        r.store.probes.lock().unwrap().as_slice(),
+        [
+            format!("dev/{GENERATION_ID}/"),
+            format!("dev/{GENERATION_ID}/")
+        ],
+        "the receipt is never probed as if it were attested"
+    );
 }
 
 #[tokio::test]
@@ -894,6 +994,7 @@ async fn a_restarted_reaper_lists_the_checkpoint_of_a_deleted_pod() {
     let annotations = &stored(&state, "s")["metadata"]["annotations"];
     assert_eq!(annotations[ENDED_REASON], "stopped");
     assert_eq!(annotations[CHECKPOINT], key());
+    assert_eq!(annotations[CHECKPOINT_SOURCE], "listed");
     assert_eq!(
         r.store.probes.lock().unwrap().as_slice(),
         [format!("dev/{GENERATION_ID}/")]
