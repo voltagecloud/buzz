@@ -6,6 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 description = "Kubernetes backend provider for Buzz remote agents (docs/remote-agents.md)"
 
+[lib]
+name = "buzz_backend_kubernetes"
+path = "src/lib.rs"
+
 [[bin]]
 name = "buzz-backend-kubernetes"
 path = "src/main.rs"
