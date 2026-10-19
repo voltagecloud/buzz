@@ -2,9 +2,13 @@
 # Remote-agent work lands as stacked pull requests, so most bases are other
 # feature branches. CodeRabbit reviews only default-branch PRs unless
 # base_branches lists more. Drafts stay unreviewed until marked ready.
+# Upstream sync PRs ("chore(sync): merge upstream <tag>") carry block/buzz
+# code that upstream already reviewed, so CodeRabbit skips them.
 reviews:
   auto_review:
     enabled: true
     drafts: false
     base_branches:
       - ".*"
+    ignore_title_keywords:
+      - "merge upstream"

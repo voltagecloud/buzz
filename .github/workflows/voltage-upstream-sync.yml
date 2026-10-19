@@ -1,0 +1,91 @@
+# Voltage fork only: opens a sync PR when block/buzz publishes a desktop
+# release that main does not contain yet. Merge sync PRs with "Create a merge
+# commit" so upstream commits keep their SHAs; see the upstream-fork-sync skill.
+name: Upstream release sync
+
+on:
+  schedule:
+    - cron: "17 13 * * *"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Upstream release tag, for example desktop-v0.5.28 (default: latest desktop release)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: voltage-upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  open-sync-pr:
+    name: Open sync PR
+    if: github.repository == 'voltagecloud/buzz'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      UPSTREAM: block/buzz
+      INPUT_TAG: ${{ inputs.tag }}
+    steps:
+      - name: Open a sync PR for a new upstream release
+        run: |
+          set -euo pipefail
+
+          tag="${INPUT_TAG:-}"
+          if [ -z "$tag" ]; then
+            tag=$(gh release list -R "$UPSTREAM" --exclude-drafts --exclude-pre-releases --limit 50 \
+              --json tagName,publishedAt \
+              --jq '[.[] | select(.tagName | startswith("desktop-v"))] | sort_by(.publishedAt) | last | .tagName // empty')
+          fi
+          if [ -z "$tag" ]; then
+            echo "No upstream desktop release found."
+            exit 0
+          fi
+          if ! [[ "$tag" =~ ^desktop-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Unexpected tag format: $tag"
+            exit 1
+          fi
+
+          sha=$(gh api "repos/$UPSTREAM/commits/$tag" --jq .sha)
+          status=$(gh api "repos/$REPO/compare/main...${UPSTREAM/\//:}:$tag" --jq .status)
+          if [ "$status" = "behind" ] || [ "$status" = "identical" ]; then
+            echo "main already contains $tag."
+            exit 0
+          fi
+
+          branch="sync/$tag"
+          existing=$(gh pr list -R "$REPO" --head "$branch" --state all --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            echo "Sync PR #$existing already exists for $tag."
+            exit 0
+          fi
+
+          # The refs API points the branch at the upstream commit, which the
+          # fork network already stores. A git push of upstream workflow
+          # changes would need the workflows permission, which GITHUB_TOKEN
+          # cannot have.
+          if ! gh api "repos/$REPO/git/ref/heads/$branch" >/dev/null 2>&1; then
+            gh api -X POST "repos/$REPO/git/refs" -f ref="refs/heads/$branch" -f sha="$sha" >/dev/null
+          fi
+
+          body=$(cat <<EOF
+          Upstream \`$UPSTREAM\` published \`$tag\` (\`$sha\`). This PR brings that release into \`main\`.
+
+          ## Merge
+
+          - Merge with **Create a merge commit**. Do not squash or rebase: both rewrite upstream commits and make the next sync conflict.
+          - CI does not start for PRs that \`GITHUB_TOKEN\` opens. Close and reopen this PR to start CI.
+          - If GitHub reports conflicts, follow the \`upstream-fork-sync\` skill to resolve them in a signed merge commit.
+          - After the merge, rebase open stacked PRs onto \`main\`.
+
+          CodeRabbit skips this PR because its title contains "merge upstream". Review the conflict resolution, if any, and the CI results.
+          EOF
+          )
+          gh pr create -R "$REPO" --base main --head "$branch" \
+            --title "chore(sync): merge upstream $tag" --body "$body"
