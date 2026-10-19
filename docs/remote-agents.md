@@ -1432,7 +1432,8 @@ Launchers must check the `info` schema for required options before credential ha
 
 ### Agent Sandbox workspaces
 
-Desktop mention routing is added by the following stack layer. This layer accepts scoped requests from direct provider clients.
+Set `sandbox=true` in the desktop provider configuration to allocate a workspace for each channel thread.
+The desktop publishes the mention first, then passes its channel and canonical thread root to the provider.
 Direct provider clients pass `sandbox={"channel_id":"<UUID>","thread_root":"<event ID>"}` and an approved `identity_policy`.
 
 Install the `agents.x-k8s.io/v1beta1` Sandbox CRD and controller before launching.

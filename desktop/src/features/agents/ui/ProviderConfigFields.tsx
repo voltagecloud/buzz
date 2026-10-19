@@ -23,11 +23,49 @@ export function coerceConfigValues(
       result[key] = Number.isNaN(num) ? value : num;
     } else if (schemaType === "boolean") {
       result[key] = value === "true";
+    } else if (schemaType === "object" || schemaType === "array") {
+      // Submit is blocked while `invalidJsonConfigKeys` reports this field.
+      const parsed = parseJsonField(value, schemaType);
+      if (parsed !== undefined) result[key] = parsed;
     } else {
       result[key] = value;
     }
   }
   return result;
+}
+
+function parseJsonField(value: string, schemaType: "object" | "array") {
+  if (value.trim() === "") return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return undefined;
+  }
+  const isArray = Array.isArray(parsed);
+  const isObject = parsed !== null && typeof parsed === "object" && !isArray;
+  return (schemaType === "array" ? isArray : isObject) ? parsed : undefined;
+}
+
+/** Object/array fields whose nonempty input is not JSON of the declared shape. */
+export function invalidJsonConfigKeys(
+  config: Record<string, string>,
+  schema: Record<string, unknown> | undefined,
+): string[] {
+  const properties = (schema?.properties ?? {}) as Record<
+    string,
+    Record<string, unknown>
+  >;
+  return Object.entries(config)
+    .filter(([key, value]) => {
+      const schemaType = properties[key]?.type;
+      return (
+        (schemaType === "object" || schemaType === "array") &&
+        value.trim() !== "" &&
+        parseJsonField(value, schemaType) === undefined
+      );
+    })
+    .map(([key]) => key);
 }
 
 export function ProviderConfigFields({
@@ -44,6 +82,7 @@ export function ProviderConfigFields({
     ((schema as Record<string, unknown>)?.required as string[]) ?? [],
   );
 
+  const invalidKeys = new Set(invalidJsonConfigKeys(config, schema));
   const entries = Object.entries(properties) as [
     string,
     Record<string, unknown>,
@@ -67,6 +106,10 @@ export function ProviderConfigFields({
             ) : null}
           </label>
           <Input
+            aria-describedby={
+              invalidKeys.has(key) ? `provider-cfg-${key}-error` : undefined
+            }
+            aria-invalid={invalidKeys.has(key) || undefined}
             id={`provider-cfg-${key}`}
             onChange={(e) => onChange({ ...config, [key]: e.target.value })}
             placeholder={
@@ -79,6 +122,14 @@ export function ProviderConfigFields({
           />
           {typeof prop.description === "string" ? (
             <p className="text-xs text-muted-foreground">{prop.description}</p>
+          ) : null}
+          {invalidKeys.has(key) ? (
+            <p
+              className="text-xs text-destructive"
+              id={`provider-cfg-${key}-error`}
+            >
+              Enter a valid JSON {prop.type === "array" ? "array" : "object"}.
+            </p>
           ) : null}
         </div>
       ))}

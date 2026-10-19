@@ -1,3 +1,4 @@
+import { usesThreadSandbox } from "./threadSandbox";
 import type {
   AcpRuntime,
   AcpRuntimeCatalogEntry,
@@ -74,7 +75,7 @@ export function resolveStartRuntimeForDefinition(
  * - `provider`: remote backend. Mirrors the legacy provider-mode create:
  *   no local ACP/agent/MCP commands are spawned, so none are set;
  *   `startOnAppLaunch` is forced false (remote agents don't auto-start with
- *   the desktop) and `spawnAfterCreate` true.
+ *   the desktop) and `spawnAfterCreate` true except thread Sandboxes, which wait for a mention.
  * - `mesh`: relay-mesh compute. The preset patch carries the instance
  *   commands/env the legacy dialog fanned into its field state; env lands in
  *   record env_vars (the instance-override layer — the dial pointer is
@@ -130,7 +131,7 @@ export async function buildInstanceInputForDefinition(
     return {
       ...base,
       harnessOverride: false,
-      spawnAfterCreate: true,
+      spawnAfterCreate: !usesThreadSandbox({ backend: backendIntent }),
       startOnAppLaunch: false,
       backend: {
         type: "provider",

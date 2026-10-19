@@ -348,6 +348,36 @@ with a TypeScript lookup table or an id comparison in a component.
     for resets; owner replay of a redacted head preserves only a nonportable
     local override. That local path is not synchronized through catalog heads.
 
+## Thread Sandbox launches
+
+Kubernetes provider configuration with `sandbox: true` launches one remote
+workspace per published channel thread. `BackendKind::is_thread_sandbox` (Rust)
+and `usesThreadSandbox` (TypeScript) are the only predicates for this; both
+require provider id `kubernetes`. The mention send passes the published
+event's canonical scope after relay acceptance; a saved `deployed` status never
+suppresses that check. Every composer `onSend` returns the relay-accepted event
+(`PublishedMessageResult`), so channel, thread, Inbox reply, new DM, Projects,
+and video-review sends all supply that scope; `undefined` means nothing was
+published. Native deploy decides eligibility from the record rebuilt after the
+deployment lock, then binds the captured thread and that payload's verified
+owner. Missing thread scope refuses startup before the provider binary is
+resolved. The Projects agent chat starts a stopped selected agent before
+publishing, so that start is refused for a thread Sandbox; mention it in a
+channel thread instead.
+Creation and channel attachment save configuration and membership until a mention
+supplies that scope. Workspace apply and inbound policy updates do not redeploy
+thread Sandboxes; their immutable owner/thread gate remains in the harness.
+
+The deployment lock is per agent, not per thread. A cold Sandbox start holds it
+through the provider's Pod waits (120s bound each), so a start for the same
+agent in another thread waits behind it.
+
+Provider object/array fields accept JSON of the declared shape; the form blocks
+submit while a field holds anything else. The native persistence boundary bounds
+nesting and rejects secret-like keys at every depth. The only exemption is the
+literal `key` of a `pod_options.tolerations[]` entry (a Kubernetes taint name).
+These are provider settings, not another harness capability catalog.
+
 ## Channel-only runtime controls
 
 Desktop observer controls identify a channel, not a thread session. The harness

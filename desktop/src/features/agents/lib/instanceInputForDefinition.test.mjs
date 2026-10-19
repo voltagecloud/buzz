@@ -7,6 +7,20 @@ import {
   resolveStartRuntimeForDefinition,
 } from "./instanceInputForDefinition.ts";
 
+test("thread Sandboxes defer deployment until a mention supplies scope", async () => {
+  const input = await buildInstanceInputForDefinition(
+    persona(),
+    gooseRuntime,
+    undefined,
+    { type: "provider", id: "kubernetes", config: { sandbox: true } },
+  );
+  assert.equal(
+    input.spawnAfterCreate,
+    false,
+    "create_managed_agent deploys without session_scope; bind_sandbox_scope rejects that invocation",
+  );
+});
+
 // ── Phase 1B.3.5: the single definition→instance mapping ────────────────────
 //
 // Every surface that starts an agent from a definition maps through

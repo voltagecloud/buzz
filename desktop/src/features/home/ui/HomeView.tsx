@@ -55,6 +55,7 @@ import { collectMessageMentionPubkeys } from "@/features/messages/lib/formatTime
 import { formatTime } from "@/features/messages/lib/dateFormatters";
 import { DeleteMessageConfirmDialog } from "@/features/messages/ui/DeleteMessageConfirmDialog";
 import { splitOutgoingTags } from "@/features/messages/lib/imetaMediaMarkdown";
+import { publishedChannelMessage } from "@/features/messages/lib/remoteAgentSession";
 import { getThreadReference } from "@/features/messages/lib/threading";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { useRelaySelfQuery } from "@/features/moderation/hooks";
@@ -899,6 +900,7 @@ export function HomeView({
                     ],
                   }));
                   onRefresh();
+                  return publishedChannelMessage(channelId, result);
                 } finally {
                   setIsSendingReply(false);
                 }

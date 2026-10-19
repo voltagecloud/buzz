@@ -1,6 +1,9 @@
 import type { BackendIntent } from "../lib/instanceInputForDefinition";
 import type { BackendProviderProbeResult } from "@/shared/api/types";
-import { coerceConfigValues } from "./ProviderConfigFields";
+import {
+  coerceConfigValues,
+  invalidJsonConfigKeys,
+} from "./ProviderConfigFields";
 
 /** Draft state of the optional remote-backend selector. */
 export type WhereToRunDraft = {
@@ -51,8 +54,10 @@ export function providerConfigComplete(draft: WhereToRunDraft): boolean {
     | Record<string, unknown>
     | undefined;
   const required: string[] = (schema?.required as string[] | undefined) ?? [];
-  return required.every(
-    (key) => (draft.providerConfig[key] ?? "").trim().length > 0,
+  return (
+    required.every(
+      (key) => (draft.providerConfig[key] ?? "").trim().length > 0,
+    ) && invalidJsonConfigKeys(draft.providerConfig, schema).length === 0
   );
 }
 

@@ -136,6 +136,7 @@ pub async fn reconcile_inbound_persona_event(
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .map_err(|error| {
@@ -376,7 +377,8 @@ fn reconcile_inbound_persona_event_blocking<R: tauri::Runtime>(
                         }
                     }
                     crate::managed_agents::BackendKind::Provider { id, config }
-                        if record.backend_agent_id.is_some() =>
+                        if record.backend_agent_id.is_some()
+                            && !record.backend.is_thread_sandbox() =>
                     {
                         // Persist the unacknowledged policy transition in the
                         // same write as the narrowed policy. If the process
@@ -393,6 +395,8 @@ fn reconcile_inbound_persona_event_blocking<R: tauri::Runtime>(
                             ),
                         });
                     }
+                    // Thread Sandboxes keep their immutable owner/thread gate and
+                    // take configuration on their next explicit scoped launch.
                     crate::managed_agents::BackendKind::Provider { .. } => {}
                 }
             }

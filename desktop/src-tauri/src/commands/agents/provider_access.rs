@@ -16,6 +16,9 @@ pub(super) fn needs_reconciliation_with_policy(
     owner_only_access: bool,
 ) -> bool {
     (owner_only_access || record.provider_policy_pending)
+        // Thread Sandboxes enforce their owner/thread inside the harness.
+        // Configuration applies on the next scoped launch, never on app reopen.
+        && !record.backend.is_thread_sandbox()
         && record.backend != BackendKind::Local
         && record.backend_agent_id.is_some()
 }
@@ -101,6 +104,7 @@ pub(crate) async fn reconcile_on_workspace_apply(
             None,
             None,
             None,
+            None,
         )
         .await
         {
@@ -146,6 +150,26 @@ mod tests {
         record.backend = backend;
         record.backend_agent_id = backend_agent_id.map(str::to_string);
         record
+    }
+
+    #[test]
+    fn thread_sandboxes_do_not_redeploy_during_workspace_apply() {
+        let mut sandbox = record(
+            BackendKind::Provider {
+                id: "kubernetes".into(),
+                config: serde_json::json!({"sandbox":true}),
+            },
+            Some("thread-workspace"),
+        );
+        sandbox.provider_policy_pending = true;
+        for owner_only in [false, true] {
+            assert!(
+                collect_targets_with(vec![sandbox.clone()], owner_only, |_| {
+                    panic!("an app lifecycle event must not build an unscoped thread deployment")
+                })
+                .is_empty()
+            );
+        }
     }
 
     #[test]

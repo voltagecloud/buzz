@@ -405,9 +405,41 @@ fn validate_provider_config_rejects_secret_key() {
 }
 
 #[test]
-fn validate_provider_config_rejects_nested() {
-    let cfg = serde_json::json!({"region": {"us": "east"}});
-    assert!(validate_provider_config(&cfg).is_err());
+fn validate_provider_config_bounds_nested_public_options() {
+    let cfg = serde_json::json!({"pod_options": {
+        "node_selector": {"workload": "agents"},
+        "tolerations": [{"key":"workload", "value":"agents", "effect":"NoSchedule"}]
+    }});
+    assert!(validate_provider_config(&cfg).is_ok());
+    let secret = serde_json::json!({"pod_options":{"nested":[{"accessToken":"secret"}]}});
+    assert!(validate_provider_config(&secret).is_err());
+    assert!(validate_provider_config(&serde_json::json!({"options":{"apiKey":"secret"}})).is_err());
+    let too_deep = serde_json::json!({"a":{"b":{"c":{"d":{"e":1}}}}});
+    assert!(validate_provider_config(&too_deep).is_err());
+}
+
+#[test]
+fn validate_provider_config_allows_literal_key_only_in_tolerations() {
+    for misplaced in [
+        serde_json::json!({"s3": {"key": "AKIA"}}),
+        serde_json::json!({"pod_options": {"key": "AKIA"}}),
+        serde_json::json!({"pod_options": {"node_selector": {"key": "AKIA"}}}),
+        serde_json::json!({"pod_options": {"tolerations": {"key": "AKIA"}}}),
+        serde_json::json!({"options": {"tolerations": [{"key": "AKIA"}]}}),
+        serde_json::json!({"pod_options": {"tolerations": [[{"key": "AKIA"}]]}}),
+        serde_json::json!({"pod_options": {"tolerations": [{"nested": {"key": "AKIA"}}]}}),
+    ] {
+        assert!(
+            validate_provider_config(&misplaced).is_err(),
+            "accepted a literal key outside pod_options.tolerations[]: {misplaced}"
+        );
+    }
+    let toleration = serde_json::json!({"pod_options": {"tolerations": [
+        {"key": "workload", "operator": "Equal", "value": "agents"}
+    ]}});
+    assert!(validate_provider_config(&toleration).is_ok());
+    let compound = serde_json::json!({"pod_options": {"tolerations": [{"apiKey": "x"}]}});
+    assert!(validate_provider_config(&compound).is_err());
 }
 
 #[test]

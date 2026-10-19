@@ -533,7 +533,7 @@ pub fn provider_deploy(
         .ok_or_else(|| "deploy response missing agent_id".to_string())
 }
 
-/// Validate provider_config: flat object, scalar values, no secret-like keys.
+/// Bound public provider configuration and reject secret-like keys at every depth.
 pub fn validate_provider_config(config: &serde_json::Value) -> Result<(), String> {
     let obj = config
         .as_object()
@@ -545,23 +545,78 @@ pub fn validate_provider_config(config: &serde_json::Value) -> Result<(), String
     if json_str.len() > 65536 {
         return Err("provider_config: max 64KB".to_string());
     }
+    validate_config_value(config, 0, ConfigPath::Root)
+}
+
+/// Where a value sits relative to the one public field allowed to be named
+/// `key`: `pod_options.tolerations[].key`.
+#[derive(Clone, Copy, PartialEq)]
+enum ConfigPath {
+    Root,
+    PodOptions,
+    Tolerations,
+    Toleration,
+    Other,
+}
+
+impl ConfigPath {
+    fn field(self, name: &str) -> Self {
+        match (self, name) {
+            (Self::Root, "pod_options") => Self::PodOptions,
+            (Self::PodOptions, "tolerations") => Self::Tolerations,
+            _ => Self::Other,
+        }
+    }
+
+    fn entry(self) -> Self {
+        if self == Self::Tolerations {
+            Self::Toleration
+        } else {
+            Self::Other
+        }
+    }
+}
+
+fn validate_config_value(
+    value: &serde_json::Value,
+    depth: usize,
+    path: ConfigPath,
+) -> Result<(), String> {
+    if depth > 4 {
+        return Err("provider_config: max nesting depth is 4".into());
+    }
+    if let Some(values) = value.as_array() {
+        if values.len() > 64 {
+            return Err("provider_config: max 64 array entries".into());
+        }
+        for entry in values {
+            validate_config_value(entry, depth + 1, path.entry())?;
+        }
+        return Ok(());
+    }
+    let Some(obj) = value.as_object() else {
+        return Ok(());
+    };
+    if obj.len() > 20 {
+        return Err("provider_config: max 20 fields per object".into());
+    }
     // Split on separators AND camelCase boundaries, then check each word.
     // Catches: api_key, apiKey, access-token, clientSecret, etc.
     // Allows: keyboard, monkey_wrench (no forbidden word as a segment).
     let forbidden = ["secret", "password", "token", "key", "credential"];
     for (k, v) in obj {
         let words = split_config_key(k);
+        // A Kubernetes toleration names its taint with a literal `key`.
+        let toleration_key = path == ConfigPath::Toleration && k == "key";
         for f in &forbidden {
+            if toleration_key && *f == "key" {
+                continue;
+            }
             if words.iter().any(|w| w == f) {
                 return Err(format!("provider_config: key '{}' looks like a secret", k));
             }
         }
-        if v.is_object() || v.is_array() {
-            return Err(format!(
-                "provider_config: value for '{}' must be a scalar",
-                k
-            ));
-        }
+        validate_config_value(v, depth + 1, path.field(k))?;
     }
     Ok(())
 }
