@@ -151,6 +151,10 @@ run_unit_tests() {
   run_test_step "buzz-backend-kubernetes tests" \
     cargo test -p buzz-backend-kubernetes -- --nocapture
 
+  # Keep the reaper regressions in step with the nextest unit lane.
+  run_test_step "buzz-sandbox-reaper tests" \
+    cargo test -p buzz-sandbox-reaper -- --nocapture
+
   # Keep fallback parity with `just test-unit`: one LaunchDarkly-feature run
   # exercises both default and feature-gated buzz-feature-flags tests.
   run_test_step "buzz-feature-flags tests (launchdarkly)" \
