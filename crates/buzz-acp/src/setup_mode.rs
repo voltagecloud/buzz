@@ -428,6 +428,16 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
             continue;
         }
 
+        if config
+            .bound_session
+            .as_ref()
+            .is_some_and(|binding| buzz_event.channel_id != binding.channel_id)
+        {
+            continue;
+        }
+        let channel_is_dm = config.bound_session.is_some()
+            && crate::is_dm_channel(buzz_event.channel_id, &channel_info).await;
+
         // Apply the same author gate as normal mode so the nudge only goes
         // to authors the real agent would have answered. Same DM hardening:
         // in DMs only owner/siblings get a nudge (fail-closed on unknown type).
@@ -454,6 +464,8 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
             &rest_client,
             &config.keys,
             &payload,
+            config.bound_session.as_ref(),
+            channel_is_dm,
         )
         .await
         {
@@ -492,6 +504,8 @@ async fn nudge_authorized_event(
     rest_client: &relay::RestClient,
     keys: &nostr::Keys,
     payload: &SetupPayload,
+    bound_session: Option<&crate::config::BoundSession>,
+    channel_is_dm: bool,
 ) -> bool {
     let (buzz_event, effective_author) = authorized_event.into_parts();
 
@@ -501,7 +515,7 @@ async fn nudge_authorized_event(
             .await
             .is_some();
 
-    if !should_nudge_for_event(buzz_event.event.id, filter_matched, nudged_event_ids) {
+    if !filter_matched || nudged_event_ids.contains(&buzz_event.event.id) {
         return false;
     }
 
@@ -510,6 +524,26 @@ async fn nudge_authorized_event(
     let edit =
         crate::edit_routing::resolve_edit(&buzz_event.event, buzz_event.channel_id, rest_client)
             .await;
+
+    // An unresolved edit would publish at top level. A bound workspace must
+    // keep silent until the original's canonical thread is known.
+    if let Some(binding) = bound_session {
+        let unresolved_edit =
+            crate::queue::edit_target_id(&buzz_event.event).is_some() && edit.is_none();
+        let scope = crate::scope::SessionScope::derive_routed(
+            crate::scope::SessionPolicy::Thread,
+            buzz_event.channel_id,
+            channel_is_dm,
+            &buzz_event.event,
+            edit.as_ref(),
+        );
+        if unresolved_edit || !binding.accepts(&scope) {
+            return false;
+        }
+    }
+    if !should_nudge_for_event(buzz_event.event.id, true, nudged_event_ids) {
+        return false;
+    }
 
     // Build and publish the setup nudge.
     if let Err(e) = publish_setup_nudge(
@@ -866,6 +900,8 @@ mod tests {
                 &rest_client,
                 &agent_keys,
                 &payload,
+                None,
+                false,
             )
             .await
         );
@@ -972,6 +1008,8 @@ mod tests {
                 &query_rest,
                 &agent_keys,
                 &payload,
+                None,
+                false,
             )
             .await
         );
@@ -1496,3 +1534,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "setup_mode_bound_tests.rs"]
+mod bound_session_tests;

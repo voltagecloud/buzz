@@ -140,14 +140,15 @@ Controls which authors' events the harness forwards to the agent. Events from di
 
 | Flag | Env Var | Default | Description |
 |------|---------|---------|-------------|
-| `--respond-to` | `BUZZ_ACP_RESPOND_TO` | `owner-only` | Author gate mode: `owner-only`, `allowlist`, `anyone`, `nobody`. |
+| `--respond-to` | `BUZZ_ACP_RESPOND_TO` | `owner-only` | Author gate mode: `owner-only`, `owner`, `allowlist`, `anyone`, `nobody`. |
 | `--respond-to-allowlist` | `BUZZ_ACP_RESPOND_TO_ALLOWLIST` | — | Comma-separated 64-char hex pubkeys (required when mode is `allowlist`). Owner is always implicitly included. |
 
 **Modes:**
 
 | Mode | Behavior |
 |------|----------|
-| `owner-only` | Forward only events from the agent's registered owner. If no owner is set, all events are dropped until the owner is resolved. |
+| `owner-only` | Forward events from the agent's registered owner and from sibling agents (agents that have the same owner). Relay-signed workflow messages that target this agent count as their recorded owner. If no owner is set, all events are dropped until the owner is resolved. |
+| `owner` | Stricter than `owner-only`: forward only events that the owner's key signed, in channels and DMs. Sibling agents and relay-signed workflow messages are dropped. If no owner is set, all events are dropped. Required by `--bound-session`. |
 | `allowlist` | Forward events from the listed pubkeys plus the owner. |
 | `anyone` | Forward all events (no author filtering). |
 | `nobody` | Drop all inbound events. Agent only acts on heartbeat prompts. |
@@ -196,6 +197,35 @@ buzz-acp --respond-to anyone
 # Broadcast-only: post on heartbeat, ignore all inbound events
 buzz-acp --respond-to nobody --heartbeat-interval 300
 ```
+
+### Bound session
+
+| Flag | Env Var | Default | Description |
+|------|---------|---------|-------------|
+| `--bound-session` | `BUZZ_ACP_BOUND_SESSION` | — | JSON object `{"channel_id": "<uuid>", "thread_root": "<64 lowercase hex event ID>"}`. Restricts the harness to one channel and one thread. |
+
+A bound harness drops every event outside the bound thread, including owner
+`!shutdown`, `!cancel`, and `!rotate` commands. It resolves an edit to its
+original message's thread before it admits the edit. Desktop `cancel_turn` and
+`switch_model` observer controls for another channel are also dropped.
+
+A bound session requires `--respond-to owner`, `--subscribe mentions`,
+`--session-policy thread`, and `--heartbeat-interval 0`. It refuses
+`--no-mention-filter` and `--initial-message`. The startup error names the
+flag that fails.
+
+### Permission mode
+
+| Flag | Env Var | Default | Description |
+|------|---------|---------|-------------|
+| `--permission-mode` | `BUZZ_ACP_PERMISSION_MODE` | `bypass-permissions` | Mode applied with `session/set_config_option` after each new session: `default`, `agent-full-access`, `auto`, `accept-edits`, `bypass-permissions`, `dont-ask`, `plan`. |
+
+If the adapter does not advertise or accept most modes, the harness falls back
+to per-tool auto-approval. `agent-full-access` is for adapters (for example,
+Codex) that run in an externally isolated container. It never falls back: the
+adapter must advertise the mode in `session/new` and confirm it as the current
+`mode` option. If it does not, the harness fails the request once with a
+visible error, and it does not retry or restart the agent.
 
 ### Host-controlled launch wrapper
 

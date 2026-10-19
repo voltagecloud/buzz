@@ -115,6 +115,11 @@ pub enum AcpError {
 
     #[error("Agent reported error (code {code}): {message}")]
     AgentError { code: i64, message: String },
+
+    /// The adapter cannot run the permission mode this harness requires.
+    /// The pipe is intact, and neither a retry nor a respawn can repair it.
+    #[error("Required permission mode unavailable: {0}")]
+    PermissionModeUnavailable(String),
 }
 
 /// Build an [`AcpError::AgentError`] from a JSON-RPC error object,
