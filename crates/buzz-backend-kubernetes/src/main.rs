@@ -109,7 +109,7 @@ fn respond(input: &str) -> Response {
             };
             match runtime.block_on(deploy_agent(&deploy)) {
                 Ok(agent_id) => Response::deployed(agent_id),
-                Err(e) => Response::error(e),
+                Err(e) => Response::failed(e),
             }
         }
     }
@@ -134,7 +134,7 @@ fn refuse_relay_mesh(raw: &serde_json::Value) -> Option<String> {
 }
 
 /// Run one deploy to a terminal outcome.
-async fn deploy_agent(request: &wire::DeployRequest) -> Result<String, String> {
+async fn deploy_agent(request: &wire::DeployRequest) -> Result<String, wire::ProviderError> {
     let cfg = config::parse(&request.provider_config)?;
     let sandbox = sandbox::Options::parse(&request.provider_config)?;
     // Identity before any cluster contact: a malformed nsec is a refusal, not
@@ -162,7 +162,7 @@ async fn deploy_agent(request: &wire::DeployRequest) -> Result<String, String> {
         return sandbox::deploy(client, &identity, &cfg, &scope, owner, env).await;
     }
     let substrate = cluster::Cluster::new(client, &cfg.namespace);
-    reconcile::deploy(&substrate, &identity, &cfg, env).await
+    Ok(reconcile::deploy(&substrate, &identity, &cfg, env).await?)
 }
 
 #[cfg(test)]

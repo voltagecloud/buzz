@@ -126,13 +126,103 @@ pub struct IdentityPreflightResponse {
 pub struct ErrorResponse {
     pub ok: bool,
     pub error: String,
+    /// Present only for a refusal a client can act on. Additive within
+    /// protocol version 1: older clients ignore it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<ErrorCode>,
+}
+
+/// Stable, machine-readable reason for a refusal (spec §Sandbox error
+/// codes). Clients branch on this, never on the `error` text. A code is never
+/// renamed or reused; new refusals get new codes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorCode {
+    /// The session is a tombstone; only an explicit recovery starts another.
+    SessionEnded,
+    /// A stop is draining; the session ends once its Pod is gone.
+    SessionEnding,
+    /// The lifecycle annotation has a value this provider does not know.
+    LifecycleUnknown,
+    /// The Sandbox is being deleted.
+    SessionDeleting,
+    /// The Sandbox is not Running and has no lifecycle record.
+    SessionNotRunning,
+    /// The live session was launched with a different configuration.
+    ConfigDiffers,
+    /// The Sandbox belongs to a different agent, owner, or thread, or lacks
+    /// the management marker or binding version.
+    IdentityMismatch,
+    /// The session's credentials were bound to a different Pod or agent.
+    CredentialsMismatch,
+    /// The session was launched against a different relay.
+    RelayDiffers,
+    /// The session is bound to its first Pod, but its credentials were not
+    /// written.
+    BindingIncomplete,
+    /// The Pod the session is bound to is gone.
+    PodLost,
+    /// The controller replaced the Pod the session is bound to.
+    PodReplaced,
+    /// The bound Pod finished, is deleting, or its process exited.
+    PodEnded,
+    /// The Pod with the Sandbox's name is not controlled by it.
+    ForeignPod,
+    /// A different session replaced this Sandbox during the deploy.
+    SessionReplaced,
+    /// The agent already has a Pod outside a Sandbox session.
+    AgentPodExists,
+}
+
+/// A failed operation: the display message and, for a refusal a client can
+/// act on, its [`ErrorCode`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderError {
+    pub code: Option<ErrorCode>,
+    pub message: String,
+}
+
+impl ProviderError {
+    pub fn refused(code: ErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code: Some(code),
+            message: message.into(),
+        }
+    }
+}
+
+impl From<String> for ProviderError {
+    fn from(message: String) -> Self {
+        Self {
+            code: None,
+            message,
+        }
+    }
+}
+
+impl From<&str> for ProviderError {
+    fn from(message: &str) -> Self {
+        message.to_string().into()
+    }
+}
+
+impl std::fmt::Display for ProviderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
 }
 
 impl Response {
     pub fn error(message: impl Into<String>) -> Self {
+        Self::failed(ProviderError::from(message.into()))
+    }
+
+    /// The in-band failure for `error`, carrying its code when it has one.
+    pub fn failed(error: ProviderError) -> Self {
         Response::Error(ErrorResponse {
             ok: false,
-            error: message.into(),
+            error: error.message,
+            code: error.code,
         })
     }
 
@@ -269,7 +359,21 @@ mod tests {
         assert_eq!(v["preflight"], "identity");
 
         let v = serde_json::to_value(Response::error("boom")).unwrap();
-        assert_eq!(v["ok"], false);
-        assert_eq!(v["error"], "boom");
+        assert_eq!(v, serde_json::json!({"ok": false, "error": "boom"}));
+    }
+
+    /// A refusal's code is a stable snake_case string next to `error`; an
+    /// uncoded failure omits the field, so protocol-v1 clients see no change.
+    #[test]
+    fn refusal_codes_serialize_snake_case() {
+        let v = serde_json::to_value(Response::failed(ProviderError::refused(
+            ErrorCode::SessionNotRunning,
+            "not running",
+        )))
+        .unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"ok": false, "error": "not running", "code": "session_not_running"})
+        );
     }
 }

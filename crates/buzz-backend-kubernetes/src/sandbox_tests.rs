@@ -1,5 +1,9 @@
 use super::*;
+use buzz_backend_kubernetes::lifecycle;
 use nostr::nips::nip19::ToBech32;
+
+#[path = "sandbox_fake.rs"]
+mod fake;
 
 #[test]
 fn custom_image_is_inside_a_real_sandbox_with_a_downward_uid() {
@@ -14,7 +18,11 @@ fn custom_image_is_inside_a_real_sandbox_with_a_downward_uid() {
         thread_root: "c".repeat(64),
     };
     let fp = pod::intent_template(&cfg, vec![]).fingerprint();
-    let mut sandbox = build(&identity, &cfg, &scope, "owner", "generation", &fp).unwrap();
+    let new = NewSession {
+        generation: "generation",
+        checkpointing: false,
+    };
+    let mut sandbox = build(&identity, &cfg, &scope, "owner", &new, &fp).unwrap();
     assert_eq!(
         sandbox.types.as_ref().unwrap().api_version,
         "agents.x-k8s.io/v1beta1"
@@ -34,11 +42,14 @@ fn custom_image_is_inside_a_real_sandbox_with_a_downward_uid() {
         crate::config::TERMINATION_GRACE_SECONDS
     );
     assert_eq!(spec["volumes"][0]["emptyDir"]["sizeLimit"], "50Gi");
-    verify(&sandbox, &identity, &scope, "owner", &fp).unwrap();
+    assert_eq!(spec["containers"][0]["terminationMessagePolicy"], "File");
+    assert_eq!(annotation(&sandbox, CHECKPOINTING), Some("disabled"));
+    verify_identity(&sandbox, &identity, &scope, "owner").unwrap();
+    verify_live(&sandbox, &fp).unwrap();
     sandbox
         .annotations_mut()
         .insert(OWNER.into(), "different-owner".into());
-    assert!(verify(&sandbox, &identity, &scope, "owner", &fp).is_err());
+    assert!(verify_identity(&sandbox, &identity, &scope, "owner").is_err());
 }
 
 #[test]
@@ -295,17 +306,20 @@ async fn live_controller_reuses_scopes_and_refuses_lost_workspaces() {
     .is_err());
     let mut other_relay = fixture_env();
     other_relay.insert("BUZZ_RELAY_URL".into(), "wss://other.invalid".into());
-    assert!(deploy(
-        client.clone(),
-        &identity,
-        &cfg,
-        &scope,
-        "owner",
-        other_relay
-    )
-    .await
-    .unwrap_err()
-    .contains("different relay"));
+    assert_eq!(
+        deploy(
+            client.clone(),
+            &identity,
+            &cfg,
+            &scope,
+            "owner",
+            other_relay
+        )
+        .await
+        .unwrap_err()
+        .code,
+        Some(ErrorCode::RelayDiffers)
+    );
     let second_scope = Options {
         channel_id: scope.channel_id.clone(),
         thread_root: "b".repeat(64),
@@ -357,7 +371,7 @@ async fn live_controller_reuses_scopes_and_refuses_lost_workspaces() {
     )
     .await
     .unwrap_err();
-    assert!(error.contains("replaced"), "{error}");
+    assert_eq!(error.code, Some(ErrorCode::PodReplaced), "{error}");
     let sandboxes = api(client, &namespace)
         .list(&ListParams::default())
         .await
@@ -367,4 +381,218 @@ async fn live_controller_reuses_scopes_and_refuses_lost_workspaces() {
         .delete(&namespace, &DeleteParams::default())
         .await
         .unwrap();
+}
+
+// ── Fake-apiserver tests: the real deploy paths over kube::Client ───────────
+
+fn fake_identity() -> naming::AgentIdentity {
+    naming::AgentIdentity::from_nsec(&nostr::Keys::generate().secret_key().to_bech32().unwrap())
+        .unwrap()
+}
+
+fn fake_cfg() -> ProviderConfig {
+    crate::config::parse(&json!({"namespace":"agents",
+        "image":format!("example.com/agent@sha256:{}", "a".repeat(64)),
+        "pod_options":{"active_deadline_seconds":3600}}))
+    .unwrap()
+}
+
+fn fake_scope() -> Options {
+    Options {
+        channel_id: "0b6c1f3e-5a7d-4c2b-9e8f-1a2b3c4d5e6f".into(),
+        thread_root: "d".repeat(64),
+    }
+}
+
+fn plain_env() -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("BUZZ_RELAY_URL".into(), "wss://fixture.invalid".into()),
+        ("BUZZ_CHECKPOINT_BUCKET".into(), "bucket".into()),
+        ("BUZZ_CHECKPOINT_PREFIX".into(), "dev/".into()),
+    ])
+}
+
+fn secret_env(state: &fake::Shared, key: &str) -> Vec<String> {
+    state
+        .lock()
+        .unwrap()
+        .secrets
+        .values()
+        .map(|secret| {
+            let secret: Secret = serde_json::from_value(secret.clone()).unwrap();
+            String::from_utf8(secret.data.unwrap()[key].0.clone()).unwrap()
+        })
+        .collect()
+}
+
+fn sandbox_json(state: &fake::Shared, name: &str) -> serde_json::Value {
+    state.lock().unwrap().sandboxes[name].clone()
+}
+
+#[tokio::test(start_paused = true)]
+async fn fresh_deploy_binds_and_reuses_its_session() {
+    let state = fake::Shared::default();
+    let (identity, cfg, scope) = (fake_identity(), fake_cfg(), fake_scope());
+    let name = deploy(
+        fake::client(&state),
+        &identity,
+        &cfg,
+        &scope,
+        "owner",
+        plain_env(),
+    )
+    .await
+    .unwrap();
+    let sandbox = sandbox_json(&state, &name);
+    let annotations = &sandbox["metadata"]["annotations"];
+    assert_eq!(annotations[CHECKPOINTING], "enabled");
+    let initial_pod_uid = annotations[INITIAL_POD].as_str().unwrap();
+    assert_eq!(
+        secret_env(&state, "BUZZ_SANDBOX_INITIAL_POD_UID"),
+        [initial_pod_uid]
+    );
+    let secret_owner_uids: Vec<_> = state
+        .lock()
+        .unwrap()
+        .secrets
+        .values()
+        .map(|secret| {
+            secret["metadata"]["ownerReferences"][0]["uid"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(secret_owner_uids, [initial_pod_uid]);
+    assert_eq!(
+        secret_env(&state, "BUZZ_MANAGED_AGENT_START_NONCE"),
+        [annotations[GENERATION].as_str().unwrap()]
+    );
+    // A repeat deploy reuses the session.
+    assert_eq!(
+        deploy(
+            fake::client(&state),
+            &identity,
+            &cfg,
+            &scope,
+            "owner",
+            plain_env()
+        )
+        .await
+        .unwrap(),
+        name
+    );
+    assert_eq!(state.lock().unwrap().secrets.len(), 1);
+}
+
+/// Every identity and liveness refusal for an existing Sandbox, through the
+/// real deploy path. A refused deploy writes nothing: no Secret, and the
+/// Sandbox (including its resourceVersion) is unchanged.
+#[tokio::test(start_paused = true)]
+async fn deploy_refuses_a_sandbox_that_is_not_a_reusable_live_session() {
+    type Mutate = fn(&mut serde_json::Value);
+    fn set(sandbox: &mut serde_json::Value, key: &str, value: &str) {
+        sandbox["metadata"]["annotations"][key] = value.into();
+    }
+    let cases: [(&str, Mutate, ErrorCode, &str); 10] = [
+        (
+            "ended",
+            |s| {
+                set(s, lifecycle::LIFECYCLE, lifecycle::LIFECYCLE_ENDED);
+                set(s, ENDED_REASON, "lost");
+            },
+            ErrorCode::SessionEnded,
+            "Sandbox session ended (lost); explicit recovery is required",
+        ),
+        (
+            "ended with an unknown reason",
+            |s| {
+                set(s, lifecycle::LIFECYCLE, lifecycle::LIFECYCLE_ENDED);
+                set(s, ENDED_REASON, "see https://evil.invalid");
+            },
+            ErrorCode::SessionEnded,
+            "Sandbox session ended; explicit recovery is required",
+        ),
+        (
+            "ending",
+            |s| set(s, lifecycle::LIFECYCLE, lifecycle::LIFECYCLE_ENDING),
+            ErrorCode::SessionEnding,
+            "Sandbox session is ending; recover it explicitly once it has ended",
+        ),
+        (
+            "unknown lifecycle",
+            |s| set(s, lifecycle::LIFECYCLE, "paused"),
+            ErrorCode::LifecycleUnknown,
+            "Sandbox has a lifecycle this provider does not know; update Buzz",
+        ),
+        (
+            "deletionTimestamp",
+            |s| s["metadata"]["deletionTimestamp"] = "2026-01-01T00:00:00Z".into(),
+            ErrorCode::SessionDeleting,
+            "Sandbox is being deleted; retry once it is gone",
+        ),
+        (
+            "Suspended without lifecycle",
+            |s| s["spec"]["operatingMode"] = "Suspended".into(),
+            ErrorCode::SessionNotRunning,
+            "Sandbox is not an active managed session; explicit recovery is required",
+        ),
+        (
+            "not Running",
+            |s| s["spec"]["operatingMode"] = "Hibernated".into(),
+            ErrorCode::SessionNotRunning,
+            "Sandbox is not an active managed session; explicit recovery is required",
+        ),
+        (
+            "binding-version mismatch",
+            |s| s["metadata"]["labels"][naming::LABEL_BINDING_VERSION] = "1".into(),
+            ErrorCode::IdentityMismatch,
+            "Sandbox belongs to a different agent, owner, or thread",
+        ),
+        (
+            "fingerprint mismatch",
+            |s| set(s, naming::ANNOTATION_CREATE_INTENT, &"0".repeat(64)),
+            ErrorCode::ConfigDiffers,
+            "Sandbox launch configuration differs; end the session, then explicit recovery is required",
+        ),
+        (
+            "owner mismatch",
+            |s| set(s, OWNER, "other-owner"),
+            ErrorCode::IdentityMismatch,
+            "Sandbox belongs to a different agent, owner, or thread",
+        ),
+    ];
+    let (identity, cfg, scope) = (fake_identity(), fake_cfg(), fake_scope());
+    let name = scope.name(&identity);
+    for (case, mutate, code, message) in cases {
+        let state = fake::Shared::default();
+        let redeploy = || {
+            deploy(
+                fake::client(&state),
+                &identity,
+                &cfg,
+                &scope,
+                "owner",
+                plain_env(),
+            )
+        };
+        redeploy().await.unwrap();
+        let before = {
+            let mut guard = state.lock().unwrap();
+            // Without its Secret, an accepted Sandbox would be written to.
+            guard.secrets.clear();
+            let sandbox = guard.sandboxes.get_mut(&name).unwrap();
+            mutate(sandbox);
+            sandbox.clone()
+        };
+        let error = redeploy().await.unwrap_err();
+        assert_eq!(
+            (error.code, error.message.as_str()),
+            (Some(code), message),
+            "{case}"
+        );
+        let guard = state.lock().unwrap();
+        assert!(guard.secrets.is_empty(), "{case}: wrote a Secret");
+        assert_eq!(guard.sandboxes[&name], before, "{case}: wrote the Sandbox");
+    }
 }

@@ -373,7 +373,10 @@ JSON object to stdout and exits. Requirements on `D` (all implemented):
   `try_wait`.
 - **Non-zero exit is failure even if stdout parsed.** Partial output from a
   crashed operation is never trusted.
-- `{"ok": false, "error": …}` is the in-band failure form.
+- `{"ok": false, "error": …}` is the in-band failure form. A refusal the
+  desktop can act on also carries `"code": "<snake_case>"` (§Sandbox error
+  codes). `D` branches on `code`, never on the `error` text; a response
+  without `code` is a generic failure.
 - **Environment**: `P` inherits `D`'s environment. On macOS a GUI launch
   means launchd's minimal PATH; providers whose substrate credentials invoke
   helper binaries (kubeconfig `exec` plugins) MUST self-augment their PATH
@@ -1444,7 +1447,8 @@ The controller owns the Pod. Concurrent mentions reuse its workspace when the ag
 The provider binds the launch Secret to the first Pod UID.
 A replaced or completed Pod requires explicit recovery; a later mention cannot silently create an empty replacement session.
 The workspace is an `emptyDir` on a `restartPolicy: Never` Pod. When the harness exits, the stop checkpoint is the only copy of its work.
-Deleting a Sandbox also removes its Pod and any workspace that remains. Recover or checkpoint authorized work before deletion.
+A session that ended is kept as a tombstone, not deleted (§Sandbox lifecycle).
+Deleting a Sandbox removes its Pod and any workspace that remains. Recover or checkpoint authorized work before deletion.
 
 Sandbox ingress accepts only its owner's signed messages for the assigned channel thread.
 The provider enables JSONL activity and disables autonomous heartbeat work.
@@ -1465,6 +1469,88 @@ If the Secret create fails after the UID is recorded, the deploy error names the
 Later deploys for that thread wait 120s for the Secret and then fail with "Sandbox credential binding is incomplete; explicit recovery is required".
 To recover, delete the Sandbox. This discards the workspace; the container never started, so it contains no agent work. Then mention the agent in the thread again.
 A later layer of this stack makes the binding resumable, so a retried deploy creates the missing Secret for the same Pod.
+
+### Sandbox lifecycle
+
+The in-cluster `buzz-sandbox-reaper` (planned; it ships in a later change)
+ends Sandbox sessions that stopped, failed, or lost their Pod. It never
+starts a session, never sets `operatingMode: Running`, and never creates a
+Sandbox. Only an explicit recovery deploy from the desktop starts a new
+session for a thread. This section is the contract the reaper implements;
+the provider already refuses to reuse a session that is `ending`, `ended`,
+or in an unknown lifecycle.
+
+The provider and the reaper share one classifier and one set of annotation
+keys (`buzz-backend-kubernetes` library, `lifecycle.rs`):
+
+| Annotation | Values |
+| --- | --- |
+| `buzz.block.xyz/lifecycle` | `ending` (a stop is draining), `ended` (a tombstone) |
+| `buzz.block.xyz/ended-reason` | `stopped`, `completed`, `replaced`, `lost`, `binding-failed`, `bind-abandoned` |
+| `buzz.block.xyz/ended-at` | RFC 3339 apiserver time at which the tombstone was written |
+| `buzz.block.xyz/checkpoint` | a verified S3 key, `missing`, or `unconfigured` |
+| `buzz.block.xyz/recovered-from` | the generation of the tombstone that a recovered session replaced |
+
+The reaper classifies each Sandbox on every pass. All timers use the
+apiserver `Date` header, not the reaper's clock.
+
+| State | Detection | Reaper action |
+| --- | --- | --- |
+| Binding | Running, no first-Pod binding, Sandbox younger than 1200s | none |
+| BindAbandoned | as Binding, Sandbox 1200s or older | tombstone `bind-abandoned` |
+| BindingIncomplete | bound to this Pod, container never started | none before the Pod is 1200s old (planned: a deploy completes the binding); then tombstone `binding-failed` |
+| Active | bound to this Pod, container running | none |
+| Draining | Pod deleting, or `lifecycle=ending` with the Pod present | none |
+| Ending | `lifecycle=ending`, Pod gone | tombstone with the recorded reason (`stopped`) |
+| Completed | bound to this Pod, container terminated | checkpoint verified or unconfigured: tombstone `completed`. Checkpoint missing: Warning Event, hold 24h, then tombstone with `checkpoint=missing` |
+| Replaced | Pod UID differs from the binding | tombstone `replaced` |
+| Lost | bound, no Pod for 60s or more | tombstone `lost` |
+| Ended | Suspended and `lifecycle=ended` | delete the Sandbox 30 days after `ended-at` (the checkpoint object expiry); before that, none |
+
+A tombstone is one JSON merge patch that carries the observed
+`metadata.resourceVersion`. It sets `spec.operatingMode: Suspended` and the
+lifecycle, reason, ended-at, and checkpoint annotations. The controller then
+deletes the Pod, and Kubernetes garbage collection deletes the Pod-owned
+launch Secret. If the patch conflicts, the reaper reads the Sandbox again
+and classifies it again; it does not retry the old decision. Deletion of an
+expired tombstone has uid and resourceVersion preconditions.
+
+The reaper touches only Sandboxes that have the management label, binding
+version `2`, and an owner annotation equal to the owner that its
+configuration lists for the namespace. It records a Warning Event for a
+managed Sandbox that it leaves alone (foreign owner, foreign Pod,
+inconsistent lifecycle).
+
+### Sandbox error codes
+
+A Sandbox deploy refusal carries a stable `code` next to its `error` text.
+The codes are additive within protocol version 1: a code is never renamed
+or reused, and a new refusal gets a new code. They are defined in
+`crates/buzz-backend-kubernetes/src/wire.rs` (`ErrorCode`).
+
+| `code` | Meaning | Desktop action |
+| --- | --- | --- |
+| `session_ended` | The Sandbox is a tombstone (`lifecycle=ended`). | explicit recovery |
+| `session_ending` | A stop is draining (`lifecycle=ending`). | wait, then explicit recovery |
+| `lifecycle_unknown` | The lifecycle annotation has a value this provider does not know. | update Buzz |
+| `session_deleting` | The Sandbox has a `deletionTimestamp`. | retry once it is gone |
+| `session_not_running` | `operatingMode` is not `Running` and there is no lifecycle record. | explicit recovery |
+| `config_differs` | The live session's launch fingerprint differs from this deploy. | end the session, then explicit recovery |
+| `identity_mismatch` | The Sandbox belongs to a different agent, owner, or thread, or lacks the management marker or binding version `2`. | none (use a new thread) |
+| `credentials_mismatch` | The launch Secret is bound to a different Pod or agent. | explicit recovery |
+| `relay_differs` | The session was launched against a different relay. | new thread or explicit recovery |
+| `binding_incomplete` | The session is bound to its first Pod, but its launch Secret was not written. | explicit recovery |
+| `pod_lost` | The Pod the session is bound to is gone. | explicit recovery |
+| `pod_replaced` | The controller replaced the bound Pod. | explicit recovery |
+| `pod_ended` | The bound Pod finished, is deleting, or its process exited during startup. | explicit recovery |
+| `foreign_pod` | The Pod with the Sandbox's name is not controlled by it. | operator cleanup |
+| `session_replaced` | Another session replaced the Sandbox during this deploy. | explicit recovery |
+| `agent_pod_exists` | The agent already has a Pod outside a Sandbox session. | stop it, then explicit recovery |
+
+The `session_ended` text names the ended reason only when it is one of the
+spellings in §Sandbox lifecycle; any other annotation value is not repeated.
+Transient and configuration failures (apiserver errors, timeouts) carry no
+`code`.
 
 ### Distribution
 
