@@ -1703,6 +1703,56 @@ Transient and configuration failures (apiserver errors, timeouts) carry no
 Sandbox of a different agent, owner, or thread, and `lifecycle_unknown` for
 a lifecycle value that `stop` must not overwrite.
 
+**Running the reaper.** One replica, Deployment strategy `Recreate`:
+
+```
+buzz-sandbox-reaper reconcile --config /etc/buzz-sandbox-reaper/config.json
+```
+
+| Flag | Environment | Default |
+| --- | --- | --- |
+| `--config <path>` | `BUZZ_SANDBOX_REAPER_CONFIG` | `/etc/buzz-sandbox-reaper/config.json` |
+| `--listen <addr>` | `BUZZ_SANDBOX_REAPER_LISTEN` | `0.0.0.0:9090` |
+| `--interval-seconds <5..3600>` | `BUZZ_SANDBOX_REAPER_INTERVAL_SECONDS` | `30` |
+| `--dry-run` | `BUZZ_SANDBOX_REAPER_DRY_RUN` | off: classify and log, write nothing |
+| `--once` | — | off: run one pass per namespace (60s deadline each), print a summary, exit, no listener |
+
+`--once` starts with empty timers, so within its single pass the 60s lost
+grace and the 24h hold of a Completed session without a checkpoint cannot
+elapse. It reports those sessions but does not tombstone them.
+
+The listener is the only one and serves `/metrics` (Prometheus), `/healthz`,
+and `/readyz`. Both probes use a window of `max(3 × interval, 120s)`.
+`/healthz` fails when a namespace loop has not started a pass within the
+window; `/readyz` fails when a namespace has had no successful pass within
+it. Passes start at least every `max(interval, 60s)`, so a slow pass never
+fails liveness. On SIGTERM the reaper stops starting passes and gives a pass
+in flight 20s to finish, inside the default 30s termination grace; then it
+exits. `RUST_LOG` sets the log filter; logs are JSON. S3 credentials come
+from the ambient AWS chain (IRSA).
+
+The configuration file is the only source of namespaces and their owners;
+the reaper has no cluster-scoped access:
+
+```json
+{"version":1,
+ "checkpoint_bucket":"<bucket>","checkpoint_region":"<region>",
+ "namespaces":{"<namespace>":{"developer":"<name>",
+   "owner_pubkey":"<64 lowercase hex>","checkpoint_prefix":"<name>/"}}}
+```
+
+Each listed namespace needs a Role for the reaper's service account:
+`sandboxes.agents.x-k8s.io` get/list/watch/patch/delete, `pods`
+get/list/watch, and `events` (core and `events.k8s.io`) create/patch. The
+reaper needs no Secret access and no `pods/exec`. Its S3 permission is
+`s3:ListBucket` on the checkpoint bucket.
+
+Limits: the reaper keeps its timers and captured receipts in memory. A
+restart restarts the 60s lost grace and the 24h hold, which only delays a
+tombstone. A receipt from a Pod that was deleted while the reaper was not
+running is lost; that session falls back to the S3 listing of its own prefix
+(see **Checkpoint evidence**).
+
 ### Distribution
 
 Its own release workflow (macOS arm64/x64 + Linux musl; the sprig workflow's
