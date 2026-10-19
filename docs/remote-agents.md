@@ -184,9 +184,13 @@ one.
 
 - **(I2) No secrets in configuration.** `provider_config` — the persisted,
   schema-rendered, UI-visible settings object — MUST NOT carry secrets.
-  Enforced by validation: flat object, scalar values only, ≤20 fields, ≤64KB,
-  and any key whose word-split contains `secret|password|token|key|credential`
-  is rejected. The match is against key *names*, so it is a lint with false
+  Enforced by validation: top-level values are scalars, except for the
+  named structured objects that a provider schema declares
+  (`pod_options`, `identity_policy`); ≤20 fields, ≤64KB; and any key whose
+  word-split contains `secret|password|token|key|credential` is rejected.
+  Structured objects hold only public, non-secret settings, and their nested
+  keys are subject to the same lint, except that a nested field named exactly
+  `key` (for example, a Kubernetes toleration key) is allowed. The match is against key *names*, so it is a lint with false
   positives: a field like `ssh_key_path` holds a path, not a credential,
   and is refused anyway — a provider author hitting this MUST rename the
   field (e.g. `identity_file`), not weaken the validator; the rule's job is
@@ -1395,9 +1399,31 @@ removable with `kubectl delete`.
 ### `provider_config` v1 fields
 
 `context`, `namespace`, `image`, `cpu_request`, `memory_request`,
-`cpu_limit`, `memory_limit`, `inactivity_seconds`, `service_account` —
-9 of the 20-field validation cap. Node selectors, tolerations, and PVCs are
-deliberately baked out of v1 to preserve budget.
+`cpu_limit`, `memory_limit`, `inactivity_seconds`, `service_account`.
+The optional `pod_options` object adds `node_selector`, `tolerations`,
+`workspace_size_limit`, `ephemeral_storage_request`, `ephemeral_storage_limit`,
+`active_deadline_seconds`, and `setup_pending`.
+Configured options participate in the create-intent fingerprint; omitted options preserve existing behavior.
+The provider rejects unknown options, nonpositive deadlines, and storage values that are not non-negative Kubernetes quantities.
+It also rejects a zero `workspace_size_limit` or `ephemeral_storage_limit`.
+Each toleration accepts only `key`, `operator` (`Exists` or `Equal`), `value`, `effect` (`NoSchedule`, `PreferNoSchedule`, or `NoExecute`), and `tolerationSeconds`.
+Kubernetes validates the remaining scheduling rules, including a storage request that is larger than its limit.
+The absolute deadline includes startup and active work, independently of the harness inactivity timer.
+
+`setup_pending=true` injects `BUZZ_SETUP_POD_UID` from the downward API `metadata.uid`, overriding Secret environment values.
+The image uses this binding to complete owner setup before starting the harness.
+Provider success still reports Pod startup; account readiness requires a runtime response.
+
+The optional `identity_policy` contains approved `agent_pubkey` and `owner_pubkey` values.
+Before cluster access, the provider checks the derived agent key, launch owner, owner attestation, and attestation time conditions.
+It rejects using the owner's key as the agent key. This admission check does not change Pod create intent.
+`--check-identity` performs the same check on a deploy request from stdin without cluster access.
+On success it returns `{"ok": true, "agent_id": "<public Pod name>", "preflight": "identity"}`; on failure it returns a sanitized refusal.
+Older providers ignore command-line arguments and treat the request as a real deploy.
+Launchers must confirm that the `info` schema includes `identity_policy` before they invoke `--check-identity`.
+Launchers must also treat a success response without `"preflight": "identity"` as a failure, because that response comes from a real deploy.
+
+Launchers must check the `info` schema for required options before credential handoff, since older providers ignore unknown fields.
 
 ### Distribution
 

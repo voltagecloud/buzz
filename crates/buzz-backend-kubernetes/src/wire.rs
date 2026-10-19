@@ -92,6 +92,7 @@ pub struct LaunchBlock {
 pub enum Response {
     Info(InfoResponse),
     Deploy(DeployResponse),
+    IdentityPreflight(IdentityPreflightResponse),
     Error(ErrorResponse),
 }
 
@@ -109,6 +110,16 @@ pub struct InfoResponse {
 pub struct DeployResponse {
     pub ok: bool,
     pub agent_id: String,
+}
+
+/// `--check-identity` success. `preflight` distinguishes it from a deploy
+/// response, so a caller can fail closed when an older provider ignored the
+/// flag and deployed.
+#[derive(Debug, Serialize)]
+pub struct IdentityPreflightResponse {
+    pub ok: bool,
+    pub agent_id: String,
+    pub preflight: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -143,6 +154,14 @@ impl Response {
         Response::Deploy(DeployResponse {
             ok: true,
             agent_id: agent_id.into(),
+        })
+    }
+
+    pub fn identity_checked(agent_id: impl Into<String>) -> Self {
+        Response::IdentityPreflight(IdentityPreflightResponse {
+            ok: true,
+            agent_id: agent_id.into(),
+            preflight: "identity",
         })
     }
 }
@@ -242,6 +261,12 @@ mod tests {
         assert_eq!(v["ok"], true);
         assert_eq!(v["agent_id"], "buzz-agent-abc");
         assert!(v.get("Deploy").is_none());
+        assert!(v.get("preflight").is_none());
+
+        let v = serde_json::to_value(Response::identity_checked("buzz-agent-abc")).unwrap();
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["agent_id"], "buzz-agent-abc");
+        assert_eq!(v["preflight"], "identity");
 
         let v = serde_json::to_value(Response::error("boom")).unwrap();
         assert_eq!(v["ok"], false);

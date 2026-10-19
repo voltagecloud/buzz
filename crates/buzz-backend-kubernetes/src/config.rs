@@ -1,12 +1,16 @@
 //! `provider_config` parsing and the `info` config schema
 //! (spec §`provider_config` v1 fields, `docs/remote-agents.md:1384-1389`).
 //!
-//! Nine fields, all optional except `image` (required at parse time; the
-//! schema offers the published sprig image as a prefill default — §Image).
+//! Nine scalar fields and optional structured Pod controls. `image` is required
+//! at parse time (the schema offers the published sprig image as a prefill
+//! default — §Image).
 //! No credential field exists, by I2: cluster auth comes from ambient
 //! kubeconfig resolution and nothing else (`:196-198`).
 
 use crate::image::{self, ImageRef};
+use k8s_openapi::api::core::v1::Toleration;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Resource requests and limits (§Pod shape: 1cpu/2Gi → 2cpu/4Gi, all four
 /// configurable — `cargo build` in an agent workspace makes 500m/1Gi
@@ -61,7 +65,99 @@ pub const TERMINATION_GRACE_SECONDS: i64 = 60;
 /// the combination rather than shipping against an undefended convention.
 pub const RESTART_POLICY: &str = "Never";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Optional placement and resource bounds for a bare Pod. Defaults preserve
+/// the original Pod shape; configured fields participate in create intent.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PodOptions {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    /// Exact node labels required for scheduling.
+    pub node_selector: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Explicit taints this workload may tolerate.
+    pub tolerations: Vec<TolerationSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Optional emptyDir size limit, in Kubernetes quantity syntax.
+    pub workspace_size_limit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Scheduler reservation for writable storage and container logs.
+    pub ephemeral_storage_request: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Eviction bound for aggregate container ephemeral storage.
+    pub ephemeral_storage_limit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Positive absolute Pod lifetime, including startup.
+    pub active_deadline_seconds: Option<i64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    /// Expose the server-assigned Pod UID to a bounded owner setup gate.
+    pub setup_pending: bool,
+}
+
+impl PodOptions {
+    /// Preserve original intent serialization when no options are set.
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+/// A Pod toleration with Kubernetes field names. k8s-openapi's `Toleration`
+/// ignores unknown keys, so a misspelled `effect` would tolerate every effect
+/// and a misspelled `tolerationSeconds` would make a NoExecute toleration
+/// unbounded. This type refuses both before the Pod is built.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TolerationSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator: Option<TolerationOperator>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect: Option<TaintEffect>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toleration_seconds: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TolerationOperator {
+    Exists,
+    Equal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TaintEffect {
+    NoSchedule,
+    PreferNoSchedule,
+    NoExecute,
+}
+
+impl From<&TolerationSpec> for Toleration {
+    fn from(spec: &TolerationSpec) -> Self {
+        Self {
+            key: spec.key.clone(),
+            operator: spec.operator.map(|operator| {
+                match operator {
+                    TolerationOperator::Exists => "Exists",
+                    TolerationOperator::Equal => "Equal",
+                }
+                .to_string()
+            }),
+            value: spec.value.clone(),
+            effect: spec.effect.map(|effect| {
+                match effect {
+                    TaintEffect::NoSchedule => "NoSchedule",
+                    TaintEffect::PreferNoSchedule => "PreferNoSchedule",
+                    TaintEffect::NoExecute => "NoExecute",
+                }
+                .to_string()
+            }),
+            toleration_seconds: spec.toleration_seconds,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct ProviderConfig {
     /// kubeconfig context; `None` uses the current context.
     pub context: Option<String>,
@@ -71,6 +167,8 @@ pub struct ProviderConfig {
     /// `None` when `inactivity_seconds` was 0 — refused in v1, see [`parse`].
     pub inactivity_seconds: Option<u64>,
     pub service_account: Option<String>,
+    /// Optional Pod placement, storage, and lifetime controls.
+    pub pod_options: PodOptions,
 }
 
 /// Read an optional non-empty string field. Rejects non-string scalars rather
@@ -165,6 +263,49 @@ pub fn parse(cfg: &serde_json::Value) -> Result<ProviderConfig, String> {
         Some(n) => Some(n),
     };
 
+    let pod_options: PodOptions = match cfg.get("pod_options") {
+        None => PodOptions::default(),
+        Some(value) => serde_json::from_value(value.clone())
+            .map_err(|e| format!("provider_config.pod_options: {e}"))?,
+    };
+    if pod_options.active_deadline_seconds.is_some_and(|n| n <= 0) {
+        return Err("provider_config.pod_options.active_deadline_seconds must be positive".into());
+    }
+    for (field, value) in [
+        ("workspace_size_limit", &pod_options.workspace_size_limit),
+        (
+            "ephemeral_storage_request",
+            &pod_options.ephemeral_storage_request,
+        ),
+        (
+            "ephemeral_storage_limit",
+            &pod_options.ephemeral_storage_limit,
+        ),
+    ] {
+        if value
+            .as_deref()
+            .is_some_and(|value| !valid_storage_quantity(value))
+        {
+            return Err(format!(
+                "provider_config.pod_options.{field} must be a non-negative Kubernetes quantity"
+            ));
+        }
+    }
+    // A zero storage limit evicts the Pod as soon as it writes anything.
+    for (field, value) in [
+        ("workspace_size_limit", &pod_options.workspace_size_limit),
+        (
+            "ephemeral_storage_limit",
+            &pod_options.ephemeral_storage_limit,
+        ),
+    ] {
+        if value.as_deref().is_some_and(zero_quantity) {
+            return Err(format!(
+                "provider_config.pod_options.{field} must be greater than zero"
+            ));
+        }
+    }
+
     Ok(ProviderConfig {
         context: optional_string(cfg, "context")?,
         namespace,
@@ -172,6 +313,7 @@ pub fn parse(cfg: &serde_json::Value) -> Result<ProviderConfig, String> {
         resources,
         inactivity_seconds,
         service_account: optional_string(cfg, "service_account")?,
+        pod_options,
     })
 }
 
@@ -232,14 +374,94 @@ pub fn config_schema() -> serde_json::Value {
                 "description": "The agent exits after this long with no work, and can be started again at any time.",
                 "default": DEFAULT_INACTIVITY_SECONDS
             },
+            "pod_options": {
+                "type": "object",
+                "title": "Pod placement and bounds",
+                "description": "Optional structured provider configuration; omit to preserve the original Pod shape.",
+                "additionalProperties": false,
+                "properties": {
+                    "node_selector": {"type": "object", "additionalProperties": {"type": "string"}},
+                    "tolerations": {"type": "array", "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "key": {"type": "string"},
+                            "operator": {"type": "string", "enum": ["Exists", "Equal"]},
+                            "value": {"type": "string"},
+                            "effect": {"type": "string", "enum": ["NoSchedule", "PreferNoSchedule", "NoExecute"]},
+                            "tolerationSeconds": {"type": "integer"}
+                        }
+                    }},
+                    "workspace_size_limit": {"type": "string", "minLength": 1},
+                    "ephemeral_storage_request": {"type": "string", "minLength": 1},
+                    "ephemeral_storage_limit": {"type": "string", "minLength": 1},
+                    "active_deadline_seconds": {"type": "integer", "minimum": 1},
+                    "setup_pending": {"type": "boolean", "default": false}
+                }
+            },
             "service_account": {
                 "type": "string",
                 "title": "Service account",
                 "description": "Scheduling/RBAC identity only. No API token is mounted."
+            },
+            "identity_policy": {
+                "type": "object",
+                "description": "Optional approved agent and owner public keys, cryptographically checked before cluster access. Also enables local --check-identity preflight.",
+                "additionalProperties": false,
+                "required": ["agent_pubkey", "owner_pubkey"],
+                "properties": {
+                    "agent_pubkey": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                    "owner_pubkey": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+                }
             }
         },
         "required": ["namespace", "image"]
     })
+}
+
+// Quantity is only a serialized string in k8s-openapi. Check Kubernetes' numeric
+// grammar and suffixes before creating resources; storage amounts cannot be negative.
+fn valid_storage_quantity(value: &str) -> bool {
+    let value = value.strip_prefix('+').unwrap_or(value);
+    let end = value
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(value.len());
+    let (number, suffix) = value.split_at(end);
+    if !number.bytes().any(|b| b.is_ascii_digit())
+        || number.bytes().filter(|b| *b == b'.').count() > 1
+    {
+        return false;
+    }
+    matches!(
+        suffix,
+        "" | "n"
+            | "u"
+            | "m"
+            | "k"
+            | "M"
+            | "G"
+            | "T"
+            | "P"
+            | "E"
+            | "Ki"
+            | "Mi"
+            | "Gi"
+            | "Ti"
+            | "Pi"
+            | "Ei"
+    ) || suffix
+        .strip_prefix(['e', 'E'])
+        .is_some_and(|exponent| exponent.parse::<i64>().is_ok())
+}
+
+/// Whether a quantity already accepted by [`valid_storage_quantity`] is zero.
+/// The suffix only scales the number, so the digits alone decide.
+fn zero_quantity(value: &str) -> bool {
+    value
+        .trim_start_matches('+')
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .all(|c| c == '0' || c == '.')
 }
 
 #[cfg(test)]
@@ -252,6 +474,134 @@ mod tests {
 
     fn minimal() -> serde_json::Value {
         serde_json::json!({"namespace": "buzz-agents-abc123", "image": digest_ref()})
+    }
+
+    #[test]
+    fn storage_quantities_are_validated_before_deployment() {
+        for field in [
+            "workspace_size_limit",
+            "ephemeral_storage_request",
+            "ephemeral_storage_limit",
+        ] {
+            for value in [
+                "50Gi", "1.5Gi", ".5G", "1.", "+10M", "1e-3", "1E+6", "1m", "1n", "1u", "1Ei",
+            ] {
+                let mut cfg = minimal();
+                cfg["pod_options"] = serde_json::json!({field: value});
+                assert!(parse(&cfg).is_ok(), "{field}={value}");
+            }
+            for value in [
+                "",
+                "abc",
+                "1GB",
+                "1K",
+                "-1Gi",
+                " 1Gi",
+                "1Gi ",
+                "1.2.3Gi",
+                "1e",
+                "1e+",
+                "1e1.2",
+                "1e9223372036854775808",
+                "NaN",
+                "+",
+                ".",
+            ] {
+                let mut cfg = minimal();
+                cfg["pod_options"] = serde_json::json!({field: value});
+                let error = parse(&cfg).unwrap_err();
+                assert!(error.contains(field), "{field}={value}: {error}");
+            }
+        }
+    }
+
+    #[test]
+    fn zero_is_a_valid_storage_request_but_not_a_limit() {
+        for value in ["0", "+0", "0Gi", "0.0", ".0", "0e3"] {
+            let mut cfg = minimal();
+            cfg["pod_options"] = serde_json::json!({"ephemeral_storage_request": value});
+            assert!(parse(&cfg).is_ok(), "request {value}");
+            for field in ["workspace_size_limit", "ephemeral_storage_limit"] {
+                let mut cfg = minimal();
+                cfg["pod_options"] = serde_json::json!({field: value});
+                let error = parse(&cfg).unwrap_err();
+                assert!(error.contains(field), "{field}={value}: {error}");
+                assert!(
+                    error.contains("greater than zero"),
+                    "{field}={value}: {error}"
+                );
+            }
+        }
+        let mut cfg = minimal();
+        cfg["pod_options"] = serde_json::json!({"ephemeral_storage_limit": "0.5"});
+        assert!(parse(&cfg).is_ok());
+    }
+
+    #[test]
+    fn tolerations_refuse_misspelled_or_unknown_values() {
+        for bad in [
+            serde_json::json!({"key": "gpu", "operator": "Exists", "efect": "NoSchedule"}),
+            serde_json::json!({"key": "gpu", "operator": "Exists", "effect": "NoExecute",
+                "tolerationSecond": 60}),
+            serde_json::json!({"key": "gpu", "operator": "Exists", "effect": "NoExecute",
+                "toleration_seconds": 60}),
+            serde_json::json!({"key": "gpu", "operater": "Exists"}),
+            serde_json::json!({"key": "gpu", "operator": "exists"}),
+            serde_json::json!({"key": "gpu", "operator": "Exists", "effect": "noexecute"}),
+        ] {
+            let mut cfg = minimal();
+            cfg["pod_options"] = serde_json::json!({"tolerations": [bad.clone()]});
+            let error = parse(&cfg).unwrap_err();
+            assert!(error.contains("pod_options"), "{bad}: {error}");
+        }
+
+        let mut cfg = minimal();
+        cfg["pod_options"] = serde_json::json!({"tolerations": [{
+            "key": "gpu", "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": 60
+        }]});
+        let parsed = parse(&cfg).unwrap();
+        let toleration = Toleration::from(&parsed.pod_options.tolerations[0]);
+        assert_eq!(toleration.effect.as_deref(), Some("NoExecute"));
+        assert_eq!(toleration.operator.as_deref(), Some("Exists"));
+        assert_eq!(toleration.toleration_seconds, Some(60));
+        assert_eq!(
+            serde_json::to_value(&parsed.pod_options).unwrap()["tolerations"],
+            cfg["pod_options"]["tolerations"]
+        );
+    }
+
+    #[test]
+    fn schema_closes_toleration_objects() {
+        let schema = config_schema();
+        let item = &schema["properties"]["pod_options"]["properties"]["tolerations"]["items"];
+        assert_eq!(item["additionalProperties"], false);
+        let mut keys: Vec<&str> = item["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["effect", "key", "operator", "tolerationSeconds", "value"]
+        );
+    }
+
+    #[test]
+    fn refuses_invalid_pod_options() {
+        for bad in [
+            serde_json::json!({"active_deadline_seconds": 0}),
+            serde_json::json!({"active_deadline_seconds": -1}),
+            serde_json::json!({"workspace_size_limit": " "}),
+            serde_json::json!({"unknown": true}),
+            serde_json::json!({"node_selector": "amd64"}),
+        ] {
+            let mut cfg = minimal();
+            cfg["pod_options"] = bad;
+            assert!(parse(&cfg).unwrap_err().contains("pod_options"));
+        }
+        assert!(parse(&minimal()).unwrap().pod_options.is_default());
     }
 
     #[test]
@@ -423,10 +773,10 @@ mod tests {
         );
     }
 
-    /// Nine fields exactly (§`provider_config` v1 fields). The cap is 20; the
+    /// Eleven fields (§`provider_config` v1 fields). The cap is 20; the
     /// count is pinned so a field added without a spec change is caught here.
     #[test]
-    fn schema_declares_exactly_the_nine_v1_fields() {
+    fn schema_declares_scalar_fields_and_optional_pod_controls() {
         let schema = config_schema();
         let props = schema["properties"].as_object().unwrap();
         let mut keys: Vec<&str> = props.keys().map(String::as_str).collect();
@@ -437,11 +787,13 @@ mod tests {
                 "context",
                 "cpu_limit",
                 "cpu_request",
+                "identity_policy",
                 "image",
                 "inactivity_seconds",
                 "memory_limit",
                 "memory_request",
                 "namespace",
+                "pod_options",
                 "service_account"
             ]
         );
