@@ -12,6 +12,12 @@ use std::collections::BTreeMap;
 /// The wire-contract version this provider speaks (spec §Info).
 pub const PROTOCOL_VERSION: u32 = 1;
 
+/// What this provider supports, advertised in `info.ops`. Additive within
+/// protocol version 1. Each entry is a request `op`, except `recover`: it
+/// advertises that `deploy` accepts `provider_config.sandbox.recovery`. A
+/// desktop gates its session end/recover actions on `recover`.
+pub const OPS: &[&str] = &["info", "deploy", "stop", "recover"];
+
 /// Request envelope. `op` discriminates; unknown ops are an in-band error.
 ///
 /// `request_id` is deliberately absent from every variant. The desktop sends
@@ -108,6 +114,7 @@ pub struct InfoResponse {
     pub name: &'static str,
     pub version: &'static str,
     pub protocol_version: u32,
+    pub ops: &'static [&'static str],
     pub description: &'static str,
     pub config_schema: serde_json::Value,
 }
@@ -267,6 +274,7 @@ impl Response {
             name: "kubernetes",
             version: env!("CARGO_PKG_VERSION"),
             protocol_version: PROTOCOL_VERSION,
+            ops: OPS,
             description: "Runs agents as pods in a Kubernetes cluster",
             config_schema: crate::config::config_schema(),
         })
@@ -335,9 +343,12 @@ mod tests {
     }
 
     #[test]
-    fn info_remains_compatible_until_the_desktop_accepts_ops() {
+    fn info_advertises_stop_and_recover() {
         let v = serde_json::to_value(Response::info()).unwrap();
-        assert!(v.get("ops").is_none());
+        assert_eq!(
+            v["ops"],
+            serde_json::json!(["info", "deploy", "stop", "recover"])
+        );
     }
 
     #[test]

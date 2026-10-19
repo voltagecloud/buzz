@@ -998,28 +998,24 @@ fn thread_sandbox_deploy_in_confined_child(home: &std::path::Path) {
         "threadRoot": "a".repeat(64),
     }))
     .unwrap();
-    // Callers' pre-lock snapshots are stale on purpose: deploy must rebuild.
-    let stale_payload = serde_json::json!({"launch": {"owner_pubkey": "stale-owner"}});
     let deploy = |pubkey: &str, scope: Option<&provider_deploy::RemoteSessionScope>| {
+        let scope = provider_deploy::InvocationScope {
+            session: scope,
+            ..Default::default()
+        };
         tauri::async_runtime::block_on(deploy_to_provider(
             app.handle(),
             &state,
             pubkey,
-            "kubernetes",
-            &serde_json::json!({}),
-            stale_payload.clone(),
+            &scope,
             None,
-            None,
-            None,
-            None,
-            scope,
         ))
     };
 
     // No provider binary exists yet, so this error proves the refusal happens
     // before binary resolution.
     let refused = deploy("thread-agent", None).unwrap_err();
-    assert!(refused.contains("Mention this agent"), "{refused}");
+    assert!(refused.message.contains("Mention this agent"), "{refused}");
 
     let capture = home.join("deploy.json");
     install_fake_provider(&home.join("bin"), "kubernetes", &capture);

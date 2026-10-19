@@ -26,9 +26,6 @@ pub(super) fn needs_reconciliation_with_policy(
 #[derive(Debug)]
 struct ProviderAccessTarget {
     pubkey: String,
-    provider_id: String,
-    config: serde_json::Value,
-    cached_binary_path: Option<String>,
     agent_json: Result<serde_json::Value, String>,
 }
 
@@ -40,13 +37,10 @@ fn collect_targets_with(
     records
         .into_iter()
         .filter(|record| needs_reconciliation_with_policy(record, owner_only_access))
-        .map(|record| match record.backend.clone() {
-            BackendKind::Provider { id, config } => ProviderAccessTarget {
+        .map(|record| match record.backend {
+            BackendKind::Provider { .. } => ProviderAccessTarget {
                 agent_json: build_payload(&record),
                 pubkey: record.pubkey,
-                provider_id: id,
-                config,
-                cached_binary_path: record.provider_binary_path,
             },
             BackendKind::Local => {
                 unreachable!("provider access reconciliation selected a local agent")
@@ -77,36 +71,15 @@ pub(crate) async fn reconcile_on_workspace_apply(
     };
 
     for target in targets {
-        let ProviderAccessTarget {
-            pubkey,
-            provider_id,
-            config,
-            cached_binary_path,
-            agent_json,
-        } = target;
-        let agent_json = match agent_json {
-            Ok(agent_json) => agent_json,
-            Err(error) => {
-                persist_failure(app, state, &pubkey, &error)?;
-                return Err(format!(
-                    "provider access reconciliation failed for agent {pubkey}: {error}"
-                ));
-            }
-        };
-        if let Err(error) = super::deploy_to_provider(
-            app,
-            state,
-            &pubkey,
-            &provider_id,
-            &config,
-            agent_json,
-            cached_binary_path.as_deref(),
-            None,
-            None,
-            None,
-            None,
-        )
-        .await
+        let ProviderAccessTarget { pubkey, agent_json } = target;
+        if let Err(error) = agent_json {
+            persist_failure(app, state, &pubkey, &error)?;
+            return Err(format!(
+                "provider access reconciliation failed for agent {pubkey}: {error}"
+            ));
+        }
+        if let Err(error) =
+            super::deploy_to_provider(app, state, &pubkey, &Default::default(), None).await
         {
             return Err(format!(
                 "provider access reconciliation failed for agent {pubkey}: {error}"
@@ -198,8 +171,6 @@ mod tests {
 
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].pubkey, "agent");
-        assert_eq!(targets[0].provider_id, "provider");
-        assert_eq!(targets[0].config["region"], "test");
         assert_eq!(
             targets[0].agent_json.as_ref().unwrap()["respond_to"],
             "owner-only"
@@ -231,7 +202,6 @@ mod tests {
 
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].pubkey, "pending-agent");
-        assert_eq!(targets[0].provider_id, "pending-provider");
         assert_eq!(
             targets[0].agent_json.as_ref().unwrap()["pubkey"],
             "pending-agent"
