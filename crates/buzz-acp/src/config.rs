@@ -212,7 +212,7 @@ impl std::fmt::Display for PermissionMode {
 /// CLI args for `buzz-acp models` — query available models from an agent.
 ///
 /// This is a standalone `Parser` (not a subcommand variant) because the
-/// `models` path must bypass `Config::from_cli()` entirely — no relay,
+/// `models` path must bypass `Config::from_args()` entirely — no relay,
 /// no private key, no harness setup.
 #[derive(Debug, Parser)]
 #[command(
@@ -541,9 +541,17 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_RELAY_OBSERVER", default_value_t = false)]
     pub relay_observer: bool,
 
+    /// Emit bounded tool and lifecycle activity as JSONL diagnostics.
+    #[arg(long, env = "BUZZ_ACP_ACTIVITY_LOG", default_value_t = false)]
+    pub activity_log: bool,
+
     /// Restrict this remote workspace to one channel and canonical parent thread.
     #[arg(long, env = "BUZZ_ACP_BOUND_SESSION", value_parser = parse_bound_session)]
     pub bound_session: Option<BoundSession>,
+
+    /// Save and verify a private workspace checkpoint after draining the agents.
+    #[arg(long, env = "BUZZ_ACP_CHECKPOINT_ON_STOP", default_value_t = false)]
+    pub checkpoint_on_stop: bool,
 
     /// Exit after this many seconds with no dispatched events and no turn in flight.
     /// 0 disables inactivity self-termination.
@@ -650,7 +658,12 @@ pub struct Config {
     pub has_generated_codex_config: bool,
     /// Whether to publish encrypted observer frames through the relay.
     pub relay_observer: bool,
+    /// Whether to emit bounded JSONL activity for platform collection.
+    pub activity_log: bool,
     pub bound_session: Option<BoundSession>,
+    /// Whether to run `buzz-agent-checkpoint save` after draining on stop and
+    /// fail shutdown when it does not produce a verified receipt.
+    pub checkpoint_on_stop: bool,
     /// Seconds without dispatched events before an idle harness exits. 0 = disabled.
     pub exit_after_inactivity_secs: u64,
     /// Whether ACP/LLM subprocess initialization is deferred until accepted work arrives.
@@ -671,7 +684,7 @@ pub struct Config {
     /// Disable the `<base>` platform-context section prepended to every prompt.
     pub no_base_prompt: bool,
     /// Resolved content from `--base-prompt-file`, read and validated in
-    /// `from_cli()`. `None` when using the compiled-in default or when
+    /// `from_args()`. `None` when using the compiled-in default or when
     /// `--no-base-prompt` is set.
     pub base_prompt_content: Option<String>,
 }
@@ -963,17 +976,13 @@ pub fn propagate_legacy_env_vars() {
 }
 
 impl Config {
-    pub fn from_cli() -> Result<Self, ConfigError> {
-        // Legacy env-var propagation is intentionally NOT done here.
-        // Call `propagate_legacy_env_vars()` before the tokio runtime starts
-        // (in the sync `fn main()` wrapper) — see Rust 2024 edition safety.
-        let args = CliArgs::parse();
-        Self::from_args(args)
-    }
-
-    /// Build a `Config` from already-parsed `CliArgs`. Separated from `from_cli()` so
-    /// tests can construct `CliArgs` via `CliArgs::try_parse_from` and exercise the full
-    /// validation path without going through process args.
+    /// Build a `Config` from already-parsed `CliArgs`. Taking parsed args lets
+    /// the binary install logging before validation and lets tests construct
+    /// `CliArgs` via `CliArgs::try_parse_from` to exercise the full validation path.
+    ///
+    /// Legacy env-var propagation is intentionally NOT done here. Call
+    /// `propagate_legacy_env_vars()` before the tokio runtime starts (in the
+    /// sync `fn main()` wrapper) — see Rust 2024 edition safety.
     pub fn from_args(mut args: CliArgs) -> Result<Self, ConfigError> {
         if args.bound_session.is_some() {
             let refusal = if args.respond_to != RespondTo::Owner {
@@ -1264,7 +1273,9 @@ impl Config {
             persona_env_vars,
             has_generated_codex_config,
             relay_observer: args.relay_observer,
+            activity_log: args.activity_log,
             bound_session: args.bound_session,
+            checkpoint_on_stop: args.checkpoint_on_stop,
             exit_after_inactivity_secs: args.exit_after_inactivity,
             lazy_pool: args.lazy_pool,
             idle_pool_sleep_secs: args.idle_pool_sleep,
@@ -1761,7 +1772,9 @@ mod tests {
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
+            activity_log: false,
             bound_session: None,
+            checkpoint_on_stop: false,
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             idle_pool_sleep_secs: 0,

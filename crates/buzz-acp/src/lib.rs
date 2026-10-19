@@ -5,6 +5,8 @@ mod git;
 mod git_runtime_tests;
 
 mod acp;
+mod activity;
+mod checkpoint;
 mod config;
 mod edit_routing;
 mod engram_fetch;
@@ -2800,17 +2802,28 @@ async fn tokio_main() -> Result<()> {
         return run_authenticate(args).await;
     }
 
-    // Stdout is the ACP transport when buzz-acp is launched as an agent command.
-    // Keep every harness diagnostic on stderr so logging can never corrupt NDJSON.
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("buzz_acp=info")),
-        )
-        .compact()
-        .init();
-
-    let config = Config::from_cli().map_err(|e| anyhow::anyhow!("configuration error: {e}"))?;
+    // Parse before installing the subscriber (its format depends on
+    // `--activity-log`), but validate after, so config warnings are not lost.
+    let args = config::CliArgs::parse();
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("buzz_acp=info"));
+    // Stdout is the ACP transport when buzz-acp is launched as an agent
+    // command; every diagnostic, including platform activity, uses stderr.
+    if args.activity_log {
+        tracing_subscriber::fmt()
+            .with_writer(std::io::stderr)
+            .with_env_filter(filter.add_directive("buzz_acp::activity=info".parse()?))
+            .json()
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_writer(std::io::stderr)
+            .with_env_filter(filter)
+            .compact()
+            .init();
+    }
+    let config =
+        Config::from_args(args).map_err(|e| anyhow::anyhow!("configuration error: {e}"))?;
 
     // ── Setup-mode early branch ───────────────────────────────────────────────
     //
@@ -2847,17 +2860,52 @@ async fn tokio_main() -> Result<()> {
         let _ = tokio::signal::ctrl_c().await;
         let _ = tx.send(());
     });
-    let (ready_tx, mut ready_rx) = tokio::sync::oneshot::channel();
-    let harness = run_harness(config, shutdown_tx, shutdown_rx.clone(), ready_tx);
-    tokio::pin!(harness);
-    let result = tokio::select! {
-        biased;
-        _ = shutdown_rx.changed() => Ok(()),
-        result = &mut harness => result,
-        _ = &mut ready_rx => harness.await,
+    let checkpoint_on_stop = config.checkpoint_on_stop;
+    let observer = if config.activity_log {
+        Some(observer::ObserverHandle::with_activity_log())
+    } else {
+        config
+            .relay_observer
+            .then(observer::ObserverHandle::in_process)
+    };
+    let (startup_finished, result) = {
+        let (ready_tx, mut ready_rx) = tokio::sync::oneshot::channel();
+        let harness = run_harness(
+            config,
+            shutdown_tx,
+            shutdown_rx.clone(),
+            ready_tx,
+            observer.clone(),
+        );
+        tokio::pin!(harness);
+        tokio::select! {
+            biased;
+            _ = shutdown_rx.changed() => (false, Ok(())),
+            result = &mut harness => (ready_rx.try_recv().is_ok(), result),
+            ready = &mut ready_rx => (ready.is_ok(), harness.await),
+        }
     };
     signal_task.abort();
-    result
+    if startup_finished {
+        return result;
+    }
+    // The startup future has now dropped, killing adapter process groups and
+    // removing temporary keys. Existing work still needs a checkpoint even
+    // when startup failed or was cancelled before the relay became available.
+    let checkpoint_result = if checkpoint_on_stop {
+        checkpoint::save(observer.as_ref()).await
+    } else {
+        Ok(())
+    };
+    if let Some(handle) = observer {
+        handle.emit(
+            "harness_stopped",
+            None,
+            &observer::ObserverContext::default(),
+            serde_json::json!({"reason": if result.is_err() { "startup_failed" } else { "startup_cancelled" }}),
+        );
+    }
+    result.and(checkpoint_result)
 }
 
 async fn run_harness(
@@ -2865,15 +2913,13 @@ async fn run_harness(
     shutdown_tx: watch::Sender<()>,
     mut shutdown_rx: watch::Receiver<()>,
     startup_ready: tokio::sync::oneshot::Sender<()>,
+    observer: Option<observer::ObserverHandle>,
 ) -> Result<()> {
     let runtime = AgentRuntime::prepare(config)?;
     let config = runtime.config();
 
     tracing::info!("buzz-acp starting: {}", config.summary());
 
-    let observer = config
-        .relay_observer
-        .then(observer::ObserverHandle::in_process);
     if let Some(handle) = &observer {
         handle.emit(
             "harness_started",
@@ -4428,6 +4474,14 @@ async fn run_harness(
         }
     }
 
+    // Offline goes first: the agent stopped accepting work at drain, and the
+    // checkpoint may take up to its full timeout.
+    let checkpoint_result = if config.checkpoint_on_stop {
+        checkpoint::save(observer.as_ref()).await
+    } else {
+        Ok(())
+    };
+
     if let Some(handle) = relay_observer_publisher_task.take() {
         handle.abort();
     }
@@ -4436,8 +4490,16 @@ async fn run_harness(
     // for the background task to finish, rather than aborting immediately (#40).
     relay.shutdown().await;
 
+    if let Some(handle) = &observer {
+        handle.emit(
+            "harness_stopped",
+            None,
+            &observer::ObserverContext::default(),
+            serde_json::json!({}),
+        );
+    }
     tracing::info!("buzz-acp stopped");
-    Ok(())
+    checkpoint_result
 }
 
 #[derive(PartialEq)]
@@ -10460,7 +10522,9 @@ mod build_mcp_servers_tests {
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
+            activity_log: false,
             bound_session: None,
+            checkpoint_on_stop: false,
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
@@ -11558,7 +11622,9 @@ mod error_outcome_emission_tests {
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
+            activity_log: false,
             bound_session: None,
+            checkpoint_on_stop: false,
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             idle_pool_sleep_secs: 0,

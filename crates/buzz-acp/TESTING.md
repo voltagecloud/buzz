@@ -21,6 +21,21 @@ Make sure `pi` and `buzz-pi-acp` are on PATH, then restart Buzz.
 cargo test -p buzz-acp
 ```
 
+The package suite also checks owner-only thread routing, ACP full-access negotiation,
+redacted JSONL activity, and checkpoint failure propagation. Activity tests use the
+real ACP client with a synthetic adapter and assert that test secrets never enter
+the platform stream. Checkpoint tests cover validated receipts, command failures,
+invalid and oversized output, missing helpers, and timeouts, and check that each
+failure records its reason. `tests/checkpoint_stop.rs` stops the real harness
+binary with a stub helper on `PATH` and a local fake relay. It checks that a
+normal stop checkpoints after adapters stop and presence is `offline`, that
+cancelling or failing startup still checkpoints once, and that a failed
+checkpoint exits non-zero. Startup failure remains the primary error even when
+the checkpoint also fails; activity reports the distinct `startup_failed` reason.
+The image repository's `buzz-agent/test-checkpoint-storage.py` also stops the
+packaged harness during startup while an adapter writes files. It checks that
+recovery preserves the final edit and rejected uploads make shutdown fail.
+
 Managed agent sessions may already export harness options. Clear them when
 running the package suite: three CLI parsing tests assert the unset defaults,
 and inherited values would change the inputs those tests exercise. Running the
