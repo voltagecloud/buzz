@@ -122,7 +122,24 @@ controllers.
 
 ### Dependency Management
 
-We use `cargo audit` in CI to scan for known vulnerabilities in dependencies.
+CI checks runtime, Mesh-LLM smoke, and desktop dependencies with separate
+`cargo-deny` policies. The desktop policy checks every feature, including the
+optional `mesh-llm` graph that release builds enable. Its ZIP advisory
+exceptions cover only `zip` below 9 under `mesh-llm`. The guard script verifies
+that the default desktop graph has no `zip` below 9, that `mesh-llm` is its
+only consumer, and that `mesh-llm` never calls the affected extract APIs. It also
+verifies that the `ringbuf` exception remains an unused dependency of the pinned
+NetEQ source.
+
+Run the same checks locally from the repository root:
+
+```bash
+cargo-deny --exclude buzz-mesh-smoke check
+cargo-deny --manifest-path crates/buzz-mesh-smoke/Cargo.toml check --config deny-mesh.toml
+python3 scripts/check-desktop-dependency-exceptions.py
+cargo-deny --manifest-path desktop/src-tauri/Cargo.toml check --config deny-desktop.toml
+```
+
 `#![deny(unsafe_code)]` is enforced across all crates — no unsafe Rust.
 
 ---

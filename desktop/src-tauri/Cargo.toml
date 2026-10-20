@@ -83,7 +83,8 @@ tauri-plugin-opener = "2"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 tauri-plugin-window-state = "2"
 tauri-plugin-dialog = "2"
-tauri-plugin-updater = "2"
+# Pin the upstream ZIP 9 security fix until the next updater release includes it.
+tauri-plugin-updater = { git = "https://github.com/tauri-apps/plugins-workspace", rev = "ba98bfadc4c868c9a7e1a226c83af528e1f11b89" }
 tauri-plugin-process = "2"
 infer = "0.19"
 hex = "0.4"
@@ -94,7 +95,8 @@ tokio-util = { version = "0.7", features = ["rt"] }
 bytes = "1"
 futures-util = "0.3"
 opus = "0.3"
-neteq = { version = "0.8", default-features = false }
+# The desktop advisory exception is audited against this exact source.
+neteq = { version = "=0.8.3", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
@@ -140,7 +142,7 @@ png = "0.18"
 # target-gated inside arboard; at runtime X11 sessions still fall back to X11.
 arboard = { version = "3", features = ["wayland-data-control"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
-zip = "8"
+zip = "9"
 flate2 = "1"
 sherpa-onnx = "1.12"
 regex = "1"
