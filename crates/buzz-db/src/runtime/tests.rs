@@ -316,24 +316,21 @@ async fn readiness_check_cancellation_balances_waiter_and_inflight_connection() 
         .connect(&database_url)
         .await
         .expect("connect cancellation readiness test pool");
-    let held = pool
+    let mut held = pool
         .acquire()
         .await
         .expect("hold sole connection before waiter cancellation");
+    let backend_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *held)
+        .await
+        .expect("identify readiness connection");
     let db = Db::from_pool(pool);
 
-    let waiting_db = db.clone();
-    let waiting = tokio::spawn(async move {
-        waiting_db
-            .readiness_check(tokio::time::Instant::now() + std::time::Duration::from_secs(5))
-            .await
-    });
-    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    waiting.abort();
-    assert!(waiting
-        .await
-        .expect_err("waiting check must be cancelled")
-        .is_cancelled());
+    let mut waiting = Box::pin(
+        db.readiness_check(tokio::time::Instant::now() + std::time::Duration::from_secs(5)),
+    );
+    assert!(futures_util::poll!(waiting.as_mut()).is_pending());
+    drop(waiting);
     drop(held);
 
     assert_eq!(
@@ -343,21 +340,52 @@ async fn readiness_check_cancellation_balances_waiter_and_inflight_connection() 
         "cancelled pool waiter must not consume the released connection"
     );
 
+    // Hold the server query until cancellation is observed. A sleep with the
+    // same duration as the recovery deadline races SQLx's asynchronous drain
+    // of the cancelled query before it returns the connection to the pool.
+    let mut blocker = sqlx::PgConnection::connect(&database_url)
+        .await
+        .expect("connect readiness query blocker");
+    sqlx::query("SELECT pg_advisory_lock(86299171)")
+        .execute(&mut blocker)
+        .await
+        .expect("block readiness query");
     let querying_db = db.clone();
     let querying = tokio::spawn(async move {
         querying_db
             .readiness_check_sql(
-                tokio::time::Instant::now() + std::time::Duration::from_secs(5),
-                "SELECT pg_sleep(5)",
+                tokio::time::Instant::now() + std::time::Duration::from_secs(30),
+                "SELECT pg_advisory_xact_lock(86299171)",
             )
             .await
     });
-    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+                 WHERE pid = $1 AND wait_event_type = 'Lock' AND wait_event = 'advisory')",
+            )
+            .bind(backend_pid)
+            .fetch_one(&mut blocker)
+            .await
+            .expect("observe blocked readiness query");
+            if blocked {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("readiness query must reach the server before cancellation");
     querying.abort();
     assert!(querying
         .await
         .expect_err("querying check must be cancelled")
         .is_cancelled());
+    sqlx::query("SELECT pg_advisory_unlock(86299171)")
+        .execute(&mut blocker)
+        .await
+        .expect("release cancelled readiness query");
 
     let recovered = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
@@ -1906,11 +1934,10 @@ async fn is_relay_member_is_bounded_routed_and_fails_closed() {
 /// directly, because `buzz_db_route_decision` is emitted by `route_read`
 /// — a direct call would prove the timing but never emit the label.
 ///
-/// Timing uses an upper bound of 2x the budget minus a margin: it must
-/// fail for two stacked budgets (~300ms) while tolerating scheduler
-/// jitter on one (~150ms). Asserting a lower bound too would pin the
-/// budget's own value, which `reader_acquire_timeout_is_the_documented_budget`
-/// already covers.
+/// Pause Tokio time only while the reader is saturated. After advancing one
+/// acquire budget, the production route must already have selected the writer.
+/// Resume time before awaiting writer I/O so PostgreSQL scheduling cannot
+/// affect the budget assertion.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires Postgres"]
 async fn routed_fallback_spends_one_acquire_budget_when_aurora_cache_is_cold() {
@@ -1975,24 +2002,17 @@ async fn routed_fallback_spends_one_acquire_budget_when_aurora_cache_is_cold() {
     // a multi-thread runtime the emit could land on a worker where no
     // local recorder is installed and the label assertions would vacuously
     // see an empty snapshot.
-    let start = std::time::Instant::now();
-    let count = {
-        let _guard = metrics::set_default_local_recorder(&recorder);
-        db.count_events_routed("one_budget_probe", &query).await
-    }
-    .expect("writer fallback still answers the read");
-    let elapsed = start.elapsed();
+    let _guard = metrics::set_default_local_recorder(&recorder);
+    tokio::time::pause();
+    let mut read = Box::pin(db.count_events_routed("one_budget_probe", &query));
+    assert!(futures_util::poll!(read.as_mut()).is_pending());
+    // Tokio timers have millisecond granularity; cross the deadline by one tick.
+    tokio::time::advance(Db::READER_ACQUIRE_TIMEOUT + Duration::from_millis(1)).await;
+    let completion = futures_util::poll!(read.as_mut());
+    let after_one_budget = snapshotter.snapshot();
+    tokio::time::resume();
 
-    assert_eq!(count, 0, "writer answered on an empty scratch database");
-    assert!(
-        elapsed < Duration::from_millis(250),
-        "routed fallback must spend ONE {}ms acquire budget, not two; took {}ms",
-        Db::READER_ACQUIRE_TIMEOUT.as_millis(),
-        elapsed.as_millis()
-    );
-
-    let reasons: std::collections::HashMap<(String, String), u64> = snapshotter
-        .snapshot()
+    let reasons: std::collections::HashMap<(String, String), u64> = after_one_budget
         .into_vec()
         .into_iter()
         .filter(|(key, ..)| key.key().name() == "buzz_db_route_decision")
@@ -2015,7 +2035,7 @@ async fn routed_fallback_spends_one_acquire_budget_when_aurora_cache_is_cold() {
     assert_eq!(
         reasons.get(&("writer".to_owned(), "reader_acquire_timeout".to_owned())),
         Some(&1),
-        "saturated reader must fall back as writer/reader_acquire_timeout; got {reasons:?}"
+        "saturated reader must choose writer/reader_acquire_timeout after one budget; got {reasons:?}"
     );
     // `reader_validation_error` would mean we misclassified a timeout as a
     // broken reader, and `pool_busy` is the retired name — neither may
@@ -2026,6 +2046,13 @@ async fn routed_fallback_spends_one_acquire_budget_when_aurora_cache_is_cold() {
             .any(|(_, reason)| reason == "reader_validation_error" || reason == "pool_busy"),
         "no reader_validation_error or retired pool_busy label may be emitted; got {reasons:?}"
     );
+
+    let count = match completion {
+        std::task::Poll::Ready(result) => result,
+        std::task::Poll::Pending => read.await,
+    }
+    .expect("writer fallback still answers the read");
+    assert_eq!(count, 0, "writer answered on an empty scratch database");
 
     drop(held);
     drop_scratch_db(&admin, db.pool.clone(), &wname).await;
@@ -3256,7 +3283,7 @@ async fn replica_floor_writer_transaction_holds_shared_lock() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn replica_floor_probe_waits_for_shared_writer_and_records_after_release() {
+async fn cluster_global_replica_floor_probe_waits_for_shared_writer_and_records_after_release() {
     let admin = PgPool::connect(&admin_url().await)
         .await
         .expect("connect admin");

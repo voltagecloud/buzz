@@ -924,16 +924,25 @@ mod postgres_tests {
         );
 
         drop(leader);
-        assert!(
-            second
-                .try_lock_usage_metrics(key)
-                .await
-                .expect("lock attempt after leader drop")
-                .is_some(),
-            "dropping the detached session releases its advisory lock"
-        );
+        // Closing the socket does not wait for PostgreSQL to process the
+        // disconnect. Observe lock release instead of racing server cleanup.
+        let successor = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(leader) = second
+                    .try_lock_usage_metrics(key)
+                    .await
+                    .expect("lock attempt after leader drop")
+                {
+                    break leader;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("dropping the detached session releases its advisory lock");
 
         // Release any remaining session state before DROP DATABASE.
+        drop(successor);
         drop(first);
         drop(second);
         drop_scratch_db(&admin, pool, &scratch_name).await;
