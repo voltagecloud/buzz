@@ -1,5 +1,6 @@
 use super::*;
 use buzz_backend_kubernetes::lifecycle;
+use buzz_backend_kubernetes::lifecycle::LIFECYCLE_ENDED;
 use nostr::nips::nip19::ToBech32;
 
 #[path = "sandbox_fake.rs"]
@@ -373,18 +374,52 @@ async fn live_controller_reuses_scopes_and_refuses_lost_workspaces() {
     .await
     .unwrap_err();
     assert_eq!(error.code, Some(ErrorCode::PodReplaced), "{error}");
-    let sandboxes = api(client, &namespace)
+    let sandboxes = api(client.clone(), &namespace)
         .list(&ListParams::default())
         .await
         .unwrap();
     assert_eq!(sandboxes.items.len(), 2, "one Sandbox per canonical thread");
+
+    // Lifecycle: stop suspends the session; once tombstoned (the reaper's job,
+    // simulated here) an ordinary deploy is refused.
+    let (_, state) = stop(
+        client.clone(),
+        &identity,
+        &namespace,
+        &second_scope,
+        "owner",
+    )
+    .await
+    .unwrap();
+    assert_eq!(state, StopState::Ending);
+    let sandboxes = api(client.clone(), &namespace);
+    let old = sandboxes.get(&second).await.unwrap();
+    assert_eq!(old.data["spec"]["operatingMode"], "Suspended");
+    let tombstone = json!({"metadata": {"annotations": {
+        (LIFECYCLE): LIFECYCLE_ENDED, (lifecycle::CHECKPOINT): lifecycle::CHECKPOINT_MISSING,
+        (lifecycle::ENDED_AT): "2026-01-01T00:00:00Z"}}});
+    sandboxes
+        .patch(&second, &PatchParams::default(), &Patch::Merge(&tombstone))
+        .await
+        .unwrap();
+    let ended = deploy(
+        client.clone(),
+        &identity,
+        &cfg,
+        &second_scope,
+        "owner",
+        fixture_env(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(ended.code, Some(ErrorCode::SessionEnded), "{ended}");
     namespaces
         .delete(&namespace, &DeleteParams::default())
         .await
         .unwrap();
 }
 
-// ── Fake-apiserver tests: the real deploy paths over kube::Client ───────────
+// ── Fake-apiserver tests: the real deploy/stop paths over kube::Client ──────
 
 fn fake_identity() -> naming::AgentIdentity {
     naming::AgentIdentity::from_nsec(&nostr::Keys::generate().secret_key().to_bech32().unwrap())
@@ -881,4 +916,143 @@ async fn a_binding_too_close_to_the_reaper_timeout_is_not_resumed() {
             assert!(state.lock().unwrap().secrets.is_empty());
         }
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn stop_suspends_with_a_cas_patch_and_retries_conflicts() {
+    let state = fake::Shared::default();
+    let (identity, cfg, scope) = (fake_identity(), fake_cfg(), fake_scope());
+    assert_eq!(
+        stop(fake::client(&state), &identity, "agents", &scope, "owner")
+            .await
+            .unwrap()
+            .1,
+        StopState::Absent
+    );
+    let name = deploy(
+        fake::client(&state),
+        &identity,
+        &cfg,
+        &scope,
+        "owner",
+        plain_env(),
+    )
+    .await
+    .unwrap();
+    assert!(stop(
+        fake::client(&state),
+        &identity,
+        "agents",
+        &scope,
+        "other-owner"
+    )
+    .await
+    .is_err());
+    state.lock().unwrap().conflict_patches = 1;
+    let (agent_id, stopped) = stop(fake::client(&state), &identity, "agents", &scope, "owner")
+        .await
+        .unwrap();
+    assert_eq!(
+        (agent_id.as_str(), stopped),
+        (name.as_str(), StopState::Ending)
+    );
+    {
+        let guard = state.lock().unwrap();
+        let patch = guard.patches.last().unwrap();
+        assert!(patch["metadata"]["resourceVersion"].is_string(), "{patch}");
+        assert_eq!(patch["spec"]["operatingMode"], "Suspended");
+        assert_eq!(
+            patch["metadata"]["annotations"][LIFECYCLE],
+            LIFECYCLE_ENDING
+        );
+        assert_eq!(patch["metadata"]["annotations"][ENDED_REASON], "stopped");
+        assert_eq!(guard.patches.len(), 2, "one conflict, one retry");
+        assert!(!guard.pods.contains_key(&name), "Suspended removes the Pod");
+    }
+    assert_eq!(
+        stop(fake::client(&state), &identity, "agents", &scope, "owner")
+            .await
+            .unwrap()
+            .1,
+        StopState::Ending
+    );
+    let ending = deploy(
+        fake::client(&state),
+        &identity,
+        &cfg,
+        &scope,
+        "owner",
+        plain_env(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(ending.code, Some(ErrorCode::SessionEnding), "{ending}");
+}
+
+/// `stop` never rewrites a tombstone, nor a lifecycle this version does not
+/// know: either would erase the record the reaper and recovery rely on.
+#[tokio::test(start_paused = true)]
+async fn stop_leaves_ended_and_unknown_lifecycles_untouched() {
+    let (identity, cfg, scope) = (fake_identity(), fake_cfg(), fake_scope());
+    let cases: [(&str, Result<StopState, ErrorCode>); 2] = [
+        (LIFECYCLE_ENDED, Ok(StopState::Ended)),
+        ("paused", Err(ErrorCode::LifecycleUnknown)),
+    ];
+    for (lifecycle, expected) in cases {
+        let state = fake::Shared::default();
+        let name = deploy(
+            fake::client(&state),
+            &identity,
+            &cfg,
+            &scope,
+            "owner",
+            plain_env(),
+        )
+        .await
+        .unwrap();
+        let before = {
+            let mut guard = state.lock().unwrap();
+            let sandbox = guard.sandboxes.get_mut(&name).unwrap();
+            sandbox["metadata"]["annotations"][LIFECYCLE] = lifecycle.into();
+            sandbox.clone()
+        };
+        let result = stop(fake::client(&state), &identity, "agents", &scope, "owner").await;
+        assert_eq!(
+            result
+                .map(|(_, stopped)| stopped)
+                .map_err(|e| e.code.unwrap()),
+            expected,
+            "{lifecycle}"
+        );
+        let guard = state.lock().unwrap();
+        assert!(guard.patches.is_empty(), "{lifecycle}: patched");
+        assert_eq!(guard.sandboxes[&name], before, "{lifecycle}");
+    }
+}
+
+/// A Sandbox that keeps changing makes `stop` back off between bounded
+/// attempts, then give up.
+#[tokio::test(start_paused = true)]
+async fn stop_backs_off_between_conflicts_and_gives_up() {
+    let state = fake::Shared::default();
+    let (identity, cfg, scope) = (fake_identity(), fake_cfg(), fake_scope());
+    deploy(
+        fake::client(&state),
+        &identity,
+        &cfg,
+        &scope,
+        "owner",
+        plain_env(),
+    )
+    .await
+    .unwrap();
+    state.lock().unwrap().conflict_patches = usize::MAX;
+    let started = tokio::time::Instant::now();
+    let error = stop(fake::client(&state), &identity, "agents", &scope, "owner")
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, None, "{error}");
+    assert_eq!(state.lock().unwrap().patches.len(), STOP_ATTEMPTS as usize);
+    let minimum: u64 = (1..u64::from(STOP_ATTEMPTS)).sum::<u64>() * STOP_BACKOFF_MS;
+    assert!(started.elapsed() >= Duration::from_millis(minimum));
 }

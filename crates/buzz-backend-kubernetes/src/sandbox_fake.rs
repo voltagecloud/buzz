@@ -35,6 +35,10 @@ pub struct State {
     pub fail_secret_creates: usize,
     /// Store the Secret, then fail this many create responses with a 500.
     pub fail_secret_create_responses: usize,
+    /// Answer this many Sandbox patches with a 409 Conflict.
+    pub conflict_patches: usize,
+    /// Every merge patch body received.
+    pub patches: Vec<Value>,
 }
 
 pub type Shared = Arc<Mutex<State>>;
@@ -53,6 +57,21 @@ fn ok(value: &Value) -> Response<Body> {
         .status(200)
         .body(Body::from(serde_json::to_vec(value).unwrap()))
         .unwrap()
+}
+
+fn merge(target: &mut Value, patch: &Value) {
+    match (target, patch) {
+        (Value::Object(target), Value::Object(patch)) => {
+            for (key, value) in patch {
+                if value.is_null() {
+                    target.remove(key);
+                } else {
+                    merge(target.entry(key.clone()).or_insert(Value::Null), value);
+                }
+            }
+        }
+        (target, patch) => *target = patch.clone(),
+    }
 }
 
 impl State {
@@ -201,6 +220,27 @@ impl State {
                 self.sandboxes.insert(name.into(), sandbox.clone());
                 self.reconcile(name);
                 ok(&sandbox)
+            }
+            (Method::PATCH, Some(name)) => {
+                let patch: Value = serde_json::from_slice(body).unwrap();
+                self.patches.push(patch.clone());
+                if self.conflict_patches > 0 {
+                    self.conflict_patches -= 1;
+                    return status(409, "Conflict");
+                }
+                let rv = self.next_rv();
+                let Some(current) = self.sandboxes.get_mut(name) else {
+                    return status(404, "NotFound");
+                };
+                let expected = &patch["metadata"]["resourceVersion"];
+                if !expected.is_null() && *expected != current["metadata"]["resourceVersion"] {
+                    return status(409, "Conflict");
+                }
+                merge(current, &patch);
+                current["metadata"]["resourceVersion"] = rv.into();
+                let updated = current.clone();
+                self.reconcile(name);
+                ok(&updated)
             }
             _ => status(405, "MethodNotAllowed"),
         }

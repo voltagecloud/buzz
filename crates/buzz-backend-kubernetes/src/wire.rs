@@ -5,6 +5,8 @@
 //! in `tests/fixtures/provider-wire/` are the arbiter shared with the desktop.
 
 use serde::{Deserialize, Serialize};
+
+use crate::sandbox::StopState;
 use std::collections::BTreeMap;
 
 /// The wire-contract version this provider speaks (spec §Info).
@@ -23,6 +25,9 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub enum Request {
     Info,
     Deploy(Box<DeployRequest>),
+    /// End an Agent Sandbox session. Same payload as `deploy`; requires an
+    /// approved `identity_policy` and `provider_config.sandbox`.
+    Stop(Box<DeployRequest>),
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,6 +98,7 @@ pub enum Response {
     Info(InfoResponse),
     Deploy(DeployResponse),
     IdentityPreflight(IdentityPreflightResponse),
+    Stop(StopResponse),
     Error(ErrorResponse),
 }
 
@@ -120,6 +126,14 @@ pub struct IdentityPreflightResponse {
     pub ok: bool,
     pub agent_id: String,
     pub preflight: &'static str,
+}
+
+/// `stop` result: `state` is `ending`, `ended`, or `absent`.
+#[derive(Debug, Serialize)]
+pub struct StopResponse {
+    pub ok: bool,
+    pub agent_id: String,
+    pub state: StopState,
 }
 
 #[derive(Debug, Serialize)]
@@ -245,6 +259,14 @@ impl Response {
         })
     }
 
+    pub fn stopped(agent_id: impl Into<String>, state: StopState) -> Self {
+        Response::Stop(StopResponse {
+            ok: true,
+            agent_id: agent_id.into(),
+            state,
+        })
+    }
+
     pub fn deployed(agent_id: impl Into<String>) -> Self {
         Response::Deploy(DeployResponse {
             ok: true,
@@ -278,6 +300,31 @@ mod tests {
     fn request_id_is_optional() {
         let r: Request = serde_json::from_str(r#"{"op":"info"}"#).unwrap();
         assert!(matches!(r, Request::Info));
+    }
+
+    #[test]
+    fn parses_stop_with_the_deploy_payload() {
+        let r: Request = serde_json::from_str(
+            r#"{"op":"stop","agent":{"relay_url":"wss://r","private_key_nsec":"nsec1x"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(r, Request::Stop(_)));
+    }
+
+    #[test]
+    fn stop_response_serializes_flat() {
+        let v = serde_json::to_value(Response::stopped("buzz-agent-abc-123", StopState::Ending))
+            .unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"ok": true, "agent_id": "buzz-agent-abc-123", "state": "ending"})
+        );
+    }
+
+    #[test]
+    fn info_remains_compatible_until_the_desktop_accepts_ops() {
+        let v = serde_json::to_value(Response::info()).unwrap();
+        assert!(v.get("ops").is_none());
     }
 
     #[test]

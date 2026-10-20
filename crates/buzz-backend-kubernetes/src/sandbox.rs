@@ -12,16 +12,17 @@ use std::time::Duration;
 use buzz_backend_kubernetes::lifecycle::{
     annotation, owned_pod, sandbox_resource, EndedReason, Lifecycle, OperatingMode,
     BIND_TIMEOUT_SECS, CHANNEL, CHECKPOINTING, CHECKPOINTING_DISABLED, CHECKPOINTING_ENABLED,
-    ENDED_REASON, GENERATION, INITIAL_POD, OWNER, RESTORE_CHECKPOINT, SANDBOX_BINDING_VERSION,
-    SESSION, THREAD,
+    ENDED_REASON, GENERATION, INITIAL_POD, LIFECYCLE, LIFECYCLE_ENDING, OWNER, RESTORE_CHECKPOINT,
+    SANDBOX_BINDING_VERSION, SESSION, THREAD,
 };
 use chrono::{DateTime, Utc};
 use k8s_openapi::api::core::v1::{EnvVar, EnvVarSource, ObjectFieldSelector, Pod, Secret};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
-use kube::api::{Api, ListParams, PostParams};
+use kube::api::{Api, ListParams, Patch, PatchParams, PostParams};
 use kube::core::DynamicObject;
 use kube::{Client, ResourceExt};
-use serde::Deserialize;
+use rand::RngExt;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
@@ -816,6 +817,86 @@ async fn wait_for_start(
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
+}
+
+/// What `stop` left behind; the `state` of its response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StopState {
+    /// Suspended and draining; the reaper writes the tombstone.
+    Ending,
+    /// Already a tombstone.
+    Ended,
+    /// No Sandbox exists for this thread.
+    Absent,
+}
+
+/// Read-and-patch attempts before `stop` gives up on a changing Sandbox.
+const STOP_ATTEMPTS: u32 = 5;
+/// Base pause after a conflicting `stop` patch; grows per attempt.
+const STOP_BACKOFF_MS: u64 = 100;
+
+/// End a (possibly wedged) session: one CAS merge patch sets
+/// `lifecycle=ending`, reason `stopped`, and `operatingMode: Suspended`. The
+/// controller then deletes the Pod (SIGTERM, so the harness still gets its
+/// checkpoint window). The normal stop remains `!shutdown`.
+pub async fn stop(
+    client: Client,
+    identity: &naming::AgentIdentity,
+    namespace: &str,
+    scope: &Options,
+    owner: &str,
+) -> Result<(String, StopState), ProviderError> {
+    let sandboxes = api(client, namespace);
+    let name = scope.name(identity);
+    for attempt in 1..=STOP_ATTEMPTS {
+        let Some(sandbox) = sandboxes
+            .get_opt(&name)
+            .await
+            .map_err(|e| format!("read Sandbox: {e}"))?
+        else {
+            return Ok((name, StopState::Absent));
+        };
+        verify_identity(&sandbox, identity, scope, owner)?;
+        match Lifecycle::of(&sandbox) {
+            Lifecycle::Ended => return Ok((name, StopState::Ended)),
+            Lifecycle::Ending => return Ok((name, StopState::Ending)),
+            // Never overwrite a record this version does not understand.
+            Lifecycle::Unrecognized => {
+                return Err(ProviderError::refused(
+                    ErrorCode::LifecycleUnknown,
+                    "Sandbox has a lifecycle this provider does not know; update Buzz",
+                ))
+            }
+            Lifecycle::Live => {}
+        }
+        let patch = json!({
+            "metadata": {
+                "resourceVersion": sandbox.metadata.resource_version,
+                "annotations": {
+                    (LIFECYCLE): LIFECYCLE_ENDING,
+                    (ENDED_REASON): EndedReason::Stopped.as_str(),
+                },
+            },
+            "spec": {"operatingMode": "Suspended"},
+        });
+        match sandboxes
+            .patch(&name, &PatchParams::default(), &Patch::Merge(&patch))
+            .await
+        {
+            Ok(_) => return Ok((name, StopState::Ending)),
+            Err(e) if reason_is(&e, "Conflict") => {
+                if attempt < STOP_ATTEMPTS {
+                    // Jittered, so concurrent writers stop colliding.
+                    let jitter = rand::rng().random_range(0..=STOP_BACKOFF_MS);
+                    let pause = STOP_BACKOFF_MS * u64::from(attempt) + jitter;
+                    tokio::time::sleep(Duration::from_millis(pause)).await;
+                }
+            }
+            Err(e) => return Err(format!("stop Sandbox: {e}").into()),
+        }
+    }
+    Err("Sandbox kept changing while stopping; retry".into())
 }
 
 #[cfg(test)]

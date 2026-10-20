@@ -98,6 +98,7 @@ fn responses_match_their_fixtures() {
         "deploy-relay-mesh-padded",
         "deploy-tag-image",
         "deploy-no-owner",
+        "stop-no-identity-policy",
     ];
     // The list must cover every response fixture on disk. A literal array is
     // never empty, so `!is_empty()` would assert nothing; what can actually go
@@ -147,6 +148,9 @@ fn info_response_carries_the_contract_fields() {
     assert_eq!(info["ok"], true);
     assert_eq!(info["protocol_version"], 1);
     assert_eq!(info["name"], "kubernetes");
+    // `ops` is not advertised yet: a desktop that predates it must keep
+    // accepting `info`. A later change adds it, additive within version 1.
+    assert!(info.get("ops").is_none());
     let schema = &info["config_schema"];
     assert_eq!(
         schema["required"],
