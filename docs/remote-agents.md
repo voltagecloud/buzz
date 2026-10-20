@@ -1442,12 +1442,15 @@ removable with `kubectl delete`.
 `cpu_limit`, `memory_limit`, `inactivity_seconds`, `service_account`.
 The optional `pod_options` object adds `node_selector`, `tolerations`,
 `workspace_size_limit`, `ephemeral_storage_request`, `ephemeral_storage_limit`,
-`active_deadline_seconds`, and `setup_pending`.
+`active_deadline_seconds`, `setup_pending`, `enable_subagents`, and `priority_class_name`.
+Staging uses separate priority classes to enforce five primary sessions independently of worker slots; configure the class from the Terraform output.
 Configured options participate in the create-intent fingerprint; omitted options preserve existing behavior.
 The provider rejects unknown options, nonpositive deadlines, and storage values that are not non-negative Kubernetes quantities.
 It also rejects a zero `workspace_size_limit` or `ephemeral_storage_limit`.
 Each toleration accepts only `key`, `operator` (`Exists` or `Equal`), `value`, `effect` (`NoSchedule`, `PreferNoSchedule`, or `NoExecute`), and `tolerationSeconds`.
 Kubernetes validates the remaining scheduling rules, including a storage request that is larger than its limit.
+`priority_class_name` is trimmed and must be a PriorityClass name (a DNS subdomain); a blank value is rejected.
+`enable_subagents` requires `service_account`, so that the token is never minted for the namespace's `default` ServiceAccount.
 The absolute deadline includes startup and active work, independently of the harness inactivity timer.
 
 `setup_pending=true` injects `BUZZ_SETUP_POD_UID` from the downward API `metadata.uid`, overriding Secret environment values.
@@ -1797,6 +1800,49 @@ restart restarts the 60s lost grace and the 24h hold, which only delays a
 tombstone. A receipt from a Pod that was deleted while the reaper was not
 running is lost; that session falls back to the S3 listing of its own prefix
 (see **Checkpoint evidence**).
+
+### Sub-agents
+
+An orchestrating agent can delegate focused work to short-lived worker
+Sandboxes, so one long task does not block the others. Workers are headless:
+each receives a focus, a repository, and a base branch, runs a model runtime
+non-interactively, pushes its own branch, records a result, and exits. They have
+no Buzz identity; the orchestrator reports their results in its thread.
+
+With `provider_config.pod_options.enable_subagents: true`, the Pod gets a
+projected token for `provider_config.service_account` at
+`/var/run/secrets/buzz-subagents` (`token`, `ca.crt`, `namespace`). The
+provider refuses `enable_subagents` without `service_account`. The token lasts 600 seconds and the kubelet rotates it.
+It is not at the default ServiceAccount path, and `automountServiceAccountToken`
+stays `false`, so tools do not pick it up implicitly.
+
+The deployment must scope that token. The reference deployment grants the
+ServiceAccount only SandboxClaim create/get/list/watch/delete in the developer
+namespace, admits only claims against its worker template with bounded
+lifetimes, and caps concurrently existing claims with a quota. Deleting or
+expiring a claim frees quota for another worker; this does not bound cumulative
+worker creation or cost. A deployment that needs that bound must also enforce
+a separate creation-rate or spending budget. A stolen rotating token can keep
+starting workers within these controls using credentials the agent already holds.
+
+`priority_class_name` is a scheduling and quota control, and the provider
+accepts any valid name. The deployment must therefore restrict the priority
+classes that each developer namespace can use. Configure the
+`ResourceQuotaAdmission` plugin with `limitedResources` that match the
+`PriorityClass` scope, so that a Pod can use a limited class only when a
+ResourceQuota in its namespace with a `scopeSelector` on `PriorityClass`
+allows it. Where the apiserver admission configuration is managed (EKS), a
+ValidatingAdmissionPolicy that allows only the namespace's classes is the
+equivalent. The ServiceAccount RBAC, the claim admission policy, and the quotas
+are in voltage-terraform, not in this repository.
+
+Worker Sandboxes are created by the Agent Sandbox claim controller and do not
+carry the `app.kubernetes.io/managed-by` or binding-version labels, so the
+sandbox reaper never touches them. Worker claims or their admission policy must
+set `shutdownPolicy: Delete` so `shutdownTime` and completion expiry delete the
+workers instead of retaining them. Set `restartPolicy: Never` when completion
+cleanup depends on worker exit. Enforce these settings for every worker claim;
+claim-count quota alone does not ensure cleanup.
 
 ### Distribution
 

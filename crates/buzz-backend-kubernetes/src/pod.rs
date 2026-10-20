@@ -12,9 +12,11 @@ use crate::naming::{
     AgentIdentity, ANNOTATION_CREATE_INTENT, ANNOTATION_IMAGE, ANNOTATION_PUBKEY_FULL,
 };
 use k8s_openapi::api::core::v1::{
-    Capabilities, Container, EmptyDirVolumeSource, EnvFromSource, EnvVar, EnvVarSource,
-    ObjectFieldSelector, Pod, PodSecurityContext, PodSpec, ResourceRequirements, SeccompProfile,
-    Secret, SecretEnvSource, SecurityContext, Volume, VolumeMount,
+    Capabilities, ConfigMapProjection, Container, DownwardAPIProjection, DownwardAPIVolumeFile,
+    EmptyDirVolumeSource, EnvFromSource, EnvVar, EnvVarSource, KeyToPath, ObjectFieldSelector, Pod,
+    PodSecurityContext, PodSpec, ProjectedVolumeSource, ResourceRequirements, SeccompProfile,
+    Secret, SecretEnvSource, SecurityContext, ServiceAccountTokenProjection, Volume, VolumeMount,
+    VolumeProjection,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -25,6 +27,61 @@ const WORKSPACE_VOLUME: &str = "workspace";
 
 /// The container name. Fixed: log and exec tooling addresses it by name.
 const CONTAINER_NAME: &str = "agent";
+
+/// Where an orchestrating agent finds its sub-agent credentials (§Sub-agents):
+/// `token`, `ca.crt`, and `namespace`. Deliberately not the default
+/// ServiceAccount path, so tools do not pick the token up implicitly.
+pub const SUBAGENT_TOKEN_PATH: &str = "/var/run/secrets/buzz-subagents";
+/// Lifetime of the projected token; the kubelet rotates it before expiry.
+pub const SUBAGENT_TOKEN_SECONDS: i64 = 600;
+const SUBAGENT_TOKEN_VOLUME: &str = "subagent-token";
+
+/// Short-lived API credentials for claiming sub-agent Sandboxes. RBAC in the
+/// developer namespace limits the token to SandboxClaims there.
+fn subagent_token_volume() -> Volume {
+    Volume {
+        name: SUBAGENT_TOKEN_VOLUME.to_string(),
+        projected: Some(ProjectedVolumeSource {
+            sources: Some(vec![
+                VolumeProjection {
+                    service_account_token: Some(ServiceAccountTokenProjection {
+                        path: "token".to_string(),
+                        expiration_seconds: Some(SUBAGENT_TOKEN_SECONDS),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                VolumeProjection {
+                    config_map: Some(ConfigMapProjection {
+                        name: "kube-root-ca.crt".to_string(),
+                        items: Some(vec![KeyToPath {
+                            key: "ca.crt".to_string(),
+                            path: "ca.crt".to_string(),
+                            ..Default::default()
+                        }]),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                VolumeProjection {
+                    downward_api: Some(DownwardAPIProjection {
+                        items: Some(vec![DownwardAPIVolumeFile {
+                            path: "namespace".to_string(),
+                            field_ref: Some(ObjectFieldSelector {
+                                field_path: "metadata.namespace".to_string(),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }]),
+                    }),
+                    ..Default::default()
+                },
+            ]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
 
 /// Build the per-attempt Secret holding the resolved environment.
 ///
@@ -144,11 +201,22 @@ pub fn build_pod(
             limits: Some(limits),
             ..Default::default()
         }),
-        volume_mounts: Some(vec![VolumeMount {
-            name: WORKSPACE_VOLUME.to_string(),
-            mount_path: WORKSPACE_PATH.to_string(),
-            ..Default::default()
-        }]),
+        volume_mounts: Some({
+            let mut mounts = vec![VolumeMount {
+                name: WORKSPACE_VOLUME.to_string(),
+                mount_path: WORKSPACE_PATH.to_string(),
+                ..Default::default()
+            }];
+            if cfg.pod_options.enable_subagents {
+                mounts.push(VolumeMount {
+                    name: SUBAGENT_TOKEN_VOLUME.to_string(),
+                    mount_path: SUBAGENT_TOKEN_PATH.to_string(),
+                    read_only: Some(true),
+                    ..Default::default()
+                });
+            }
+            mounts
+        }),
         security_context: Some(SecurityContext {
             allow_privilege_escalation: Some(false),
             capabilities: Some(Capabilities {
@@ -177,6 +245,7 @@ pub fn build_pod(
             tolerations: (!cfg.pod_options.tolerations.is_empty())
                 .then(|| cfg.pod_options.tolerations.iter().map(Into::into).collect()),
             active_deadline_seconds: cfg.pod_options.active_deadline_seconds,
+            priority_class_name: cfg.pod_options.priority_class_name.clone(),
             restart_policy: Some(RESTART_POLICY.to_string()),
             termination_grace_period_seconds: Some(TERMINATION_GRACE_SECONDS),
             // The agent runs prompted, untrusted code while holding an nsec;
@@ -197,14 +266,20 @@ pub fn build_pod(
                 }),
                 ..Default::default()
             }),
-            volumes: Some(vec![Volume {
-                name: WORKSPACE_VOLUME.to_string(),
-                empty_dir: Some(EmptyDirVolumeSource {
-                    size_limit: cfg.pod_options.workspace_size_limit.clone().map(Quantity),
+            volumes: Some({
+                let mut volumes = vec![Volume {
+                    name: WORKSPACE_VOLUME.to_string(),
+                    empty_dir: Some(EmptyDirVolumeSource {
+                        size_limit: cfg.pod_options.workspace_size_limit.clone().map(Quantity),
+                        ..Default::default()
+                    }),
                     ..Default::default()
-                }),
-                ..Default::default()
-            }]),
+                }];
+                if cfg.pod_options.enable_subagents {
+                    volumes.push(subagent_token_volume());
+                }
+                volumes
+            }),
             ..Default::default()
         }),
         ..Default::default()
@@ -377,6 +452,42 @@ mod tests {
     }
 
     #[test]
+    fn subagent_token_is_opt_in_short_lived_and_off_the_default_path() {
+        let mut cfg = provider_config();
+        let fp = intent_template(&cfg, ["A".into()]).fingerprint();
+        let plain = build_pod(&identity(), &cfg, "g", &fp);
+        assert_eq!(spec(&plain).volumes.as_ref().unwrap().len(), 1);
+        assert_eq!(
+            spec(&plain).containers[0]
+                .volume_mounts
+                .as_ref()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        cfg.pod_options.enable_subagents = true;
+        let changed = intent_template(&cfg, ["A".into()]).fingerprint();
+        let pod = build_pod(&identity(), &cfg, "g", &changed);
+        let spec = spec(&pod);
+        // Still no ambient token at the default ServiceAccount path.
+        assert_eq!(spec.automount_service_account_token, Some(false));
+        let volume = &spec.volumes.as_ref().unwrap()[1];
+        let sources = volume.projected.as_ref().unwrap().sources.as_ref().unwrap();
+        let token = sources[0].service_account_token.as_ref().unwrap();
+        assert_eq!(token.expiration_seconds, Some(SUBAGENT_TOKEN_SECONDS));
+        assert!(token.audience.is_none());
+        let mount = &spec.containers[0].volume_mounts.as_ref().unwrap()[1];
+        assert_eq!(mount.name, volume.name);
+        assert_eq!(mount.mount_path, SUBAGENT_TOKEN_PATH);
+        assert_eq!(mount.read_only, Some(true));
+        assert_ne!(
+            SUBAGENT_TOKEN_PATH,
+            "/var/run/secrets/kubernetes.io/serviceaccount"
+        );
+    }
+
+    #[test]
     fn each_optional_pod_control_changes_intent() {
         let cfg = provider_config();
         let baseline = intent_template(&cfg, ["A".into()]).fingerprint();
@@ -388,6 +499,8 @@ mod tests {
             serde_json::json!({"ephemeral_storage_limit": "4Gi"}),
             serde_json::json!({"active_deadline_seconds": 28800}),
             serde_json::json!({"setup_pending": true}),
+            serde_json::json!({"enable_subagents": true}),
+            serde_json::json!({"priority_class_name": "agent-session"}),
         ] {
             let mut changed = cfg.clone();
             changed.pod_options = serde_json::from_value(value).unwrap();
@@ -398,6 +511,23 @@ mod tests {
         }
         let original = serde_json::to_value(intent_template(&cfg, ["A".into()])).unwrap();
         assert!(original.get("pod_options").is_none());
+    }
+
+    #[test]
+    fn priority_class_reaches_the_pod_without_changing_default_intent() {
+        let mut cfg = provider_config();
+        assert!(serde_json::to_value(&cfg.pod_options)
+            .unwrap()
+            .get("priority_class_name")
+            .is_none());
+        cfg.pod_options.priority_class_name = Some("agent-session".into());
+        let identity = identity();
+        let fingerprint = intent_template(&cfg, ["A".into()]).fingerprint();
+        let pod = build_pod(&identity, &cfg, "generation", &fingerprint);
+        assert_eq!(
+            pod.spec.unwrap().priority_class_name.as_deref(),
+            Some("agent-session")
+        );
     }
 
     #[test]
