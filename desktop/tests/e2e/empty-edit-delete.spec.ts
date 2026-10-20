@@ -48,6 +48,30 @@ test.beforeEach(async ({ page }) => {
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 });
 
+for (const selection of ["Enter", "Tab", "click"]) {
+  test(`channel selection by ${selection} preserves subsequent typing`, async ({
+    page,
+  }) => {
+    const input = page.getByTestId("message-input");
+    // This prefix matches only general; "#gen" also matches agents.
+    await input.fill("#gener");
+    const option = page.getByRole("button", {
+      name: "#general stream",
+      exact: true,
+    });
+    await expect(option).toBeVisible();
+    if (selection === "click") {
+      await option.click();
+    } else {
+      await input.press(selection);
+    }
+    await expect(input).toHaveText("#general ");
+    await expect(input.locator("p")).toHaveCount(1);
+    await page.keyboard.type("hello");
+    await expect(input).toHaveText("#general hello");
+  });
+}
+
 test("clearing an edit to empty prompts to delete, then deletes on confirm", async ({
   page,
 }) => {

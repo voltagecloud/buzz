@@ -122,6 +122,22 @@ export function useChannelLinks() {
 
       if (debounceTimerRef.current !== null) {
         clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+      }
+
+      // Closing must not wait for the debounce: Enter on a cleared or
+      // replaced edit must submit it, not insert the previous suggestion.
+      if (
+        !detectPrefixQuery(
+          "#",
+          value,
+          cursorPosition,
+          knownNamesLowerRef.current,
+        )
+      ) {
+        setChannelQuery(null);
+        setChannelSelectedIndex(0);
+        return;
       }
 
       debounceTimerRef.current = setTimeout(() => {
