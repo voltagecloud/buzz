@@ -21,6 +21,10 @@ pub enum Evidence {
     Unconfigured,
     /// No receipt, or the receipt and S3 disagree.
     Missing,
+    /// No receipt was observed, but S3 lists this newest object in the
+    /// session's own prefix. Not attested by the harness, so a Completed
+    /// session still holds before recording it.
+    Listed(String),
     /// Missing, but the session was recovered from this (still present) key,
     /// which the tombstone carries forward.
     Inherited(String),
@@ -32,7 +36,7 @@ impl Evidence {
     /// Tombstone `checkpoint` annotation value; `None` while undecidable.
     fn annotation(&self) -> Option<String> {
         match self {
-            Self::Verified(key) | Self::Inherited(key) => Some(key.clone()),
+            Self::Verified(key) | Self::Listed(key) | Self::Inherited(key) => Some(key.clone()),
             Self::Unconfigured => Some(CHECKPOINT_UNCONFIGURED.into()),
             Self::Missing => Some(CHECKPOINT_MISSING.into()),
             Self::Unavailable => None,
@@ -101,7 +105,7 @@ pub fn plan(
         State::Replaced => tombstone(EndedReason::Replaced, evidence),
         State::Lost { confirmed: true } => tombstone(EndedReason::Lost, evidence),
         State::Completed { .. } => match evidence {
-            Evidence::Missing | Evidence::Inherited(_) => {
+            Evidence::Missing | Evidence::Listed(_) | Evidence::Inherited(_) => {
                 let until = hold_since + Duration::seconds(MISSING_CHECKPOINT_HOLD_SECS);
                 if now >= until {
                     tombstone(EndedReason::Completed, evidence)
@@ -233,34 +237,39 @@ mod tests {
         }
     }
 
-    /// A recovered session that saved nothing of its own still holds, then
-    /// carries its restore checkpoint forward instead of `missing`.
+    /// A recovered session that saved nothing of its own, or a session whose
+    /// key only a listing found, still holds, then records that key instead
+    /// of `missing`. A session whose Pod is gone records it at once.
     #[test]
-    fn completed_with_an_inherited_checkpoint_holds_then_carries_it_forward() {
+    fn completed_with_an_unattested_checkpoint_holds_then_carries_it_forward() {
         let completed = State::Completed {
             finished_at: Some(t(0)),
             message: None,
         };
-        let inherited = Evidence::Inherited("dev/g/x.tar.gz".into());
         let until = t(MISSING_CHECKPOINT_HOLD_SECS);
-        assert_eq!(
-            plan(&completed, &inherited, t(1), t(0)),
-            Action::Hold { until }
-        );
-        assert_eq!(
-            plan(&completed, &inherited, until, t(0)),
-            Action::Tombstone {
-                reason: EndedReason::Completed,
-                checkpoint: "dev/g/x.tar.gz".into()
-            }
-        );
-        assert_eq!(
-            plan(&State::Lost { confirmed: true }, &inherited, t(0), t(0)),
-            Action::Tombstone {
-                reason: EndedReason::Lost,
-                checkpoint: "dev/g/x.tar.gz".into()
-            }
-        );
+        for evidence in [
+            Evidence::Inherited("dev/g/x.tar.gz".into()),
+            Evidence::Listed("dev/g/x.tar.gz".into()),
+        ] {
+            assert_eq!(
+                plan(&completed, &evidence, t(1), t(0)),
+                Action::Hold { until }
+            );
+            assert_eq!(
+                plan(&completed, &evidence, until, t(0)),
+                Action::Tombstone {
+                    reason: EndedReason::Completed,
+                    checkpoint: "dev/g/x.tar.gz".into()
+                }
+            );
+            assert_eq!(
+                plan(&State::Lost { confirmed: true }, &evidence, t(0), t(0)),
+                Action::Tombstone {
+                    reason: EndedReason::Lost,
+                    checkpoint: "dev/g/x.tar.gz".into()
+                }
+            );
+        }
     }
 
     #[test]
@@ -317,6 +326,7 @@ mod tests {
         prop_oneof![
             "[a-z]{1,8}".prop_map(Evidence::Verified),
             "[a-z]{1,8}".prop_map(Evidence::Inherited),
+            "[a-z]{1,8}".prop_map(Evidence::Listed),
             Just(Evidence::Unconfigured),
             Just(Evidence::Missing),
             Just(Evidence::Unavailable),
