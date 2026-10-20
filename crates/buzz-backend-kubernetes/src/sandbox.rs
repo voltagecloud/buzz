@@ -3,22 +3,22 @@
 //!
 //! Lifecycle (`docs/remote-agents.md` §Sandbox lifecycle): a session that ended
 //! — stopped, completed, replaced, lost, or abandoned while binding — is
-//! tombstoned by `buzz-sandbox-reaper` and is never redeployed by an ordinary
-//! deploy.
+//! tombstoned by `buzz-sandbox-reaper` and is only ever resumed by an explicit
+//! `recovery` deploy, never by an ordinary one.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
 
 use buzz_backend_kubernetes::lifecycle::{
-    annotation, owned_pod, sandbox_resource, EndedReason, Lifecycle, OperatingMode,
-    BIND_TIMEOUT_SECS, CHANNEL, CHECKPOINTING, CHECKPOINTING_DISABLED, CHECKPOINTING_ENABLED,
-    ENDED_REASON, GENERATION, INITIAL_POD, LIFECYCLE, LIFECYCLE_ENDING, OWNER, RESTORE_CHECKPOINT,
-    SANDBOX_BINDING_VERSION, SESSION, THREAD,
+    annotation, is_checkpoint_key, owned_pod, sandbox_resource, EndedReason, Lifecycle,
+    OperatingMode, BIND_TIMEOUT_SECS, CHANNEL, CHECKPOINT, CHECKPOINTING, CHECKPOINTING_DISABLED,
+    CHECKPOINTING_ENABLED, ENDED_REASON, GENERATION, INITIAL_POD, LIFECYCLE, LIFECYCLE_ENDING,
+    OWNER, RECOVERED_FROM, RESTORE_CHECKPOINT, SANDBOX_BINDING_VERSION, SESSION, THREAD,
 };
 use chrono::{DateTime, Utc};
 use k8s_openapi::api::core::v1::{EnvVar, EnvVarSource, ObjectFieldSelector, Pod, Secret};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
-use kube::api::{Api, ListParams, Patch, PatchParams, PostParams};
+use kube::api::{Api, DeleteParams, ListParams, Patch, PatchParams, PostParams, Preconditions};
 use kube::core::DynamicObject;
 use kube::{Client, ResourceExt};
 use rand::RngExt;
@@ -29,6 +29,9 @@ use sha2::{Digest, Sha256};
 use crate::wire::{ErrorCode, ProviderError};
 use crate::{config::ProviderConfig, intent::Fingerprint, naming, pod};
 
+#[path = "sandbox_recovery.rs"]
+mod recovery_journal;
+
 /// Secret env key carrying the checkpoint a recovered session restores from.
 /// Always present (empty unless recovering) so its *key* is part of every
 /// fingerprint and a later ordinary deploy matches the recovered Sandbox.
@@ -38,12 +41,43 @@ pub const RESTORE_KEY_ENV: &str = "BUZZ_CHECKPOINT_RESTORE_KEY";
 const DEPLOY_DEADLINE_SECS: u64 = 120;
 /// Allowance for skew between this host's clock and the apiserver's.
 const CLOCK_SKEW_SECS: i64 = 60;
+/// Longest a recovery waits for the ended Sandbox and its Pod to go: one full
+/// drain grace. The binding and startup waits follow it, and the whole
+/// recovery must end inside the operation deadline the desktop enforces when it
+/// invokes the provider ([`crate::gc::OPERATION_DEADLINE_SECS`]). A Pod still
+/// draining after this is refused as `session_deleting`; a retry resumes from
+/// the recovery journal.
+const RECOVERY_DELETE_WAIT_SECS: u64 = crate::config::TERMINATION_GRACE_SECONDS as u64;
+/// Allowance for apiserver round trips outside the timed waits.
+const DEADLINE_MARGIN_SECS: u64 = 60;
+const _: () = assert!(
+    RECOVERY_DELETE_WAIT_SECS + 2 * DEPLOY_DEADLINE_SECS + DEADLINE_MARGIN_SECS
+        <= crate::gc::OPERATION_DEADLINE_SECS as u64
+);
+
+/// How an ended session is resumed. Sent only on explicit user action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RecoveryMode {
+    /// Restore the tombstone's verified checkpoint into a new session.
+    Checkpoint,
+    /// Start a new session with an empty workspace.
+    Fresh,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Recovery {
+    pub mode: RecoveryMode,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Options {
     pub channel_id: String,
     pub thread_root: String,
+    #[serde(default)]
+    pub recovery: Option<Recovery>,
 }
 
 impl Options {
@@ -58,6 +92,12 @@ impl Options {
         };
         if value == &serde_json::Value::Bool(false) {
             return Ok(None);
+        }
+        if let Some(recovery) = value.get("recovery") {
+            serde_json::from_value::<Recovery>(recovery.clone()).map_err(|_| {
+                "sandbox recovery must be {\"mode\":\"checkpoint\"} or {\"mode\":\"fresh\"}"
+                    .to_string()
+            })?;
         }
         let options: Self = serde_json::from_value(value.clone())
             .map_err(|_| "sandbox requires channel_id and canonical thread_root".to_string())?;
@@ -93,6 +133,8 @@ fn reason_is(error: &kube::Error, reason: &str) -> bool {
 struct NewSession<'a> {
     generation: &'a str,
     checkpointing: bool,
+    restore: Option<&'a str>,
+    recovered_from: Option<&'a str>,
 }
 
 fn build(
@@ -129,6 +171,12 @@ fn build(
             .into(),
         ),
     ]);
+    if let Some(key) = session.restore {
+        annotations.insert(RESTORE_CHECKPOINT.into(), key.into());
+    }
+    if let Some(previous) = session.recovered_from {
+        annotations.insert(RECOVERED_FROM.into(), previous.into());
+    }
     // The bare-Pod grace (`TERMINATION_GRACE_SECONDS`) already covers the
     // drain and the harness's 120s checkpoint; keep it so the template
     // matches the fingerprinted intent.
@@ -359,8 +407,8 @@ impl<'a> Session<'a> {
 }
 
 /// Reuses a running, identically scoped Sandbox. Ended, replaced, or lost
-/// sessions are never redeployed implicitly. Namespace creation remains
-/// Terraform's concern.
+/// sessions are never redeployed implicitly: only `scope.recovery` replaces a
+/// tombstone. Namespace creation remains Terraform's concern.
 pub async fn deploy(
     client: Client,
     identity: &naming::AgentIdentity,
@@ -378,18 +426,50 @@ pub async fn deploy(
     let checkpointing = apply_session_env(scope, &mut env)?;
     let fingerprints = Fingerprints::new(cfg, &env);
     let session = Session::new(client, &cfg.namespace, identity, scope, owner, fingerprints);
-    let existing = session
+    let mut existing = session
         .sandboxes
         .get_opt(&session.name)
         .await
         .map_err(|e| format!("read Sandbox: {e}"))?;
-    let sandbox = match existing {
-        Some(existing) => existing,
-        None => create_new(&session, cfg, checkpointing).await?,
+    if existing.is_none() {
+        if let Some(tombstone) = recovery_journal::load(&session).await? {
+            if scope.recovery.is_none() {
+                return Err(ProviderError::refused(
+                    ErrorCode::RecoveryInterrupted,
+                    "Sandbox recovery was interrupted; explicit recovery is required",
+                ));
+            }
+            existing = Some(tombstone);
+        }
+    }
+    let sandbox = match (existing, scope.recovery) {
+        (Some(tombstone), Some(recovery)) => {
+            recover(&session, cfg, tombstone, recovery, checkpointing).await?
+        }
+        (Some(existing), None) => existing,
+        (
+            None,
+            Some(Recovery {
+                mode: RecoveryMode::Checkpoint,
+            }),
+        ) => {
+            return Err(ProviderError::refused(
+                ErrorCode::NoEndedSession,
+                "no ended session exists for this thread to recover; start fresh instead",
+            ))
+        }
+        (None, _) => create_new(&session, cfg, checkpointing).await?,
     };
     verify_identity(&sandbox, identity, scope, owner)?;
     verify_live(&sandbox, &session.fingerprints)?;
-    bind(&session, cfg, sandbox, env).await
+    let previous = annotation(&sandbox, RECOVERED_FROM).map(str::to_string);
+    let result = bind(&session, cfg, sandbox, env).await;
+    if result.is_ok() {
+        if let Some(previous) = previous {
+            recovery_journal::clear(&session, &previous).await;
+        }
+    }
+    result
 }
 
 /// Opt-out for launches that knowingly run without a stop checkpoint.
@@ -483,6 +563,8 @@ async fn create_new(
     let new = NewSession {
         generation: &generation,
         checkpointing,
+        restore: None,
+        recovered_from: None,
     };
     let desired = build(
         identity,
@@ -508,6 +590,214 @@ async fn create_new(
         )
         .into()),
     }
+}
+
+/// Replace an Ended tombstone, or finish binding its journaled replacement.
+/// A live workspace is never discarded.
+async fn recover(
+    session: &Session<'_>,
+    cfg: &ProviderConfig,
+    tombstone: DynamicObject,
+    recovery: Recovery,
+    checkpointing: bool,
+) -> Result<DynamicObject, ProviderError> {
+    verify_identity(&tombstone, session.identity, session.scope, session.owner)?;
+    if Lifecycle::of(&tombstone) == Lifecycle::Live {
+        if let Some(previous) = annotation(&tombstone, RECOVERED_FROM).map(str::to_string) {
+            if let Some(recorded) = recovery_journal::load(session)
+                .await?
+                .filter(|recorded| annotation(recorded, GENERATION) == Some(&previous))
+            {
+                // Creation already succeeded. Deploy still validates the live
+                // session and binds its original Pod before clearing the journal.
+                let restore = match recovery.mode {
+                    RecoveryMode::Fresh => None,
+                    RecoveryMode::Checkpoint => annotation(&recorded, CHECKPOINT),
+                };
+                return same_recovery(tombstone, &previous, restore);
+            }
+        }
+    }
+    let refused = |code, message: &str| Err(ProviderError::refused(code, message));
+    if tombstone.metadata.deletion_timestamp.is_some() {
+        return refused(
+            ErrorCode::SessionDeleting,
+            "Sandbox is being deleted; retry once it is gone",
+        );
+    }
+    match Lifecycle::of(&tombstone) {
+        Lifecycle::Ended if OperatingMode::of(&tombstone) == OperatingMode::Suspended => {}
+        Lifecycle::Ending => {
+            return refused(
+                ErrorCode::SessionEnding,
+                "Sandbox session is still ending; recover it once it has ended",
+            )
+        }
+        Lifecycle::Unrecognized => {
+            return refused(
+                ErrorCode::LifecycleUnknown,
+                "Sandbox has a lifecycle this provider does not know; update Buzz",
+            )
+        }
+        Lifecycle::Ended | Lifecycle::Live => {
+            return refused(
+                ErrorCode::SessionActive,
+                "recovery requires an ended session; this Sandbox is still active, so end it first",
+            )
+        }
+    }
+    let previous = annotation(&tombstone, GENERATION)
+        .ok_or("ended Sandbox has no generation")?
+        .to_string();
+    let restore = match recovery.mode {
+        RecoveryMode::Fresh => None,
+        RecoveryMode::Checkpoint => Some(
+            annotation(&tombstone, CHECKPOINT)
+                .filter(|key| is_checkpoint_key(key))
+                .ok_or_else(|| {
+                    ProviderError::refused(
+                        ErrorCode::NoCheckpoint,
+                        "this session has no verified checkpoint; start fresh instead",
+                    )
+                })?
+                .to_string(),
+        ),
+    };
+    // Persist the recovery pointer before deleting its only durable source.
+    // A retry can resume even if deletion succeeds and creation never runs.
+    recovery_journal::preserve(session, &tombstone).await?;
+    let uid = tombstone.metadata.uid.clone();
+    let preconditions = Preconditions {
+        uid: uid.clone(),
+        resource_version: tombstone.metadata.resource_version.clone(),
+    };
+    match session
+        .sandboxes
+        .delete(
+            &session.name,
+            &DeleteParams {
+                preconditions: Some(preconditions),
+                ..Default::default()
+            },
+        )
+        .await
+    {
+        Ok(_) => {}
+        Err(e) if reason_is(&e, "NotFound") => {}
+        Err(e) if reason_is(&e, "Conflict") => {
+            return Err("Sandbox changed during recovery; retry".into())
+        }
+        Err(e) => return Err(format!("delete ended Sandbox: {e}").into()),
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(RECOVERY_DELETE_WAIT_SECS);
+    let still_deleting = || {
+        refused(
+            ErrorCode::SessionDeleting,
+            "the ended Sandbox is still being deleted; retry recovery",
+        )
+    };
+    loop {
+        match session
+            .sandboxes
+            .get_opt(&session.name)
+            .await
+            .map_err(|e| format!("observe ended Sandbox deletion: {e}"))?
+        {
+            Some(current) if current.metadata.uid == uid => {
+                if tokio::time::Instant::now() >= deadline {
+                    return still_deleting();
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            // A concurrent recovery of the same tombstone already won.
+            Some(current) => return same_recovery(current, &previous, restore.as_deref()),
+            None => {
+                // Background garbage collection can leave the old Pod after
+                // its Sandbox disappears. Do not race it with a new owner.
+                let child = session
+                    .pods
+                    .get_opt(&session.name)
+                    .await
+                    .map_err(|e| format!("observe ended Sandbox Pod deletion: {e}"))?;
+                match child {
+                    None => break,
+                    Some(child) if owned_pod(&child, &tombstone) => {
+                        if tokio::time::Instant::now() >= deadline {
+                            return still_deleting();
+                        }
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                    Some(_) => {
+                        return refused(
+                            ErrorCode::ForeignPod,
+                            "a foreign Pod occupies the recovered Sandbox name; the recovery journal is kept for operator cleanup",
+                        )
+                    }
+                }
+            }
+        }
+    }
+    let generation = uuid::Uuid::new_v4().simple().to_string();
+    let new = NewSession {
+        generation: &generation,
+        checkpointing,
+        restore: restore.as_deref(),
+        recovered_from: Some(&previous),
+    };
+    let desired = build(
+        session.identity,
+        cfg,
+        session.scope,
+        session.owner,
+        &new,
+        &session.fingerprints.current,
+    )?;
+    match session
+        .sandboxes
+        .create(&PostParams::default(), &desired)
+        .await
+    {
+        Ok(created) => Ok(created),
+        Err(e) if reason_is(&e, "AlreadyExists") => {
+            let current = session
+                .sandboxes
+                .get(&session.name)
+                .await
+                .map_err(|e| format!("read concurrent Sandbox: {e}"))?;
+            same_recovery(current, &previous, restore.as_deref())
+        }
+        Err(e) => Err(format!("create recovered Sandbox: {e}").into()),
+    }
+}
+
+/// A replacement created by a recovery of `previous` is reused only for the
+/// same request. Binding it for the other mode would then clear the journal:
+/// a checkpoint request would bind an empty workspace and delete the last
+/// record of its key.
+fn same_recovery(
+    replacement: DynamicObject,
+    previous: &str,
+    restore: Option<&str>,
+) -> Result<DynamicObject, ProviderError> {
+    if annotation(&replacement, RECOVERED_FROM) != Some(previous) {
+        return Err(ProviderError::refused(
+            ErrorCode::SessionReplaced,
+            "another session replaced the ended Sandbox during recovery",
+        ));
+    }
+    let underway = annotation(&replacement, RESTORE_CHECKPOINT);
+    if underway != restore {
+        let mode = if underway.is_some() {
+            "checkpoint"
+        } else {
+            "fresh"
+        };
+        return Err(ProviderError::refused(
+            ErrorCode::RecoveryModeConflict,
+            format!("a {mode} recovery of this session is already in progress; end it first"),
+        ));
+    }
+    Ok(replacement)
 }
 
 /// The reaper ends a never-started binding once its Pod is
@@ -847,6 +1137,9 @@ pub async fn stop(
     scope: &Options,
     owner: &str,
 ) -> Result<(String, StopState), ProviderError> {
+    if scope.recovery.is_some() {
+        return Err("stop does not accept a recovery mode".into());
+    }
     let sandboxes = api(client, namespace);
     let name = scope.name(identity);
     for attempt in 1..=STOP_ATTEMPTS {

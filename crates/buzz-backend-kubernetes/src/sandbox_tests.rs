@@ -6,6 +6,9 @@ use nostr::nips::nip19::ToBech32;
 #[path = "sandbox_fake.rs"]
 mod fake;
 
+#[path = "sandbox_recovery_retry_tests.rs"]
+mod recovery_retry;
+
 #[test]
 fn custom_image_is_inside_a_real_sandbox_with_a_downward_uid() {
     let identity = naming::AgentIdentity::from_nsec(
@@ -17,11 +20,14 @@ fn custom_image_is_inside_a_real_sandbox_with_a_downward_uid() {
     let scope = Options {
         channel_id: uuid::Uuid::new_v4().to_string(),
         thread_root: "c".repeat(64),
+        recovery: None,
     };
     let fps = Fingerprints::new(&cfg, &BTreeMap::new());
     let new = NewSession {
         generation: "generation",
         checkpointing: false,
+        restore: None,
+        recovered_from: None,
     };
     let mut sandbox = build(&identity, &cfg, &scope, "owner", &new, &fps.current).unwrap();
     assert_eq!(
@@ -138,6 +144,7 @@ fn session_env_requires_checkpoint_storage_unless_disabled() {
     let scope = Options {
         channel_id: uuid::Uuid::new_v4().to_string(),
         thread_root: "c".repeat(64),
+        recovery: None,
     };
     let mut env = fixture_env();
     apply_session_env(&scope, &mut env).unwrap();
@@ -241,6 +248,7 @@ async fn live_controller_reuses_scopes_and_refuses_lost_workspaces() {
     let scope = Options {
         channel_id: uuid::Uuid::new_v4().to_string(),
         thread_root: "a".repeat(64),
+        recovery: None,
     };
     let (first, concurrent) = tokio::join!(
         deploy(
@@ -325,6 +333,7 @@ async fn live_controller_reuses_scopes_and_refuses_lost_workspaces() {
     let second_scope = Options {
         channel_id: scope.channel_id.clone(),
         thread_root: "b".repeat(64),
+        recovery: None,
     };
     let second = deploy(
         client.clone(),
@@ -380,8 +389,30 @@ async fn live_controller_reuses_scopes_and_refuses_lost_workspaces() {
         .unwrap();
     assert_eq!(sandboxes.items.len(), 2, "one Sandbox per canonical thread");
 
-    // Lifecycle: stop suspends the session; once tombstoned (the reaper's job,
-    // simulated here) an ordinary deploy is refused.
+    // Lifecycle: recovery is refused on a live session; stop suspends it; once
+    // tombstoned (the reaper's job, simulated here) only explicit recovery
+    // resumes it, under a new generation.
+    let fresh = Options {
+        recovery: Some(Recovery {
+            mode: RecoveryMode::Fresh,
+        }),
+        ..Options {
+            channel_id: second_scope.channel_id.clone(),
+            thread_root: second_scope.thread_root.clone(),
+            recovery: None,
+        }
+    };
+    let refused = deploy(
+        client.clone(),
+        &identity,
+        &cfg,
+        &fresh,
+        "owner",
+        fixture_env(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(refused.code, Some(ErrorCode::SessionActive), "{refused}");
     let (_, state) = stop(
         client.clone(),
         &identity,
@@ -396,7 +427,7 @@ async fn live_controller_reuses_scopes_and_refuses_lost_workspaces() {
     let old = sandboxes.get(&second).await.unwrap();
     assert_eq!(old.data["spec"]["operatingMode"], "Suspended");
     let tombstone = json!({"metadata": {"annotations": {
-        (LIFECYCLE): LIFECYCLE_ENDED, (lifecycle::CHECKPOINT): lifecycle::CHECKPOINT_MISSING,
+        (LIFECYCLE): LIFECYCLE_ENDED, (CHECKPOINT): lifecycle::CHECKPOINT_MISSING,
         (lifecycle::ENDED_AT): "2026-01-01T00:00:00Z"}}});
     sandboxes
         .patch(&second, &PatchParams::default(), &Patch::Merge(&tombstone))
@@ -413,6 +444,50 @@ async fn live_controller_reuses_scopes_and_refuses_lost_workspaces() {
     .await
     .unwrap_err();
     assert_eq!(ended.code, Some(ErrorCode::SessionEnded), "{ended}");
+    let from_checkpoint = Options {
+        recovery: Some(Recovery {
+            mode: RecoveryMode::Checkpoint,
+        }),
+        channel_id: second_scope.channel_id.clone(),
+        thread_root: second_scope.thread_root.clone(),
+    };
+    let no_checkpoint = deploy(
+        client.clone(),
+        &identity,
+        &cfg,
+        &from_checkpoint,
+        "owner",
+        fixture_env(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        no_checkpoint.code,
+        Some(ErrorCode::NoCheckpoint),
+        "{no_checkpoint}"
+    );
+    assert_eq!(
+        deploy(
+            client.clone(),
+            &identity,
+            &cfg,
+            &fresh,
+            "owner",
+            fixture_env()
+        )
+        .await
+        .unwrap(),
+        second
+    );
+    let recovered = sandboxes.get(&second).await.unwrap();
+    assert_eq!(
+        annotation(&recovered, RECOVERED_FROM),
+        annotation(&old, GENERATION)
+    );
+    assert_ne!(
+        annotation(&recovered, GENERATION),
+        annotation(&old, GENERATION)
+    );
     namespaces
         .delete(&namespace, &DeleteParams::default())
         .await
@@ -434,9 +509,14 @@ fn fake_cfg() -> ProviderConfig {
 }
 
 fn fake_scope() -> Options {
+    fake_scope_with(None)
+}
+
+fn fake_scope_with(recovery: Option<RecoveryMode>) -> Options {
     Options {
         channel_id: "0b6c1f3e-5a7d-4c2b-9e8f-1a2b3c4d5e6f".into(),
         thread_root: "d".repeat(64),
+        recovery: recovery.map(|mode| Recovery { mode }),
     }
 }
 
@@ -463,6 +543,18 @@ fn secret_env(state: &fake::Shared, key: &str) -> Vec<String> {
 
 fn sandbox_json(state: &fake::Shared, name: &str) -> serde_json::Value {
     state.lock().unwrap().sandboxes[name].clone()
+}
+
+/// Turn the live session into an Ended tombstone, as the reaper would.
+fn tombstone(state: &fake::Shared, name: &str, checkpoint: &str) {
+    let mut guard = state.lock().unwrap();
+    let sandbox = guard.sandboxes.get_mut(name).unwrap();
+    sandbox["spec"]["operatingMode"] = "Suspended".into();
+    let annotations = &mut sandbox["metadata"]["annotations"];
+    annotations[LIFECYCLE] = LIFECYCLE_ENDED.into();
+    annotations[ENDED_REASON] = "completed".into();
+    annotations[CHECKPOINT] = checkpoint.into();
+    guard.pods.remove(name);
 }
 
 #[tokio::test(start_paused = true)]
@@ -744,6 +836,256 @@ async fn assert_secret_create_retry(stored_before_error: bool) {
     assert_eq!(secret["metadata"]["ownerReferences"][0]["uid"], pod_uid);
 }
 
+/// Deploy `scope` for `owner` against the fake apiserver.
+async fn deploy_to(
+    state: &fake::Shared,
+    identity: &naming::AgentIdentity,
+    cfg: &ProviderConfig,
+    scope: &Options,
+) -> Result<String, ProviderError> {
+    deploy(
+        fake::client(state),
+        identity,
+        cfg,
+        scope,
+        "owner",
+        plain_env(),
+    )
+    .await
+}
+
+/// A session the reaper ended with a verified checkpoint, ready to recover.
+struct Ended {
+    state: fake::Shared,
+    identity: naming::AgentIdentity,
+    cfg: ProviderConfig,
+    name: String,
+    previous: String,
+    key: String,
+}
+
+impl Ended {
+    async fn new() -> Self {
+        let state = fake::Shared::default();
+        let (identity, cfg) = (fake_identity(), fake_cfg());
+        let name = deploy_to(&state, &identity, &cfg, &fake_scope())
+            .await
+            .unwrap();
+        let previous = sandbox_json(&state, &name)["metadata"]["annotations"][GENERATION]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let key = format!("dev/{previous}/6f9619ff-8b86-d011-b42d-00cf4fc964ff.tar.gz");
+        tombstone(&state, &name, &key);
+        state.lock().unwrap().secrets.clear();
+        Self {
+            state,
+            identity,
+            cfg,
+            name,
+            previous,
+            key,
+        }
+    }
+
+    async fn deploy(&self, recovery: Option<RecoveryMode>) -> Result<String, ProviderError> {
+        deploy_to(
+            &self.state,
+            &self.identity,
+            &self.cfg,
+            &fake_scope_with(recovery),
+        )
+        .await
+    }
+
+    fn journal(&self) -> Option<serde_json::Value> {
+        let name = format!("{}-recovery", self.name);
+        self.state.lock().unwrap().secrets.get(&name).cloned()
+    }
+
+    fn sandbox(&self) -> serde_json::Value {
+        sandbox_json(&self.state, &self.name)
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn recovery_is_refused_on_a_live_session_and_without_a_tombstone_checkpoint() {
+    let state = fake::Shared::default();
+    let (identity, cfg, live) = (fake_identity(), fake_cfg(), fake_scope());
+    for mode in [RecoveryMode::Fresh, RecoveryMode::Checkpoint] {
+        let recovery = fake_scope_with(Some(mode));
+        let recover = || deploy_to(&state, &identity, &cfg, &recovery);
+        // No session at all: checkpoint recovery has nothing to restore.
+        let absent = deploy_to(
+            &state,
+            &identity,
+            &cfg,
+            &fake_scope_with(Some(RecoveryMode::Checkpoint)),
+        )
+        .await;
+        assert_eq!(absent.unwrap_err().code, Some(ErrorCode::NoEndedSession));
+        deploy_to(&state, &identity, &cfg, &live).await.unwrap();
+        let active = recover().await.unwrap_err();
+        assert_eq!(active.code, Some(ErrorCode::SessionActive), "{mode:?}");
+        stop(fake::client(&state), &identity, "agents", &live, "owner")
+            .await
+            .unwrap();
+        let ending = recover().await.unwrap_err();
+        assert_eq!(ending.code, Some(ErrorCode::SessionEnding), "{mode:?}");
+        let mut guard = state.lock().unwrap();
+        guard.sandboxes.clear();
+        guard.pods.clear();
+        guard.secrets.clear();
+    }
+    let ended = Ended::new().await;
+    tombstone(&ended.state, &ended.name, lifecycle::CHECKPOINT_MISSING);
+    let error = ended.deploy(None).await.unwrap_err();
+    assert_eq!(error.code, Some(ErrorCode::SessionEnded));
+    assert!(error.message.contains("ended (completed)"), "{error}");
+    let missing = ended.deploy(Some(RecoveryMode::Checkpoint)).await;
+    assert_eq!(missing.unwrap_err().code, Some(ErrorCode::NoCheckpoint));
+    assert_eq!(
+        ended.sandbox()["metadata"]["annotations"][LIFECYCLE],
+        LIFECYCLE_ENDED,
+        "a refused recovery must leave the tombstone in place"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn interrupted_recovery_keeps_its_checkpoint_and_retries_without_starting_fresh() {
+    let checkpoint = Some(RecoveryMode::Checkpoint);
+    for after_delete in [false, true] {
+        let ended = Ended::new().await;
+        if after_delete {
+            ended.state.lock().unwrap().fail_sandbox_creates = 1;
+        } else {
+            ended.state.lock().unwrap().fail_secret_creates = 1;
+        }
+        ended.deploy(checkpoint).await.unwrap_err();
+        let journal_name = format!("{}-recovery", ended.name);
+        if after_delete {
+            assert!(!ended
+                .state
+                .lock()
+                .unwrap()
+                .sandboxes
+                .contains_key(&ended.name));
+            let original = ended.journal().unwrap();
+            assert_eq!(original["immutable"], true);
+            assert!(original["metadata"]["ownerReferences"].is_null());
+            for (pointer, value) in [
+                ("/metadata/uid", json!(null)),
+                (
+                    "/metadata/annotations/buzz.block.xyz~1owner-pubkey",
+                    json!("another-owner"),
+                ),
+            ] {
+                let mut secret: Secret = serde_json::from_value(original.clone()).unwrap();
+                let bytes = &mut secret
+                    .data
+                    .as_mut()
+                    .unwrap()
+                    .get_mut("tombstone.json")
+                    .unwrap()
+                    .0;
+                let mut recorded: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+                *recorded.pointer_mut(pointer).unwrap() = value;
+                *bytes = serde_json::to_vec(&recorded).unwrap();
+                let corrupted = serde_json::to_value(secret).unwrap();
+                ended
+                    .state
+                    .lock()
+                    .unwrap()
+                    .secrets
+                    .insert(journal_name.clone(), corrupted);
+                assert!(ended.deploy(checkpoint).await.is_err());
+                assert!(
+                    ended.state.lock().unwrap().sandboxes.is_empty(),
+                    "invalid journals must not launch a session"
+                );
+            }
+            ended
+                .state
+                .lock()
+                .unwrap()
+                .secrets
+                .insert(journal_name.clone(), original);
+        } else {
+            assert_eq!(
+                ended.sandbox()["metadata"]["annotations"][CHECKPOINT],
+                ended.key
+            );
+        }
+        let expected = if after_delete {
+            ErrorCode::RecoveryInterrupted
+        } else {
+            ErrorCode::SessionEnded
+        };
+        assert_eq!(ended.deploy(None).await.unwrap_err().code, Some(expected));
+        ended.deploy(checkpoint).await.unwrap();
+        assert_eq!(
+            secret_env(&ended.state, RESTORE_KEY_ENV),
+            std::slice::from_ref(&ended.key)
+        );
+        assert_eq!(
+            ended.sandbox()["metadata"]["annotations"][RECOVERED_FROM],
+            ended.previous
+        );
+        assert!(ended.journal().is_none());
+    }
+}
+
+/// Restore key only in checkpoint recovery; fingerprint stable across a
+/// recovery, so the next ordinary deploy reuses the recovered session.
+#[tokio::test(start_paused = true)]
+async fn checkpoint_recovery_restores_once_under_a_new_generation() {
+    let ended = Ended::new().await;
+    let (old, name, key) = (ended.sandbox(), &ended.name, &ended.key);
+    ended.state.lock().unwrap().lingering_pods.insert(
+        name.clone(),
+        json!({
+            "apiVersion": "v1", "kind": "Pod", "metadata": {
+                "name": name, "uid": "old-pod",
+                "ownerReferences": [{"apiVersion": "agents.x-k8s.io/v1beta1",
+                    "kind": "Sandbox", "name": name, "uid": old["metadata"]["uid"],
+                    "controller": true}]
+            }
+        }),
+    );
+    ended.deploy(Some(RecoveryMode::Checkpoint)).await.unwrap();
+    let recovered = ended.sandbox();
+    let annotations = &recovered["metadata"]["annotations"];
+    assert_eq!(annotations[RECOVERED_FROM], ended.previous);
+    assert_ne!(annotations[GENERATION], ended.previous);
+    assert_eq!(annotations[RESTORE_CHECKPOINT], key.as_str());
+    assert!(annotations.get(LIFECYCLE).is_none());
+    assert_ne!(recovered["metadata"]["uid"], old["metadata"]["uid"]);
+    assert_eq!(
+        annotations[naming::ANNOTATION_CREATE_INTENT],
+        old["metadata"]["annotations"][naming::ANNOTATION_CREATE_INTENT],
+        "fingerprint must survive recovery"
+    );
+    assert_eq!(
+        secret_env(&ended.state, RESTORE_KEY_ENV),
+        std::slice::from_ref(key)
+    );
+    // The next ordinary deploy reuses it and does not re-restore.
+    assert_eq!(ended.deploy(None).await.unwrap(), *name);
+    assert_eq!(
+        secret_env(&ended.state, RESTORE_KEY_ENV),
+        std::slice::from_ref(key)
+    );
+
+    // Fresh recovery of a new tombstone carries no restore key.
+    tombstone(&ended.state, name, "missing");
+    ended.state.lock().unwrap().secrets.clear();
+    ended.deploy(Some(RecoveryMode::Fresh)).await.unwrap();
+    assert!(ended.sandbox()["metadata"]["annotations"]
+        .get(RESTORE_CHECKPOINT)
+        .is_none());
+    assert_eq!(secret_env(&ended.state, RESTORE_KEY_ENV), [""]);
+}
+
 #[test]
 fn the_restore_key_is_fingerprinted_by_name_not_value() {
     let cfg = fake_cfg();
@@ -987,6 +1329,18 @@ async fn stop_suspends_with_a_cas_patch_and_retries_conflicts() {
     .await
     .unwrap_err();
     assert_eq!(ending.code, Some(ErrorCode::SessionEnding), "{ending}");
+    let recovery = fake_scope_with(Some(RecoveryMode::Fresh));
+    assert!(stop(
+        fake::client(&state),
+        &identity,
+        "agents",
+        &recovery,
+        "owner"
+    )
+    .await
+    .unwrap_err()
+    .message
+    .contains("recovery"));
 }
 
 /// `stop` never rewrites a tombstone, nor a lifecycle this version does not

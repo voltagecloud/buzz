@@ -1551,6 +1551,49 @@ configuration lists for the namespace. It records a Warning Event for a
 managed Sandbox that it leaves alone (foreign owner, foreign Pod,
 inconsistent lifecycle).
 
+**Recovery.** An ordinary deploy to an ended session is refused with
+`session_ended` (§Sandbox error codes). The desktop then offers two actions
+in the thread. Each sends `provider_config.sandbox.recovery` once, for that
+click only; the desktop never stores it:
+
+- `{"mode":"checkpoint"}` restores the tombstone's verified checkpoint. It is
+  refused with `no_checkpoint` when the tombstone has no checkpoint key, and
+  with `no_ended_session` when the thread has no Sandbox.
+- `{"mode":"fresh"}` starts with an empty workspace. It is also accepted when
+  the thread has no Sandbox.
+
+Recovery is refused on a session that has not ended: `session_active` for a
+live session, `session_ending` while a stop drains. Before deletion, the
+provider preserves the tombstone in an immutable `<sandbox>-recovery` Secret
+without an owner reference. This journal contains the recovery pointer, not
+the agent's private key. The provider deletes the tombstone with uid and
+resourceVersion preconditions, waits until it and its Pod are gone, and
+creates a new Sandbox with a new generation and `recovered-from`. In
+checkpoint mode the Sandbox records the key and the launch Secret carries
+`BUZZ_CHECKPOINT_RESTORE_KEY=<key>`; the image restores it once before the
+harness starts. Every launch Secret contains that key (empty when unused),
+so it is part of every launch fingerprint and later ordinary deploys reuse
+the recovered Sandbox. Sandboxes created before this key existed are still
+reused.
+
+A recovery that stops part way is resumed only by another explicit
+recovery. An ordinary deploy after the tombstone was deleted is refused with
+`recovery_interrupted`. A retry reuses a replacement that was already
+created only when its `recovered-from` matches the journal's generation and
+it was created for the same mode, with the journal's checkpoint key in
+checkpoint mode. A retry in the other mode is refused with
+`recovery_mode_conflict`; end that session first. Identity, lifecycle, and
+launch-configuration checks still apply. The provider removes the journal
+after it binds the replacement; when that cleanup fails, the journal stays
+and a later deploy of the replacement removes it.
+
+The wait for the old Sandbox and Pod lasts at most one drain grace (300s).
+With the 120s binding and 120s startup waits, a recovery ends inside the
+600s operation deadline that the desktop enforces, with 60s left for
+apiserver calls (a compile-time assertion in `sandbox.rs` keeps this true).
+A Pod that is still draining after the wait is refused with
+`session_deleting`, and a retry resumes from the journal.
+
 **Deploy repair.** A deploy that bound the first Pod but did not write the
 launch Secret is resumed by the next deploy while the container has not
 started. The provider writes the Secret with the Sandbox's generation and
@@ -1583,7 +1626,7 @@ or reused, and a new refusal gets a new code. They are defined in
 | `code` | Meaning | Desktop action |
 | --- | --- | --- |
 | `session_ended` | The Sandbox is a tombstone (`lifecycle=ended`). | explicit recovery |
-| `session_ending` | A stop is draining (`lifecycle=ending`). | wait, then explicit recovery |
+| `session_ending` | A stop is draining (`lifecycle=ending`); deploy and recovery are refused. | wait, then explicit recovery |
 | `lifecycle_unknown` | The lifecycle annotation has a value this provider does not know. | update Buzz |
 | `session_deleting` | The Sandbox has a `deletionTimestamp`. | retry once it is gone |
 | `session_not_running` | `operatingMode` is not `Running` and there is no lifecycle record. | explicit recovery |
@@ -1600,6 +1643,11 @@ or reused, and a new refusal gets a new code. They are defined in
 | `foreign_pod` | The Pod with the Sandbox's name is not controlled by it. | operator cleanup |
 | `session_replaced` | Another session replaced the Sandbox during this deploy. | explicit recovery |
 | `agent_pod_exists` | The agent already has a Pod outside a Sandbox session. | stop it, then explicit recovery |
+| `session_active` | Recovery was requested for a session that has not ended. | end the session, then explicit recovery |
+| `no_ended_session` | Checkpoint recovery was requested, but the thread has no Sandbox. | start fresh |
+| `no_checkpoint` | Checkpoint recovery was requested, but the tombstone has no verified checkpoint. | start fresh |
+| `recovery_interrupted` | A recovery deleted the tombstone but did not finish. | explicit recovery |
+| `recovery_mode_conflict` | A recovery in the other mode already created the replacement. | retry the same mode, or end the session first |
 
 The `session_ended` text names the ended reason only when it is one of the
 spellings in §Sandbox lifecycle; any other annotation value is not repeated.
