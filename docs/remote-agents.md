@@ -416,6 +416,10 @@ string/number/boolean coercion, `required` gating. A provider MAY compute
 defaults freshly per call (the Kubernetes binding generates a random
 namespace default this way — §K8s Namespace). The schema's fields are
 subject to I2 validation when the user's values come back in `deploy`.
+For a deferred thread scope, `x-buzz-ui-type: "boolean"` tells the desktop to
+store an enable/disable setting. Launch replaces that setting with the bound
+scope object. The JSON Schema still describes the provider's accepted wire
+values: `false` or an object with `channel_id` and `thread_root`.
 
 ### `deploy`
 
@@ -1425,6 +1429,41 @@ Launchers must confirm that the `info` schema includes `identity_policy` before 
 Launchers must also treat a success response without `"preflight": "identity"` as a failure, because that response comes from a real deploy.
 
 Launchers must check the `info` schema for required options before credential handoff, since older providers ignore unknown fields.
+
+### Agent Sandbox workspaces
+
+Desktop mention routing is added by the following stack layer. This layer accepts scoped requests from direct provider clients.
+Direct provider clients pass `sandbox={"channel_id":"<UUID>","thread_root":"<event ID>"}` and an approved `identity_policy`.
+
+Install the `agents.x-k8s.io/v1beta1` Sandbox CRD and controller before launching.
+Set a digest-pinned image and `pod_options.active_deadline_seconds`.
+The image must reject a mismatch between `BUZZ_SANDBOX_POD_UID` and `BUZZ_SANDBOX_INITIAL_POD_UID` before reading account credentials.
+
+The controller owns the Pod. Concurrent mentions reuse its workspace when the agent, owner, relay, channel, and thread match.
+The provider binds the launch Secret to the first Pod UID.
+A replaced or completed Pod requires explicit recovery; a later mention cannot silently create an empty replacement session.
+The workspace is an `emptyDir` on a `restartPolicy: Never` Pod. When the harness exits, the stop checkpoint is the only copy of its work.
+Deleting a Sandbox also removes its Pod and any workspace that remains. Recover or checkpoint authorized work before deletion.
+
+Sandbox ingress accepts only its owner's signed messages for the assigned channel thread.
+The provider enables JSONL activity and disables autonomous heartbeat work.
+The agent environment must set `BUZZ_CHECKPOINT_BUCKET` and `BUZZ_CHECKPOINT_PREFIX`; the deployment's launch environment supplies them. Shutdown then invokes `buzz-agent-checkpoint save` after sessions drain, and a failed save makes the harness exit non-zero.
+Deploy refuses Sandbox mode when either value is missing.
+To launch without a stop checkpoint, for example in a disposable test cluster, set `BUZZ_SANDBOX_CHECKPOINT=disabled`. Such a workspace is lost when its process exits.
+Sandbox Pods use the same `terminationGracePeriodSeconds` as bare Pods (300s), which covers the drain and the 120s checkpoint.
+The image supplies that helper and account setup. Infrastructure supplies storage, resource quotas, and log collection.
+
+Use channel thread mentions to launch these workspaces. A generic Start action has no thread binding and is refused.
+Remote setup success still requires an authenticated runtime response; a running setup gate alone does not prove account readiness.
+For Codex account enrollment, set `BUZZ_SETUP_MODE=codex-device-v1`, select `codex-acp`, and use `agent-full-access`.
+The provider supplies the agent/image binding, downward Pod UID, one-use nonce, and a 15-minute setup deadline.
+Retries preserve the original binding and deadline. The image must accept the Sandbox's 32-character generation.
+
+**Limit: interrupted credential binding.** Deploy first records the Pod UID on the Sandbox, then creates the launch Secret.
+If the Secret create fails after the UID is recorded, the deploy error names the Kubernetes reason and code.
+Later deploys for that thread wait 120s for the Secret and then fail with "Sandbox credential binding is incomplete; explicit recovery is required".
+To recover, delete the Sandbox. This discards the workspace; the container never started, so it contains no agent work. Then mention the agent in the thread again.
+A later layer of this stack makes the binding resumable, so a retried deploy creates the missing Secret for the same Pod.
 
 ### Distribution
 

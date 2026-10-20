@@ -21,6 +21,7 @@ mod naming;
 mod observe;
 mod pod;
 mod reconcile;
+mod sandbox;
 mod wire;
 
 use std::io::Read;
@@ -135,9 +136,10 @@ fn refuse_relay_mesh(raw: &serde_json::Value) -> Option<String> {
 /// Run one deploy to a terminal outcome.
 async fn deploy_agent(request: &wire::DeployRequest) -> Result<String, String> {
     let cfg = config::parse(&request.provider_config)?;
+    let sandbox = sandbox::Options::parse(&request.provider_config)?;
     // Identity before any cluster contact: a malformed nsec is a refusal, not
     // a failed connection (§Deploy State Machine step 0).
-    let identity = identity::check(request, false)?;
+    let identity = identity::check(request, sandbox.is_some())?;
 
     // One generation for this operation's first attempt; the reconciler mints
     // its own per attempt and restamps the correlator to match.
@@ -150,6 +152,15 @@ async fn deploy_agent(request: &wire::DeployRequest) -> Result<String, String> {
     )?;
 
     let client = client::connect(cfg.context.as_deref()).await?;
+    if let Some(scope) = sandbox {
+        let owner = request
+            .agent
+            .launch
+            .as_ref()
+            .and_then(|launch| launch.owner_pubkey.as_deref())
+            .ok_or("Sandbox requires a verified launch owner")?;
+        return sandbox::deploy(client, &identity, &cfg, &scope, owner, env).await;
+    }
     let substrate = cluster::Cluster::new(client, &cfg.namespace);
     reconcile::deploy(&substrate, &identity, &cfg, env).await
 }

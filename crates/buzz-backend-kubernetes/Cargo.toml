@@ -22,6 +22,7 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
 chrono = { workspace = true }
+uuid = { workspace = true }
 http = "1"
 http-body-util = "0.1"
 
