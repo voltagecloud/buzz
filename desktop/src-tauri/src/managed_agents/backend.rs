@@ -1,4 +1,5 @@
 use super::discovery::{command_search::command_discovery_dirs, resolve_command};
+use super::process_spawn::spawn_with_busy_retry as spawn_provider;
 use sha2::{Digest, Sha256};
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -88,11 +89,10 @@ pub fn invoke_provider(
         cmd.current_dir(home);
     }
     crate::util::configure_no_window(&mut cmd);
-    let mut child = cmd
-        .stdin(std::process::Stdio::piped())
+    cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
+        .stderr(std::process::Stdio::piped());
+    let mut child = spawn_provider(&mut cmd)
         .map_err(|e| format!("failed to spawn {}: {e}", binary.display()))?;
 
     // Write request and close stdin immediately so the provider sees EOF.

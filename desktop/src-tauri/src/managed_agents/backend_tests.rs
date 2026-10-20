@@ -142,6 +142,59 @@ fn write_test_provider(path: &Path, body: &str) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn provider_spawn_waits_for_a_transient_writer() {
+    let directory = tempfile::tempdir().unwrap();
+    let provider = directory.path().join("provider");
+    write_test_provider(&provider, "exit 0");
+    let writer = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&provider)
+        .unwrap();
+    assert_eq!(
+        std::process::Command::new(&provider)
+            .spawn()
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::ExecutableFileBusy,
+    );
+    let closer = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(20));
+        drop(writer);
+    });
+
+    let mut child = spawn_provider(&mut std::process::Command::new(&provider))
+        .expect("launch after the inherited writer closes");
+    assert!(child.wait().unwrap().success());
+    closer.join().unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn provider_spawn_returns_persistent_write_conflicts() {
+    let directory = tempfile::tempdir().unwrap();
+    let provider = directory.path().join("provider");
+    write_test_provider(&provider, "exit 0");
+    let _writer = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&provider)
+        .unwrap();
+
+    let error = spawn_provider(&mut std::process::Command::new(&provider)).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::ExecutableFileBusy);
+}
+
+#[test]
+fn provider_spawn_preserves_other_launch_errors() {
+    let directory = tempfile::tempdir().unwrap();
+    let error = spawn_provider(&mut std::process::Command::new(
+        directory.path().join("missing"),
+    ))
+    .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+}
+
 #[cfg(unix)]
 #[test]
 fn provider_deploy_negotiates_and_deploys_the_same_staged_bytes() {
