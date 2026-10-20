@@ -16,9 +16,14 @@ on:
       - "deploy/charts/buzz-push-gateway/**"
       - "crates/buzz-push-gateway/src/config.rs"
       - ".github/workflows/push-gateway-helm-chart.yml"
+      - "scripts/package-chart.sh"
+      - "scripts/test-chart-packaging.sh"
 permissions: {}
 env:
-  CHART_REPO: oci://ghcr.io/block/buzz/charts
+  IMAGE_REPOSITORY: ${{ vars.GHCR_PUSH_GATEWAY_IMAGE != '' && vars.GHCR_PUSH_GATEWAY_IMAGE || format('ghcr.io/{0}-push-gateway', github.repository) }}
+  # Defaults to the running repository's namespace so forks publish to their
+  # own registry; GHCR_CHART_REPO overrides it (same variable as helm-chart.yml).
+  CHART_REPO: ${{ vars.GHCR_CHART_REPO != '' && vars.GHCR_CHART_REPO || format('oci://ghcr.io/{0}/charts', github.repository) }}
 jobs:
   validate:
     runs-on: ubuntu-latest
@@ -33,6 +38,7 @@ jobs:
         with: { version: v3.16.4 }
       - run: deploy/charts/buzz-push-gateway/tests/render.sh
       - run: deploy/charts/buzz-push-gateway/tests/release-contract.sh
+      - run: scripts/test-chart-packaging.sh deploy/charts/buzz-push-gateway
   publish:
     if: github.event_name != 'pull_request'
     needs: validate
@@ -41,6 +47,10 @@ jobs:
       contents: read
       packages: write
     steps:
+      - name: Normalize chart repository
+        shell: bash
+        run: |
+          printf 'CHART_REPO=%s\n' "${CHART_REPO,,}" >> "$GITHUB_ENV"
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || '' }}
@@ -66,5 +76,5 @@ jobs:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - run: helm package deploy/charts/buzz-push-gateway --destination dist
+      - run: scripts/package-chart.sh deploy/charts/buzz-push-gateway "$IMAGE_REPOSITORY" main dist
       - run: helm push "dist/buzz-push-gateway-${VERSION}.tgz" "$CHART_REPO"

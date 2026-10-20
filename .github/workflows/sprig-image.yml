@@ -1,8 +1,9 @@
 name: Sprig image
 
 # Builds and publishes the public agent container image as
-# ghcr.io/block/buzz-sprig — the digest-pinned box the Kubernetes backend
-# deploys agents into (see Dockerfile.sprig and docs/remote-agents.md).
+# ghcr.io/<owner>/<repo>-sprig (ghcr.io/block/buzz-sprig upstream) — the
+# digest-pinned box the Kubernetes backend deploys agents into (see
+# Dockerfile.sprig and docs/remote-agents.md).
 #
 # Strategy mirrors docker.yml (the relay image): each architecture builds on
 # its native runner, pushes to GHCR by digest, then a merge job stitches the
@@ -17,7 +18,7 @@ name: Sprig image
 #   - workflow_dispatch             → manual publish at the current ref
 #
 # NOTE: the first push creates the GHCR package PRIVATE by default. An org
-# admin must flip ghcr.io/block/buzz-sprig to public once (Package settings →
+# admin must flip the sprig package to public once (Package settings →
 # Change visibility). Subsequent pushes keep the visibility.
 
 on:
@@ -46,9 +47,10 @@ concurrency:
 permissions: {}
 
 env:
-  # Single source of truth for the image name; override with the
-  # GHCR_SPRIG_IMAGE repo variable (same pattern as docker.yml).
-  IMAGE_NAME: ${{ vars.GHCR_SPRIG_IMAGE != '' && vars.GHCR_SPRIG_IMAGE || 'ghcr.io/block/buzz-sprig' }}
+  # Single source of truth for the image name; it defaults to the running
+  # repository's namespace so forks publish to their own registry. Override
+  # with the GHCR_SPRIG_IMAGE repo variable (same pattern as docker.yml).
+  IMAGE_NAME: ${{ vars.GHCR_SPRIG_IMAGE != '' && vars.GHCR_SPRIG_IMAGE || format('ghcr.io/{0}-sprig', github.repository) }}
 
 jobs:
   build:
@@ -72,6 +74,11 @@ jobs:
             arch: arm64
 
     steps:
+      - name: Normalize image name
+        shell: bash
+        run: |
+          printf 'IMAGE_NAME=%s\n' "${IMAGE_NAME,,}" >> "$GITHUB_ENV"
+
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
         with:
@@ -156,6 +163,11 @@ jobs:
       attestations: write
 
     steps:
+      - name: Normalize image name
+        shell: bash
+        run: |
+          printf 'IMAGE_NAME=%s\n' "${IMAGE_NAME,,}" >> "$GITHUB_ENV"
+
       - name: Download per-arch digests
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
@@ -213,7 +225,7 @@ jobs:
           echo "digest=${merged_digest}" >> "$GITHUB_OUTPUT"
 
       - name: Attest provenance for the merged image
-        # Verify with: gh attestation verify oci://ghcr.io/block/buzz-sprig:<tag> --owner block
+        # Verify with: gh attestation verify oci://<IMAGE_NAME>:<tag> --owner <repository owner>
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373  # v4.1.1
         with:
           subject-name: ${{ env.IMAGE_NAME }}
