@@ -1464,11 +1464,9 @@ For Codex account enrollment, set `BUZZ_SETUP_MODE=codex-device-v1`, select `cod
 The provider supplies the agent/image binding, downward Pod UID, one-use nonce, and a 15-minute setup deadline.
 Retries preserve the original binding and deadline. The image must accept the Sandbox's 32-character generation.
 
-**Limit: interrupted credential binding.** Deploy first records the Pod UID on the Sandbox, then creates the launch Secret.
-If the Secret create fails after the UID is recorded, the deploy error names the Kubernetes reason and code.
-Later deploys for that thread wait 120s for the Secret and then fail with "Sandbox credential binding is incomplete; explicit recovery is required".
-To recover, delete the Sandbox. This discards the workspace; the container never started, so it contains no agent work. Then mention the agent in the thread again.
-A later layer of this stack makes the binding resumable, so a retried deploy creates the missing Secret for the same Pod.
+**Interrupted credential binding.** Deploy first records the Pod UID on the Sandbox, then creates the launch Secret.
+If the Secret create fails after the UID is recorded, the deploy error names the Kubernetes reason and code,
+and the next deploy for that thread resumes the binding for the same Pod (§Deploy repair).
 
 ### Sandbox lifecycle
 
@@ -1498,7 +1496,7 @@ apiserver `Date` header, not the reaper's clock.
 | --- | --- | --- |
 | Binding | Running, no first-Pod binding, Sandbox younger than 1200s | none |
 | BindAbandoned | as Binding, Sandbox 1200s or older | tombstone `bind-abandoned` |
-| BindingIncomplete | bound to this Pod, container never started | none before the Pod is 1200s old (planned: a deploy completes the binding); then tombstone `binding-failed` |
+| BindingIncomplete | bound to this Pod, container never started | none before the Pod is 1200s old (a deploy completes the binding, §Deploy repair); then tombstone `binding-failed` |
 | Active | bound to this Pod, container running | none |
 | Draining | Pod deleting, or `lifecycle=ending` with the Pod present | none |
 | Ending | `lifecycle=ending`, Pod gone | tombstone with the recorded reason (`stopped`) |
@@ -1521,6 +1519,28 @@ configuration lists for the namespace. It records a Warning Event for a
 managed Sandbox that it leaves alone (foreign owner, foreign Pod,
 inconsistent lifecycle).
 
+**Deploy repair.** A deploy that bound the first Pod but did not write the
+launch Secret is resumed by the next deploy while the container has not
+started. The provider writes the Secret with the Sandbox's generation and
+an owner reference to that Pod. When the Secret write fails, the provider
+keeps the first-Pod binding, because the write may have succeeded despite
+the error; the retry reads the Secret again and verifies it. A container
+that ever started without its Secret is not resumed (`credentials_missing`).
+The provider stops resuming once the Pod is 1020s old (the 1200s bind
+timeout, less the 120s deploy deadline and 60s for clock skew), so the
+reaper cannot tombstone the session while a deploy writes its credentials
+or waits for startup (`binding_expired`).
+
+**Launch fingerprint compatibility.** Every launch Secret carries
+`BUZZ_CHECKPOINT_RESTORE_KEY`, so the key is part of every launch
+fingerprint. A provider of this version also accepts, on reuse only, the
+fingerprint that an older provider recorded without that key. The
+acceptance is one-way: an older provider refuses a Sandbox that this
+version created, with `config_differs`. During a rollout with mixed desktop
+versions, update every desktop that deploys to the same threads. The legacy
+fingerprint will be removed once Sandboxes created before the restore key
+have ended (30-day tombstone retention).
+
 ### Sandbox error codes
 
 A Sandbox deploy refusal carries a stable `code` next to its `error` text.
@@ -1539,7 +1559,9 @@ or reused, and a new refusal gets a new code. They are defined in
 | `identity_mismatch` | The Sandbox belongs to a different agent, owner, or thread, or lacks the management marker or binding version `2`. | none (use a new thread) |
 | `credentials_mismatch` | The launch Secret is bound to a different Pod or agent. | explicit recovery |
 | `relay_differs` | The session was launched against a different relay. | new thread or explicit recovery |
-| `binding_incomplete` | The session is bound to its first Pod, but its launch Secret was not written. | explicit recovery |
+| `binding_incomplete` | The session is bound to its first Pod, but its launch Secret was not written within this deploy's deadline. | retry |
+| `binding_expired` | As `binding_incomplete`, but the Pod is too old to resume (§Deploy repair). | explicit recovery once the session has ended |
+| `credentials_missing` | The bound container started without its launch Secret. | explicit recovery |
 | `pod_lost` | The Pod the session is bound to is gone. | explicit recovery |
 | `pod_replaced` | The controller replaced the bound Pod. | explicit recovery |
 | `pod_ended` | The bound Pod finished, is deleting, or its process exited during startup. | explicit recovery |
