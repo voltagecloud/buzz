@@ -70,6 +70,7 @@ async fn custody_over_rpc() {
         state_dir: state.path().join("state"),
         credentials: Arc::new(FileCredentials::new(state.path().join("keys")).unwrap()),
         legacy_dir: None,
+        sandbox: None,
     })
     .unwrap();
     let (connector, listener) = transport::memory();
@@ -490,6 +491,7 @@ async fn one_gui_runs_each_agent_until_it_lets_go_or_disconnects() {
         state_dir: state.path().join("state"),
         credentials: Arc::new(FileCredentials::new(state.path().join("keys")).unwrap()),
         legacy_dir: None,
+        sandbox: None,
     })
     .unwrap();
     let (connector, listener) = transport::memory();
@@ -571,6 +573,7 @@ async fn a_v1_agent_is_brought_over_with_its_key_name_and_picture() {
         state_dir: state.path().join("state"),
         credentials: Arc::new(keys),
         legacy_dir: Some(state.path().join("data")),
+        sandbox: None,
     })
     .unwrap();
     let (connector, listener) = transport::memory();

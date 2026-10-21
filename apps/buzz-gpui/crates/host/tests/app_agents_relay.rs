@@ -88,6 +88,7 @@ async fn lifecycle(alice: Arc<Identity>, relay: String, general: String) {
         state_dir: state.path().join("state"),
         credentials: Arc::new(FileCredentials::new(state.path().join("keys")).unwrap()),
         legacy_dir: None,
+        sandbox: None,
     })
     .unwrap();
 

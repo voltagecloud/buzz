@@ -16,17 +16,20 @@ use crate::api::{
     PortSource, PortableAgent, PortableAgents,
 };
 use crate::blocking;
+use crate::sandbox::{AgentCustody, LaunchIdentity};
 use base64::Engine;
 use buzz_agent_controller::{
     AppAgent, AppAgents, CREDENTIALS_BUSY, Credentials, NewAppAgent, OldStores, Published, Secret,
 };
 use buzz_host_rpc::Peer;
+use futures::future::BoxFuture;
 use hosting::{Holder, Hosting};
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
+use zeroize::Zeroizing;
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -351,6 +354,24 @@ impl AppAgentHost {
 
     async fn keyed(&self, pubkey: String) -> Result<(AppAgent, Arc<Secret>)> {
         self.key(self.agent(pubkey).await?).await
+    }
+
+    /// As [`Self::keyed`], from the key cache only, so it never waits on
+    /// the credential store.
+    fn cached(&self, pubkey: &str) -> Result<(AppAgent, Arc<Secret>)> {
+        // Held across the read, as delete holds it, so no deleted agent's
+        // key is returned.
+        let mut keys = locked(&self.keys);
+        match self.agents.get(pubkey) {
+            Ok(agent) => {
+                let key = keys.get(pubkey).cloned();
+                Ok((agent, key.ok_or("The agent's key has not been read yet")?))
+            }
+            Err(error) => {
+                keys.remove(pubkey);
+                Err(error)
+            }
+        }
     }
 
     /// Generates the key. A retry with the same request ID and inputs gets
@@ -695,6 +716,50 @@ impl AppAgentHost {
     }
 }
 
+impl AgentCustody for AppAgentHost {
+    fn launch_identity(&self, pubkey: &str) -> BoxFuture<'static, Result<LaunchIdentity>> {
+        let (host, pubkey) = (self.clone(), pubkey.to_owned());
+        Box::pin(async move {
+            let (agent, key) = host.keyed(pubkey).await?;
+            launch_identity(agent, &key)
+        })
+    }
+
+    fn cached_launch_identity(&self, pubkey: &str) -> Result<LaunchIdentity> {
+        let (agent, key) = self.cached(pubkey)?;
+        launch_identity(agent, &key)
+    }
+}
+
+fn launch_identity(agent: AppAgent, key: &Secret) -> Result<LaunchIdentity> {
+    Ok(LaunchIdentity {
+        nsec: nsec(key)?,
+        pubkey: agent.pubkey,
+        relay: agent.relay,
+        owner: agent.owner,
+        auth: agent.auth,
+    })
+}
+
+/// The key as bech32 `nsec1…`, which providers take.
+fn nsec(key: &Secret) -> Result<Zeroizing<String>> {
+    let hex = key.hex();
+    let mut bytes = Zeroizing::new([0u8; 32]);
+    for (byte, pair) in bytes.iter_mut().zip(hex.as_bytes().chunks(2)) {
+        let digit = |c: u8| (c as char).to_digit(16).unwrap_or(0) as u8;
+        *byte = (digit(pair[0]) << 4) | digit(pair[1]);
+    }
+    // Sized for the whole key, so it never reallocates and leaves a copy.
+    let mut nsec = Zeroizing::new(String::with_capacity(63));
+    bech32::encode_to_fmt::<bech32::Bech32, _>(
+        &mut *nsec,
+        bech32::Hrp::parse_unchecked("nsec"),
+        &*bytes,
+    )
+    .map_err(|_| "Could not encode the agent's key")?;
+    Ok(nsec)
+}
+
 /// A NIP-98 `Authorization` header for `event`.
 fn authorization(event: Value) -> Result<String> {
     let json = serde_json::to_vec(&event).map_err(|_| "Could not authorize profile request")?;
@@ -867,6 +932,66 @@ mod tests {
         assert!(tokio::time::timeout(waited, &mut deleting).await.is_err());
         drop(publishing);
         deleting.await.unwrap().unwrap();
+    }
+
+    /// A host with one saved agent, and the agent's owner.
+    async fn saved(dir: &std::path::Path) -> (AppAgentHost, String, String) {
+        let credentials = crate::credentials::FileCredentials::new(dir.join("keys")).unwrap();
+        let host = AppAgentHost::new(dir.join("identities.json"), old(dir), Arc::new(credentials));
+        let owner = buzz_identity::Identity::ephemeral();
+        let pubkey = host
+            .prepare(
+                "create".into(),
+                "wss://relay.example".into(),
+                owner.pubkey_hex(),
+                "p/t".into(),
+                "Ada".into(),
+            )
+            .unwrap();
+        let auth = owner.attest_agent(&pubkey).unwrap();
+        host.commit("create".into(), auth).await.unwrap();
+        (host, pubkey, owner.pubkey_hex())
+    }
+
+    #[tokio::test]
+    async fn custody_gives_the_agents_key_as_an_nsec() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, pubkey, owner) = saved(dir.path()).await;
+        // A host that has not read the key yet, as after a restart.
+        let credentials = crate::credentials::FileCredentials::new(dir.path().join("keys"));
+        let host = AppAgentHost::new(
+            dir.path().join("identities.json"),
+            old(dir.path()),
+            Arc::new(credentials.unwrap()),
+        );
+        assert!(host.cached_launch_identity(&pubkey).is_err());
+        let identity = host.launch_identity(&pubkey).await.unwrap();
+        assert!(identity.nsec.starts_with("nsec1"));
+        assert_eq!(
+            Secret::parse(&identity.nsec, &pubkey).unwrap().pubkey(),
+            pubkey
+        );
+        assert_eq!(identity.relay, "wss://relay.example");
+        assert_eq!(identity.owner, owner);
+        let tag: Vec<String> = serde_json::from_str(&identity.auth).unwrap();
+        assert_eq!(tag.first().map(String::as_str), Some("auth"));
+        let cached = host.cached_launch_identity(&pubkey).unwrap();
+        assert_eq!(*cached.nsec, *identity.nsec, "the read key is cached");
+
+        let shown = format!("{identity:?}");
+        assert!(shown.contains(&pubkey));
+        assert!(!shown.contains("nsec1"), "{shown}");
+    }
+
+    #[tokio::test]
+    async fn custody_refuses_a_deleted_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let (host, pubkey, _) = saved(dir.path()).await;
+        host.launch_identity(&pubkey).await.unwrap();
+        host.delete(pubkey.clone()).await.unwrap();
+        assert!(host.launch_identity(&pubkey).await.is_err());
+        assert!(host.cached_launch_identity(&pubkey).is_err());
+        assert!(host.launch_identity(&"d".repeat(64)).await.is_err());
     }
 
     #[test]

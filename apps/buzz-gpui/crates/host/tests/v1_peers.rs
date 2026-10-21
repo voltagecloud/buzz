@@ -91,6 +91,7 @@ async fn an_older_gui_gets_an_error_for_v1_requests_and_keeps_agents() {
         state_dir: state.path().join("state"),
         credentials: Arc::new(FileCredentials::new(state.path().join("keys")).unwrap()),
         legacy_dir: None,
+        sandbox: None,
     })
     .unwrap();
     let (connector, listener) = transport::memory();
