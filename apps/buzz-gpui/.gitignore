@@ -1,0 +1,8 @@
+/target
+/result
+.direnv
+/.test-relay
+/dist
+/target-deb
+/docs/port/screenshots
+__pycache__/

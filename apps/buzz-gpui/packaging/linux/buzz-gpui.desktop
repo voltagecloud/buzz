@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Buzz
+Comment=Chat with your community and manage your agents
+Exec=buzz-gpui %U
+Icon=buzz-gpui
+Terminal=false
+Categories=Network;Chat;InstantMessaging;
+MimeType=x-scheme-handler/buzz;
+StartupWMClass=buzz-gpui
+# Lists Buzz under Settings → Notifications before its first banner.
+X-GNOME-UsesNotifications=true

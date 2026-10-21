@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Build caches are saved only from master; pull requests restore them.
+# This keeps the repository under GitHub's 10 GB cache limit, where saves
+# from every branch would evict master's caches.
+
+jobs:
+  lint:
+    name: Format and lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      # The dev shell provides the toolchain and the native libraries.
+      # Its Rust goes on PATH so rust-cache keys on the Rust that builds.
+      - name: Dev shell
+        run: nix develop --command sh -c 'dirname "$(command -v rustc)"; dirname "$(command -v cargo)"' >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      - name: Format
+        run: nix develop --command cargo fmt --all --check
+      - name: Clippy
+        run: nix develop --command cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    env:
+      # Backtraces keep file and line numbers, but the test build skips
+      # the full debug info that much of its compile and link time goes to.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - name: Dev shell
+        run: nix develop --command sh -c 'dirname "$(command -v rustc)"; dirname "$(command -v cargo)"' >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      # Tests that need the local test relay skip themselves without it.
+      - name: Test
+        run: nix develop --command cargo test --workspace --locked
+
+  plugins:
+    name: Node plugins
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      # Types, tests and the build of Buzz's own Node plugins.
+      - name: Check
+        run: nix develop --command sh -c 'cd plugins && npm ci --no-audit --no-fund && npm run check'
+
+  buzzd:
+    name: Nix package (buzzd)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      # The dependency build's store path changes only with its inputs
+      # (Cargo.lock, the manifests, the toolchain), so keep it between
+      # runs under that path and rebuild only this workspace's crates.
+      - name: Find the dependency build
+        id: deps
+        run: |
+          path=$(nix eval --raw .#buzzd.cargoArtifacts.outPath)
+          echo "path=$path" >> "$GITHUB_OUTPUT"
+          echo "key=buzzd-deps-$(basename "$path")" >> "$GITHUB_OUTPUT"
+      - name: Restore the dependency build
+        id: restore
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/buzzd-deps.nar
+          key: ${{ steps.deps.outputs.key }}
+      # The dependency build refers to the vendored crate sources, which
+      # are not in the kept build, so fetch them before importing it.
+      - name: Import the dependency build
+        if: steps.restore.outputs.cache-hit == 'true'
+        run: |
+          nix build --no-link .#buzzd.cargoArtifacts.cargoVendorDir
+          sudo "$(command -v nix-store)" --import < /tmp/buzzd-deps.nar
+      - run: nix build .#buzzd --print-build-logs
+      - name: Export the dependency build
+        if: steps.restore.outputs.cache-hit != 'true' && github.ref == 'refs/heads/master'
+        run: nix-store --export "${{ steps.deps.outputs.path }}" > /tmp/buzzd-deps.nar
+      - name: Save the dependency build
+        if: steps.restore.outputs.cache-hit != 'true' && github.ref == 'refs/heads/master'
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/buzzd-deps.nar
+          key: ${{ steps.deps.outputs.key }}
+
+  check-other:
+    name: Check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest]
+    steps:
+      - if: runner.os == 'Windows'
+        run: git config --system core.longpaths true
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/gstreamer
+      # The Rust that the Nix dev shell gets from the locked nixpkgs.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      - run: cargo clippy --workspace --locked -- -D warnings

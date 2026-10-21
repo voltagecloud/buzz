@@ -1,0 +1,69 @@
+# Backing services for the throwaway Buzz test relay (scripts/test-relay.sh).
+#
+# Always run with `-p buzz-gpui-test`; never with the default project name.
+# All ports bind to 127.0.0.1 on non-default numbers so nothing collides with
+# other Buzz/postgres/redis/minio instances on this machine. State is
+# bind-mounted under $TEST_RELAY_STATE/data and owned by the invoking user.
+name: buzz-gpui-test
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: buzz-gpui-test-postgres
+    user: "${TEST_RELAY_UID:?}:${TEST_RELAY_GID:?}"
+    environment:
+      POSTGRES_USER: buzz
+      POSTGRES_PASSWORD: buzz_dev
+      POSTGRES_DB: buzz
+      PGDATA: /var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - "${TEST_RELAY_STATE:?}/data/postgres:/var/lib/postgresql/data"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U buzz -d buzz"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    container_name: buzz-gpui-test-redis
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "127.0.0.1:56379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  minio:
+    image: minio/minio:latest
+    container_name: buzz-gpui-test-minio
+    user: "${TEST_RELAY_UID:?}:${TEST_RELAY_GID:?}"
+    command: ["server", "/data", "--console-address", ":9001", "--certs-dir", "/tmp/certs"]
+    environment:
+      MINIO_ROOT_USER: buzz_dev
+      MINIO_ROOT_PASSWORD: buzz_dev_secret
+    ports:
+      - "127.0.0.1:59000:9000"
+      - "127.0.0.1:59001:9001"
+    volumes:
+      - "${TEST_RELAY_STATE:?}/data/minio:/data"
+
+  minio-init:
+    image: minio/mc:latest
+    container_name: buzz-gpui-test-minio-init
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+        for i in $$(seq 1 60); do
+          mc alias set local http://minio:9000 buzz_dev buzz_dev_secret >/dev/null 2>&1 && break;
+          sleep 1;
+        done &&
+        mc mb --ignore-existing local/buzz-media &&
+        mc anonymous set none local/buzz-media
+      "
+    restart: "no"

@@ -1,0 +1,12 @@
+{
+ "commit": {
+  "message": "feat: add mobile pairing Settings plugin (#595)\n\nSigned-off-by: klopez4212 <klopez4212@gmail.com>\nSigned-off-by: am <6e30cd56c30e030cd31bb0939b94a7c257c9a09d5ba2d92cf2735da45629f248@buzz.block.builderlab.xyz>\nSigned-off-by: peon <9ac6794b000690b7e814eb1805ad32405d0bec7d52838de3a86cf967565dacc0@buzz.block.builderlab.xyz>\nCo-authored-by: am <6e30cd56c30e030cd31bb0939b94a7c257c9a09d5ba2d92cf2735da45629f248@buzz.block.builderlab.xyz>\nCo-authored-by: peon <9ac6794b000690b7e814eb1805ad32405d0bec7d52838de3a86cf967565dacc0@buzz.block.builderlab.xyz>",
+  "author": {
+   "name": "klopez4212"
+  }
+ },
+ "author": {
+  "login": "klopez4212",
+  "avatar_url": "https://avatars.githubusercontent.com/u/7863796?v=4"
+ }
+}

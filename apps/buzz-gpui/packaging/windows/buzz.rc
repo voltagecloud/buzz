@@ -1,0 +1,3 @@
+// The app icon as resource 1: GPUI loads it for the window and the
+// taskbar, and Explorer shows it for the executable.
+1 ICON "buzz.ico"

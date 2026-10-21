@@ -1,0 +1,6 @@
+{
+  "id": "buzz.github",
+  "name": "GitHub",
+  "description": "Shows GitHub repository, pull request, issue and commit links in a panel, from GitHub's public API.",
+  "command": ["node", "--enable-source-maps", "dist/plugin.mjs"]
+}

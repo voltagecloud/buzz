@@ -1,0 +1,39 @@
+{
+ "title": "feat: add mobile pairing Settings plugin",
+ "body": "Adds **Settings → Pair mobile** as a bundled plugin, porting the encrypted pairing protocol and QR design from [block/buzz#8085](https://github.com/block/buzz/pull/8085). The QR starts and refreshes automatically; supported phones enter the desktop’s six-digit code, while older phones retain code comparison. Identity export stays native, and leaving Settings cancels pairing. Desktop verifies a separate random code with a five-attempt limit before export; an unacknowledged transfer stays visible until the user deliberately retries.\n\nValidated: independent agent review, 81 protocol tests/doctests, 17 native pairing tests, 11 component/client tests, composition checks, and 16 Chromium/WebKit pairing and Settings checks. Seven browser scenarios cover Settings integration, cleanup, responsive layout stability, and reduced motion with fixture IPC; no existing cases removed. Native staging connected to the production relay and was tried with an older phone. **Still to verify:** complete code-entry pairing with the updated mobile app.\n\nSnapshots use disposable fixture data and the reserved example relay `wss://relay.example/pairing`; the QR screenshot was decoded to verify its destination.\n\n| Scan QR | Enter desktop code on phone |\n| --- | --- |\n| ![Pair mobile QR](https://raw.githubusercontent.com/block/buzz-app/kennylopez-mobile-pairing-plugin/docs/images/pairing/qr.png) | ![Desktop verification code](https://raw.githubusercontent.com/block/buzz-app/kennylopez-mobile-pairing-plugin/docs/images/pairing/code.png) |\n\n\n",
+ "body_html": "<p dir=\"auto\">Adds <strong>Settings → Pair mobile</strong> as a bundled plugin, porting the encrypted pairing protocol and QR design from <a href=\"https://github.com/block/buzz/pull/8085\" data-hovercard-type=\"pull_request\" data-hovercard-url=\"/block/buzz/pull/8085/hovercard\">block/buzz#8085</a>. The QR starts and refreshes automatically; supported phones enter the desktop’s six-digit code, while older phones retain code comparison. Identity export stays native, and leaving Settings cancels pairing. Desktop verifies a separate random code with a five-attempt limit before export; an unacknowledged transfer stays visible until the user deliberately retries.</p>\n<p dir=\"auto\">Validated: independent agent review, 81 protocol tests/doctests, 17 native pairing tests, 11 component/client tests, composition checks, and 16 Chromium/WebKit pairing and Settings checks. Seven browser scenarios cover Settings integration, cleanup, responsive layout stability, and reduced motion with fixture IPC; no existing cases removed. Native staging connected to the production relay and was tried with an older phone. <strong>Still to verify:</strong> complete code-entry pairing with the updated mobile app.</p>\n<p dir=\"auto\">Snapshots use disposable fixture data and the reserved example relay <code class=\"notranslate\">wss://relay.example/pairing</code>; the QR screenshot was decoded to verify its destination.</p>\n<markdown-accessiblity-table><table role=\"table\">\n<thead>\n<tr>\n<th>Scan QR</th>\n<th>Enter desktop code on phone</th>\n</tr>\n</thead>\n<tbody>\n<tr>\n<td><a target=\"_blank\" rel=\"noopener noreferrer nofollow\" href=\"https://raw.githubusercontent.com/block/buzz-app/kennylopez-mobile-pairing-plugin/docs/images/pairing/qr.png\"><img src=\"https://raw.githubusercontent.com/block/buzz-app/kennylopez-mobile-pairing-plugin/docs/images/pairing/qr.png\" alt=\"Pair mobile QR\" style=\"max-width: 100%;\"></a></td>\n<td><a target=\"_blank\" rel=\"noopener noreferrer nofollow\" href=\"https://raw.githubusercontent.com/block/buzz-app/kennylopez-mobile-pairing-plugin/docs/images/pairing/code.png\"><img src=\"https://raw.githubusercontent.com/block/buzz-app/kennylopez-mobile-pairing-plugin/docs/images/pairing/code.png\" alt=\"Desktop verification code\" style=\"max-width: 100%;\"></a></td>\n</tr>\n</tbody>\n</table></markdown-accessiblity-table>",
+ "state": "closed",
+ "draft": false,
+ "merged": true,
+ "merged_at": "2026-10-06T22:55:25Z",
+ "updated_at": "2026-10-06T22:55:27Z",
+ "created_at": "2026-10-05T17:18:19Z",
+ "additions": 8350,
+ "deletions": 23,
+ "changed_files": 42,
+ "comments": 4,
+ "user": {
+  "login": "klopez4212",
+  "avatar_url": "https://avatars.githubusercontent.com/u/7863796?v=4"
+ },
+ "merged_by": {
+  "login": "kalvinnchau",
+  "avatar_url": "https://avatars.githubusercontent.com/u/3486716?v=4"
+ },
+ "head": {
+  "label": "block:kennylopez-mobile-pairing-plugin",
+  "ref": "kennylopez-mobile-pairing-plugin",
+  "sha": "01d9320e3f409dff8a27b4d009df1b2d5388c835",
+  "repo": {
+   "full_name": "block/buzz-app"
+  }
+ },
+ "base": {
+  "label": "block:main",
+  "ref": "main",
+  "sha": "5feaddbfcbc41f93c259610492978eb886c9055c",
+  "repo": {
+   "full_name": "block/buzz-app"
+  }
+ }
+}

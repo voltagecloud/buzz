@@ -1,0 +1,127 @@
+name: Build
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/build.yml
+      - .github/actions/**
+      - scripts/package-*
+      - scripts/bundle-macos-*
+      - scripts/check-macos-*
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux x86_64 (.deb)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Builds inside ubuntu:26.04, so the package links Ubuntu's libraries.
+      - run: scripts/package-deb.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: buzz-linux-x86_64
+          path: dist/*.deb
+          if-no-files-found: error
+
+  macos:
+    name: macOS ${{ matrix.arch }} (.dmg)
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/gstreamer
+      # The Rust that the Nix dev shell gets from the locked nixpkgs.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Keep the release build when packaging fails after it.
+          cache-on-failure: true
+      - run: scripts/package-macos.sh
+      # The bundle loads only what it carries, and plays media with the
+      # GStreamer framework moved away.
+      - run: scripts/check-macos-dmg.sh dist/*.dmg
+      - run: ls -l dist/*.dmg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: buzz-macos-${{ matrix.arch }}
+          path: dist/*.dmg
+          if-no-files-found: error
+
+  windows:
+    name: Windows x86_64 (.zip)
+    runs-on: windows-latest
+    steps:
+      # The buzz-app git dependencies have paths past MAX_PATH.
+      - run: git config --system core.longpaths true
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/gstreamer
+      # The Rust that the Nix dev shell gets from the locked nixpkgs.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked --release -p buzz-gpui -p buzzd
+      - run: |
+          python -m pip install pefile
+          python scripts/package-windows.py "$env:GSTREAMER_ROOT"
+      # The bundled Node runs every bundled plugin.
+      - run: dist/Buzz/lib/buzz-gpui/node/bin/node.exe scripts/check-plugins.mjs dist/Buzz/share/buzz-gpui/plugins
+      - uses: actions/upload-artifact@v4
+        with:
+          name: buzz-windows-x86_64
+          path: dist/*.zip
+          if-no-files-found: error
+
+  release:
+    name: Attach to release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, macos, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      # The in-app updater installs a package only if its checksum is
+      # listed here.
+      - run: cd dist && sha256sum -- * > SHA256SUMS && cat SHA256SUMS
+      # A new release stays a draft until every asset is up, so installed
+      # copies never see it half uploaded. A tag with a suffix (v1.2.0-rc.1)
+      # is a prerelease, which the updater skips.
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          created=false
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            prerelease=()
+            [[ "$TAG" == *-* ]] && prerelease=(--prerelease)
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" \
+              --generate-notes --draft "${prerelease[@]}"
+            created=true
+          fi
+          gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          if $created; then
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+          fi

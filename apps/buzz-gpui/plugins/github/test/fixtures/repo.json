@@ -1,0 +1,11 @@
+{
+ "full_name": "block/buzz-app",
+ "description": "A new desktop/web app experience for buzz",
+ "stargazers_count": 24,
+ "language": "TypeScript",
+ "default_branch": "main",
+ "owner": {
+  "login": "block",
+  "avatar_url": "https://avatars.githubusercontent.com/u/185116535?v=4"
+ }
+}

@@ -1,0 +1,131 @@
+[
+  {
+    "name": "legacy without revision",
+    "accepted": true,
+    "tags": [["h", "11111111-1111-4111-8111-111111111111"]]
+  },
+  {
+    "name": "first save",
+    "accepted": true,
+    "tags": [
+      ["h", "11111111-1111-4111-8111-111111111111"],
+      ["expected-revision", "none"]
+    ]
+  },
+  {
+    "name": "replace exact revision",
+    "accepted": true,
+    "tags": [
+      ["h", "11111111-1111-4111-8111-111111111111"],
+      [
+        "expected-revision",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      ]
+    ]
+  },
+  {
+    "name": "client id UTF-16 limit",
+    "accepted": true,
+    "tags": [
+      ["h", "11111111-1111-4111-8111-111111111111"],
+      [
+        "client-id",
+        "🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝"
+      ]
+    ]
+  },
+  {
+    "name": "client id over UTF-16 limit",
+    "accepted": false,
+    "tags": [
+      ["h", "11111111-1111-4111-8111-111111111111"],
+      [
+        "client-id",
+        "🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝🐝x"
+      ]
+    ]
+  },
+  {
+    "name": "invalid revision",
+    "accepted": false,
+    "tags": [
+      ["h", "11111111-1111-4111-8111-111111111111"],
+      ["expected-revision", "bad"]
+    ]
+  },
+  {
+    "name": "uppercase revision",
+    "accepted": false,
+    "tags": [
+      ["h", "11111111-1111-4111-8111-111111111111"],
+      [
+        "expected-revision",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      ]
+    ]
+  },
+  {
+    "name": "revision tag extra field",
+    "accepted": false,
+    "tags": [
+      ["h", "11111111-1111-4111-8111-111111111111"],
+      ["expected-revision", "none", "extra"]
+    ]
+  },
+  {
+    "name": "duplicate revision",
+    "accepted": false,
+    "tags": [
+      ["h", "11111111-1111-4111-8111-111111111111"],
+      ["expected-revision", "none"],
+      ["expected-revision", "none"]
+    ]
+  },
+  {
+    "name": "null tag",
+    "accepted": false,
+    "tags": [["h", "11111111-1111-4111-8111-111111111111"], null],
+    "deserializes": false
+  },
+  {
+    "name": "empty tag",
+    "accepted": false,
+    "tags": [["h", "11111111-1111-4111-8111-111111111111"], []]
+  },
+  {
+    "name": "missing channel",
+    "accepted": false,
+    "tags": []
+  },
+  {
+    "name": "duplicate channel",
+    "accepted": false,
+    "tags": [
+      ["h", "11111111-1111-4111-8111-111111111111"],
+      ["h", "11111111-1111-4111-8111-111111111111"]
+    ]
+  },
+  {
+    "name": "notification tag",
+    "accepted": false,
+    "tags": [
+      ["h", "11111111-1111-4111-8111-111111111111"],
+      ["p", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+    ]
+  },
+  {
+    "name": "privilege tag",
+    "accepted": false,
+    "tags": [["h", "11111111-1111-4111-8111-111111111111"], ["role", "admin"]]
+  },
+  {
+    "name": "invalid channel",
+    "accepted": false,
+    "tags": [["h", "invalid"]]
+  },
+  {
+    "name": "channel tag extra field",
+    "accepted": false,
+    "tags": [["h", "11111111-1111-4111-8111-111111111111", "extra"]]
+  }
+]

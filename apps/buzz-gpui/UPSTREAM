@@ -1,0 +1,5 @@
+# Vendored snapshot of benthecarman/buzz-gpui. scripts/sync-buzz-gpui.sh reads
+# and rewrites this file; edit it only through that script.
+repository=https://github.com/benthecarman/buzz-gpui.git
+ref=v0.2.0
+commit=033bf9e7edfaa22d2f6c9ebc818722abbadca71f

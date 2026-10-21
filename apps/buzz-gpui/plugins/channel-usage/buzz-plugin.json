@@ -1,0 +1,6 @@
+{
+  "id": "buzz.channel-usage",
+  "name": "Channel Usage",
+  "description": "The token and cost counters agents reported for a channel.",
+  "command": ["node", "--enable-source-maps", "dist/plugin.mjs"]
+}

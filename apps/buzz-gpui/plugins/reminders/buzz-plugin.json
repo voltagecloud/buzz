@@ -1,0 +1,7 @@
+{
+  "id": "buzz.reminders",
+  "name": "Reminders",
+  "description": "Remind me about a message, the Reminders page, and a notification when one comes due.",
+  "command": ["node", "--enable-source-maps", "dist/plugin.mjs"],
+  "permissions": ["send-messages"]
+}

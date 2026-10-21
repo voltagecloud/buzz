@@ -1,0 +1,6 @@
+{
+  "id": "buzz.bestie",
+  "name": "Bestie",
+  "description": "Your companion's home page until agent chat connects.",
+  "command": ["node", "--enable-source-maps", "dist/plugin.mjs"]
+}

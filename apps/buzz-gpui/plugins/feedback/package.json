@@ -1,0 +1,8 @@
+{
+  "name": "@buzz/feedback",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@buzz/plugin-sdk": "*"
+  }
+}

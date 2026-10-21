@@ -1,0 +1,1008 @@
+{
+  "version": "20260925T154625166Z",
+  "collections": [
+    {
+      "id": "fuzzies",
+      "label": "Fuzzies",
+      "coverAvatarId": "fuzzies-1",
+      "avatarIds": [
+        "fuzzies-1",
+        "fuzzies-2",
+        "fuzzies-3",
+        "fuzzies-4",
+        "fuzzies-5",
+        "fuzzies-6",
+        "fuzzies-7",
+        "fuzzies-8",
+        "fuzzies-9",
+        "fuzzies-10",
+        "fuzzies-11",
+        "fuzzies-12",
+        "fuzzies-13",
+        "fuzzies-14",
+        "fuzzies-15",
+        "fuzzies-16",
+        "fuzzies-17",
+        "fuzzies-18",
+        "fuzzies-19"
+      ]
+    },
+    {
+      "id": "gloopies",
+      "label": "Gloopies",
+      "coverAvatarId": "gloopies-1",
+      "avatarIds": [
+        "gloopies-1",
+        "gloopies-2",
+        "gloopies-3",
+        "gloopies-4",
+        "gloopies-5",
+        "gloopies-6",
+        "gloopies-7",
+        "gloopies-8",
+        "gloopies-9",
+        "gloopies-10",
+        "gloopies-11",
+        "gloopies-12",
+        "gloopies-13",
+        "gloopies-14",
+        "gloopies-15",
+        "gloopies-16",
+        "gloopies-17",
+        "gloopies-18",
+        "gloopies-19",
+        "gloopies-20",
+        "gloopies-21",
+        "gloopies-22",
+        "gloopies-23"
+      ]
+    },
+    {
+      "id": "pollies",
+      "label": "Figgies",
+      "coverAvatarId": "pollies-2",
+      "avatarIds": [
+        "pollies-2",
+        "pollies-9",
+        "pollies-10",
+        "pollies-21",
+        "pollies-23",
+        "pollies-24",
+        "pollies-25"
+      ]
+    }
+  ],
+  "assets": [
+    {
+      "id": "fuzzies-1",
+      "label": "Fuzzies 1",
+      "collectionId": "fuzzies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/fuzzies/fuzzies-1.png",
+      "sha256": "62e4d9908e2274fcb23b2eedf5b872065e0dc125a17dbc86058c040a8ace58b3",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/fuzzies/fuzzies-1.webm",
+          "sha256": "2380a307f7dfa3d8a643e71a3805b69f14ae7450cc9e3387eabb20f6a6c6f30e",
+          "byteSize": 562357
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/fuzzies/fuzzies-1.mp4",
+          "sha256": "b822c12ce654a893e75e38390d4cee0a0665935156af0b33a8f0b2f5c657551a",
+          "byteSize": 3587616
+        }
+      }
+    },
+    {
+      "id": "fuzzies-2",
+      "label": "Fuzzies 2",
+      "collectionId": "fuzzies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/fuzzies/fuzzies-2.png",
+      "sha256": "d632fa1420b67e250c207a394deb23c9407500d37a2cf7f4aebfe4321c52659f",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/fuzzies/fuzzies-2.webm",
+          "sha256": "13814e37ab8536191d6524e759e50b72ce0ff5537236ff9483719e2ace470667",
+          "byteSize": 775342
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/fuzzies/fuzzies-2.mp4",
+          "sha256": "fb6f87df5d833b12b1bb31b50db1920244d847fecb087d544da84ad8d98ce680",
+          "byteSize": 3748493
+        }
+      }
+    },
+    {
+      "id": "fuzzies-3",
+      "label": "Fuzzies 3",
+      "collectionId": "fuzzies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/fuzzies/fuzzies-3.png",
+      "sha256": "9460e90cb1b5e5bdd7b7cfdbda9dfe2b2db6cb963aeca4fed806c167799fcd81",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/fuzzies/fuzzies-3.webm",
+          "sha256": "301d92bf22c82d7abafef1114a081bfd869174c54c176de6ba81e2dd0a676465",
+          "byteSize": 446315
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/fuzzies/fuzzies-3.mp4",
+          "sha256": "0e54f12d8cd725025c4ffcb53bfbd54e77fcb67a25840d8a816b1c58cb068d1c",
+          "byteSize": 3396604
+        }
+      }
+    },
+    {
+      "id": "fuzzies-4",
+      "label": "Fuzzies 4",
+      "collectionId": "fuzzies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/fuzzies/fuzzies-4.png",
+      "sha256": "2e4714214c734e3278f61923fa95e3411a59498e806e442706d2a65a7e681991",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/fuzzies/fuzzies-4.webm",
+          "sha256": "ee139a93180d64ee60990b59348061d4676f92e4d7630b6951d8311307079507",
+          "byteSize": 512709
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/fuzzies/fuzzies-4.mp4",
+          "sha256": "2096c81485ca1bca0bb6f331a1ee7e79fa8ce536b6fbc9ac8b64d2e09e34d7f8",
+          "byteSize": 3577602
+        }
+      }
+    },
+    {
+      "id": "fuzzies-5",
+      "label": "Fuzzies 5",
+      "collectionId": "fuzzies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/fuzzies/fuzzies-5.png",
+      "sha256": "7d7757591fdac7db40260ebcf30bb6c67c339f04dc86cefe7bd716ee149d419f",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/fuzzies/fuzzies-5.webm",
+          "sha256": "c9df25c6e2be8ba58b1ca768f093254665ddbced93d85a93e1f8263ca2132cbd",
+          "byteSize": 398035
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/fuzzies/fuzzies-5.mp4",
+          "sha256": "f4ed22538c1cb7377683c5337e0464fb4fe11f42b8b040b71e0fcc8c2ca24b6a",
+          "byteSize": 3370086
+        }
+      }
+    },
+    {
+      "id": "fuzzies-6",
+      "label": "Fuzzies 6",
+      "collectionId": "fuzzies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/fuzzies/fuzzies-6.png",
+      "sha256": "8c36257c9b4f7927771197803cfa15b0529f110277cd09855629f17ac1869407",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/fuzzies/fuzzies-6.webm",
+          "sha256": "67cfe087be1b9158e1e531779d790b5b1ffbc81c628a9642f069d829c31eb6bd",
+          "byteSize": 334667
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/fuzzies/fuzzies-6.mp4",
+          "sha256": "e5d06587c06bd1be9aebc323b284dedf238e2f77a22136d420244dc0d8e1b2ef",
+          "byteSize": 3353871
+        }
+      }
+    },
+    {
+      "id": "fuzzies-7",
+      "label": "Fuzzies 7",
+      "collectionId": "fuzzies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/fuzzies/fuzzies-7.png",
+      "sha256": "b796f575f9548fd9a223febf01baaffb8200e656069f988276df594fdb7e925c",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/fuzzies/fuzzies-7.webm",
+          "sha256": "4259ee6f611acca64dd891d186a57d8e828c9916be63ad663b6d007a8c0c3712",
+          "byteSize": 336258
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/fuzzies/fuzzies-7.mp4",
+          "sha256": "62dd3b1adcfd0bd2436e87238250ab97902e6f8443b4f1ea4f30113fa515ce33",
+          "byteSize": 3361424
+        }
+      }
+    },
+    {
+      "id": "fuzzies-8",
+      "label": "Fuzzies 8",
+      "collectionId": "fuzzies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/fuzzies/fuzzies-8.png",
+      "sha256": "e0fc09d6a3f80149213cbf2d22820bb730eb3afd2f7f0e7028f63000e2d60044",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/fuzzies/fuzzies-8.webm",
+          "sha256": "964281b00abd0252fec95cee853bc932796f6c8ae544ad1bbc9d1621716a9e92",
+          "byteSize": 595441
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/fuzzies/fuzzies-8.mp4",
+          "sha256": "4018b072770b784f1e761908746adf8628e08a02c106db704f1014a83f0a55a6",
+          "byteSize": 3675297
+        }
+      }
+    },
+    {
+      "id": "fuzzies-9",
+      "label": "Fuzzies 9",
+      "collectionId": "fuzzies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/fuzzies/fuzzies-9.png",
+      "sha256": "602b9014afb383013949d12f2e063b3596fb5583bd62d5e61872bc9cd0dd103a",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/fuzzies/fuzzies-9.webm",
+          "sha256": "41c957f1af633d6204e426f33869dccbea5f89e36900194d0844aa842aaaca1f",
+          "byteSize": 408337
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/fuzzies/fuzzies-9.mp4",
+          "sha256": "b9192330cf2c35de94bf7e9130446bb3be23fc50ed826f6a3976e9525fea45c2",
+          "byteSize": 3449154
+        }
+      }
+    },
+    {
+      "id": "fuzzies-10",
+      "label": "Fuzzies 10",
+      "collectionId": "fuzzies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/fuzzies/fuzzies-10.png",
+      "sha256": "43302b129846728e9382cec31df7ff463846461dce94a251d86ff7fe8dba7e26",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/fuzzies/fuzzies-10.webm",
+          "sha256": "91aae276e60788344c3c8e5625250efa8a1d3445f126f17a089036045933c79d",
+          "byteSize": 284697
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/fuzzies/fuzzies-10.mp4",
+          "sha256": "ff22603459c7da335f58528b0519456ced5cdd671d0ee3d9953288920d0c81aa",
+          "byteSize": 2353341
+        }
+      }
+    },
+    {
+      "id": "fuzzies-11",
+      "label": "Fuzzies 11",
+      "collectionId": "fuzzies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/fuzzies/fuzzies-11.png",
+      "sha256": "5f3e416db15b352747d81348d22c902251e1337ab0e1f15e4c1ce7a766ad504b",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/fuzzies/fuzzies-11.webm",
+          "sha256": "5c23407983561c51939c2b67f8cc2ffc21150d7bfc9be5f89265294bb562be66",
+          "byteSize": 814784
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/fuzzies/fuzzies-11.mp4",
+          "sha256": "4ad1571cbf3c46e69e88149d08d7c49553cd9976bb246042c220e797b4fa1a97",
+          "byteSize": 3746617
+        }
+      }
+    },
+    {
+      "id": "fuzzies-12",
+      "label": "Fuzzies 12",
+      "collectionId": "fuzzies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/fuzzies/fuzzies-12.png",
+      "sha256": "c2513d43f913698c0eed89e046431893e2409d4584cb2b65febd9e1f1f7f2c69",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/fuzzies/fuzzies-12.webm",
+          "sha256": "bd25e2bcca0dfc809b76256625504ddad0ef531b41c38125db45474736362e40",
+          "byteSize": 979614
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/fuzzies/fuzzies-12.mp4",
+          "sha256": "e1216b727c7c8051602a2b2ca8669ee84aa38a34dff8c9c6f824fe61f4f576f2",
+          "byteSize": 4102906
+        }
+      }
+    },
+    {
+      "id": "fuzzies-13",
+      "label": "Fuzzies 13",
+      "collectionId": "fuzzies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/fuzzies/fuzzies-13.png",
+      "sha256": "d1ab16a8c959a0e061acc9eaffccbc646a5254fb93a52d8c0a634bae5de2c502",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/fuzzies/fuzzies-13.webm",
+          "sha256": "e53c580fb7da7da0f8a9f3fed400c93f233f3acc2383773fd80eda406cbfd969",
+          "byteSize": 344707
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/fuzzies/fuzzies-13.mp4",
+          "sha256": "8e6e40a6ba54dc8b616fd0dfc4dc5b3e470bb0f76a5281974bb2e32e8b4e0dff",
+          "byteSize": 3358935
+        }
+      }
+    },
+    {
+      "id": "fuzzies-14",
+      "label": "Fuzzies 14",
+      "collectionId": "fuzzies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/fuzzies/fuzzies-14.png",
+      "sha256": "14329a9a2a3f6bdaaf77ae0eb793f25df0a8b5eec9a7e0c94701ebaad81ca5a3",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/fuzzies/fuzzies-14.webm",
+          "sha256": "8466ee48433d8584fcdc409393f7a6765a6f95164e52b0ea5824b98268f95c29",
+          "byteSize": 775482
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/fuzzies/fuzzies-14.mp4",
+          "sha256": "276de0fc2d6466d4ca170de22e41ca29770320b92b50428c848d3a0a78afeb0b",
+          "byteSize": 3739689
+        }
+      }
+    },
+    {
+      "id": "fuzzies-15",
+      "label": "Fuzzies 15",
+      "collectionId": "fuzzies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/fuzzies/fuzzies-15.png",
+      "sha256": "9a58147074788f34e5cf0e261a18bc71ea76d88900d1a377c51f1d2ef1db9fd2",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/fuzzies/fuzzies-15.webm",
+          "sha256": "ce20ee905c6e2300a465297e73574651d89053541042e1131664417b897416f2",
+          "byteSize": 345318
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/fuzzies/fuzzies-15.mp4",
+          "sha256": "bc1fae7689b1b0d7aa0d3bd04e0bce41ea146eacfee6da608ac94a0b6a81657b",
+          "byteSize": 2689389
+        }
+      }
+    },
+    {
+      "id": "fuzzies-16",
+      "label": "Fuzzies 16",
+      "collectionId": "fuzzies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/fuzzies/fuzzies-16.png",
+      "sha256": "78ab494fa990dfd0468abb8facc7f66533abd003567ab3d00a89f73689251338",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/fuzzies/fuzzies-16.webm",
+          "sha256": "3f0ba84d31b9bf98034d272fbd58e5f712a25e7978554e83880339cbf0a0d124",
+          "byteSize": 528191
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/fuzzies/fuzzies-16.mp4",
+          "sha256": "640284b0115fd3b112be82672c96b56ba3fd26e9a0d6cbd531c00646866cae2a",
+          "byteSize": 3438276
+        }
+      }
+    },
+    {
+      "id": "fuzzies-17",
+      "label": "Fuzzies 17",
+      "collectionId": "fuzzies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/fuzzies/fuzzies-17.png",
+      "sha256": "810b3007d917575603e0edadf91ea2662bd87262fa0a8a67e416b6c80b2c09b6",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/fuzzies/fuzzies-17.webm",
+          "sha256": "a0a7239d6ae446d08e51f331c89ae41f425a46ef4ed2d09b8e420d26868156ee",
+          "byteSize": 246182
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/fuzzies/fuzzies-17.mp4",
+          "sha256": "aa7787e47aaed4fa7ebdb87d521fb44ea9eb71e402a10cf561636ade243bc9ff",
+          "byteSize": 1873124
+        }
+      }
+    },
+    {
+      "id": "fuzzies-18",
+      "label": "Fuzzies 18",
+      "collectionId": "fuzzies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/fuzzies/fuzzies-18.png",
+      "sha256": "8e769221ffd584c6978baf1dcd2e3426fe68d422e48a824284723a2f64fc7798",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/fuzzies/fuzzies-18.webm",
+          "sha256": "53829413ff200d97db80862d71a4df17648fb899ac4731326b00c519577e170c",
+          "byteSize": 265391
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/fuzzies/fuzzies-18.mp4",
+          "sha256": "bcca5aebbd02ede2e73a19da5f44418a772de7b02f519cb55deb43f782acc876",
+          "byteSize": 3064104
+        }
+      }
+    },
+    {
+      "id": "fuzzies-19",
+      "label": "Fuzzies 19",
+      "collectionId": "fuzzies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/fuzzies/fuzzies-19.png",
+      "sha256": "fe21296e09bc5a8a4c1b04f24b028d1f26537facc7e41124ed8ebdfe0a5ab403",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/fuzzies/fuzzies-19.webm",
+          "sha256": "b31ef2518412be7afa0a6d3b5a2351c8c176287cd2cda4820c7d96d479f5696e",
+          "byteSize": 4107094
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/fuzzies/fuzzies-19.mp4",
+          "sha256": "fb9618c47bdbcfb24f2238780174522938fcb8242a9860acc3e150c6f5a4c904",
+          "byteSize": 6242390
+        }
+      }
+    },
+    {
+      "id": "gloopies-1",
+      "label": "Gloopies 1",
+      "collectionId": "gloopies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-1.png",
+      "sha256": "4a376e0f9e0bcb71829cb2b71993254ed5f57bb5667b57073100612415cdeb7a",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-1.webm",
+          "sha256": "3c6115ef11a389021dd26563169cfa08d9b977eea5f60c21bf6109d050358a67",
+          "byteSize": 886174
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-1.mp4",
+          "sha256": "61475fcd551b1c4f1b1871aadda9868c5ea9333b1238328351a567d16e342f05",
+          "byteSize": 4087416
+        }
+      }
+    },
+    {
+      "id": "gloopies-2",
+      "label": "Gloopies 2",
+      "collectionId": "gloopies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-2.png",
+      "sha256": "68d72593bcbaf8a821bb47ff66bfa30ca9b4e5957fd6db9e379db70a037a0557",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-2.webm",
+          "sha256": "efe6677767ac92e647666e334541b41a15cef23b608c125352a19fca41ec77b2",
+          "byteSize": 941444
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-2.mp4",
+          "sha256": "8af7406907ee6927940356aecddc2b125fa43509e832e7914a60af4de510cc0b",
+          "byteSize": 4415483
+        }
+      }
+    },
+    {
+      "id": "gloopies-3",
+      "label": "Gloopies 3",
+      "collectionId": "gloopies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-3.png",
+      "sha256": "7f0db59378f9c1f5e1d1e55d608af91e033126e9a783e0df93ded473f17c418b",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-3.webm",
+          "sha256": "dcd12f68b9428c22a108153bb875e7a8bef3507b332de09db5c09ebcd79e4f57",
+          "byteSize": 1136712
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-3.mp4",
+          "sha256": "f455613d6f83ff175e9d11da1f69cb34ba1328753d8b8ff67a232a2b535e5797",
+          "byteSize": 4428777
+        }
+      }
+    },
+    {
+      "id": "gloopies-4",
+      "label": "Gloopies 4",
+      "collectionId": "gloopies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-4.png",
+      "sha256": "907620732da523711e10fe5f17c43892c90bf1a541196078887c009cdedab0f4",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-4.webm",
+          "sha256": "ebc27dae67888e200d501b92e6ba193f217afa2bbff3b57facc6e2a802154e1e",
+          "byteSize": 848393
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-4.mp4",
+          "sha256": "3eab00bdf6ccfc38118c6743a44dc1ec795347b29a8c4214b5d8ef45cb000069",
+          "byteSize": 4027746
+        }
+      }
+    },
+    {
+      "id": "gloopies-5",
+      "label": "Gloopies 5",
+      "collectionId": "gloopies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-5.png",
+      "sha256": "1b0be94c1e9591553f31f94651a205f07e2584fab890f3a4cb6f11ceaa00f0f4",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-5.webm",
+          "sha256": "d0bde66014fe401f13314f766e8d03ba01f1082d73c6e33d7cb709378077c11d",
+          "byteSize": 995959
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-5.mp4",
+          "sha256": "fa86b237a38409e2cc9072ab722a4ae552789430a019c784f14a8487637ff262",
+          "byteSize": 4051280
+        }
+      }
+    },
+    {
+      "id": "gloopies-6",
+      "label": "Gloopies 6",
+      "collectionId": "gloopies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-6.png",
+      "sha256": "ce09402b8de238e02bc191f0273e0de5a2378b9e28ab65fe064eabcd1baeedd9",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-6.webm",
+          "sha256": "d564f606c3dfdaa1de3de516bf1c1e6d7930ac1e990d26549129c481dbb44115",
+          "byteSize": 799269
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-6.mp4",
+          "sha256": "42354ea5176e94e0b8b97eeef7b07b2ac9d55bb5f2a98d1ecf0856664cdefffb",
+          "byteSize": 3759894
+        }
+      }
+    },
+    {
+      "id": "gloopies-7",
+      "label": "Gloopies 7",
+      "collectionId": "gloopies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-7.png",
+      "sha256": "cf73f77f9fb6a1504396d58c8416a8dba52e981f2ea8d82ad4c897d60626d200",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-7.webm",
+          "sha256": "d03b7767d695b340361a6f83e679b9fa72b67c57f3901c54632a7dacfdae30a0",
+          "byteSize": 826850
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-7.mp4",
+          "sha256": "3ae7f24b82d8e71f66dcc1b362e82117e9d1edf598731d687cef3b38cd1d7b5a",
+          "byteSize": 3980892
+        }
+      }
+    },
+    {
+      "id": "gloopies-8",
+      "label": "Gloopies 8",
+      "collectionId": "gloopies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-8.png",
+      "sha256": "7c65240e4bc4c88e3cb956e02104634a633b7dd98e1d42e43494074a37d75a4a",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-8.webm",
+          "sha256": "869ce7b040ecba42677dd6555dfd5c61e6fd9c604f89dee707f8ebfffe7dfb54",
+          "byteSize": 936412
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-8.mp4",
+          "sha256": "aba48b04887a8be37469d2ee6a80682f2811acf0ffef4c6f0282324456750586",
+          "byteSize": 4124326
+        }
+      }
+    },
+    {
+      "id": "gloopies-9",
+      "label": "Gloopies 9",
+      "collectionId": "gloopies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-9.png",
+      "sha256": "c5d7cb86fdd46ccdb0f18e229d7811777d9a7215acbdf6faf67beb5d7a55b44e",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-9.webm",
+          "sha256": "c587005dcb9197564ecb378ecd93cf3d954c26c4d7619d95302b7686fa276129",
+          "byteSize": 943807
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-9.mp4",
+          "sha256": "fd1f6b7adc6fe4d6b6e77f4015a033d1324b0f97a9822d0f4d03b859ce3e9f4e",
+          "byteSize": 4078581
+        }
+      }
+    },
+    {
+      "id": "gloopies-10",
+      "label": "Gloopies 10",
+      "collectionId": "gloopies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-10.png",
+      "sha256": "7982f3b88eb5188c852d8e164a275c9a536d739bc6137c24bdfaafe0a9a35ce0",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-10.webm",
+          "sha256": "165c1cd72626fd8e5ab7a4b52f32bcd401d9d7f341e341a5718d9542596a24be",
+          "byteSize": 881273
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-10.mp4",
+          "sha256": "d3f22a3b79963e6ae95e2f8e6f5523015c6f480a159073b1bc063abb4f6ea702",
+          "byteSize": 4135789
+        }
+      }
+    },
+    {
+      "id": "gloopies-11",
+      "label": "Gloopies 11",
+      "collectionId": "gloopies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-11.png",
+      "sha256": "6e6b6b82e4cff185528e56508fcfa4a32e100952bd7d9fe5dc2180d6e6e5ce5d",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-11.webm",
+          "sha256": "10e1b873a4732b904a514c00fe5c2772a32a64a282034a9c91c8a346130390ab",
+          "byteSize": 899295
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-11.mp4",
+          "sha256": "eab3b59515cd3a7f0353a76f9140633af21f5a4a4accd771677a2d43d109e4b6",
+          "byteSize": 4079372
+        }
+      }
+    },
+    {
+      "id": "gloopies-12",
+      "label": "Gloopies 12",
+      "collectionId": "gloopies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-12.png",
+      "sha256": "035ba488f621bdf0867a20ccaa5ca66c0e8cdcac9ab4bcd0ba85e887546ce75e",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-12.webm",
+          "sha256": "b52886a566214778e36bd9b5893f98da2faf3c404bf71b42ccc74c12d44cdfe1",
+          "byteSize": 867243
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-12.mp4",
+          "sha256": "fb164080c52ce712b3cece4fd7cf328f512c3777ba6549e0235b760392c1381d",
+          "byteSize": 4018035
+        }
+      }
+    },
+    {
+      "id": "gloopies-13",
+      "label": "Gloopies 13",
+      "collectionId": "gloopies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-13.png",
+      "sha256": "7884a0dcb486da8b0eb01cd8cdb775457d8398a97d8858c2911c255f38b967b4",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-13.webm",
+          "sha256": "e72aa6404d645c350dabf45ba20b9313b4f5af3b6e48c97c03137c7610e18f9b",
+          "byteSize": 1157793
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-13.mp4",
+          "sha256": "66950a53c034092d4c842e769f667370b3f3be0838053523fa5eef4e08bae25e",
+          "byteSize": 4449278
+        }
+      }
+    },
+    {
+      "id": "gloopies-14",
+      "label": "Gloopies 14",
+      "collectionId": "gloopies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-14.png",
+      "sha256": "1e5b7d752e2e853228f897071588d29311dbc602f3aaa4abf8b4b308069de11c",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-14.webm",
+          "sha256": "e1682dd1995b5f0a0e143a875a8d451ca6df4e5ba9adec2df3cc315ef689c80f",
+          "byteSize": 1029928
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-14.mp4",
+          "sha256": "de5fb07f3545a38c16bfab59455a5815cf41c5fc8ec437fa994a31901b19e1ae",
+          "byteSize": 4232273
+        }
+      }
+    },
+    {
+      "id": "gloopies-15",
+      "label": "Gloopies 15",
+      "collectionId": "gloopies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-15.png",
+      "sha256": "8bd9a337ef919be0d6b55154eb22d5176af974afd83bbd811e3c0741d7672d3d",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-15.webm",
+          "sha256": "13e2f916bbbf5754561041c5e50df4a9b6ff28bf7e978f208fd787decde7d5ae",
+          "byteSize": 891417
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-15.mp4",
+          "sha256": "9de3a6c7c3bcdbfa03dcb228b08a1db0eba6d42f66352264c7d827991b303408",
+          "byteSize": 4161795
+        }
+      }
+    },
+    {
+      "id": "gloopies-16",
+      "label": "Gloopies 16",
+      "collectionId": "gloopies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-16.png",
+      "sha256": "5e1c06a602958cff87b620da89d39bf841f5bd5b70de3f5b666302cd6a97e683",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-16.webm",
+          "sha256": "d73fdcedd8e7c7460f9e3c95ae7b77a8792ee372929d1c5a36c3c705239360bf",
+          "byteSize": 992895
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-16.mp4",
+          "sha256": "3e040dc107cabae9a55d69dc971e166945c41c369d2616c1da3e99b172f50495",
+          "byteSize": 4278864
+        }
+      }
+    },
+    {
+      "id": "gloopies-17",
+      "label": "Gloopies 17",
+      "collectionId": "gloopies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-17.png",
+      "sha256": "454498d640a7f49c6b17e393deed1a53278f34fc6959b7416f351f03bcafd3f9",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-17.webm",
+          "sha256": "16c7d83660042d4b65212cc160cf2fef723a36b7b2075bc0db3b378bf57c916d",
+          "byteSize": 781077
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-17.mp4",
+          "sha256": "4b95aedf2d5654aa195498f4ef305061342b32943c72927c77013ce456cda648",
+          "byteSize": 4041698
+        }
+      }
+    },
+    {
+      "id": "gloopies-18",
+      "label": "Gloopies 18",
+      "collectionId": "gloopies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-18.png",
+      "sha256": "fdffd8dbe8d98329f8e92b37fab0c6bde37be8fe680c0875cc6133285042626e",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-18.webm",
+          "sha256": "30187392165ecff2a87d8a20118490817ce35a19de04f37fcbed94e2275a8788",
+          "byteSize": 877967
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-18.mp4",
+          "sha256": "583e44af88b674a502e0b0dcf06c8ddacb345bb526b1770340f0271d8e10ae3c",
+          "byteSize": 3941245
+        }
+      }
+    },
+    {
+      "id": "gloopies-19",
+      "label": "Gloopies 19",
+      "collectionId": "gloopies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-19.png",
+      "sha256": "4b99cd50f905735451c8bb60273d8e96daffe1ad17324157eeb569045166893f",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-19.webm",
+          "sha256": "ad3cd0c5b81c3b77305b5f0e13201eccef34707deff8ec43958dc3fd858e7524",
+          "byteSize": 1200666
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-19.mp4",
+          "sha256": "fe51639bc1ae8da73763e63fea520acb4fbea756fe347071b80ef2b5918611d8",
+          "byteSize": 4279106
+        }
+      }
+    },
+    {
+      "id": "gloopies-20",
+      "label": "Gloopies 20",
+      "collectionId": "gloopies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-20.png",
+      "sha256": "5a65ae1ba976420951218ac4fc63e8bb85fe69c04403fb5a9b86487c381ceabf",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-20.webm",
+          "sha256": "97f4984a5198ae59dce91d36e349cac44e45a2af2a679fab432978983f762c2a",
+          "byteSize": 856140
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-20.mp4",
+          "sha256": "203ffe247ce1384ae271fb2aa3bb6374640234703f3b072108ce5bbe7c61470f",
+          "byteSize": 3896315
+        }
+      }
+    },
+    {
+      "id": "gloopies-21",
+      "label": "Gloopies 21",
+      "collectionId": "gloopies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-21.png",
+      "sha256": "68d890b4a8cd0ade6d36001fc2fb6fe050d8e20cb328f30e7eb1a413aa4530b9",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-21.webm",
+          "sha256": "6576299a80b1944c9a4361335feb60c5ac12feb06df9b8f1d917b5a77458502a",
+          "byteSize": 863845
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-21.mp4",
+          "sha256": "13597ce106a10c662068a917d54fd3b31d94eea9d05df59555301cb6d7c0ba96",
+          "byteSize": 4060537
+        }
+      }
+    },
+    {
+      "id": "gloopies-22",
+      "label": "Gloopies 22",
+      "collectionId": "gloopies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-22.png",
+      "sha256": "7ea574993e3e7b774cf5a2ae60ab3b5279047fc1e39c4fda3d311df95c249b5e",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-22.webm",
+          "sha256": "a3c6c7c6538aeee456ac03f41ea696d1f329b3852219cade2779f9efbddf7311",
+          "byteSize": 755143
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-22.mp4",
+          "sha256": "7196887e06bd90e1fe4ad924ed0af726eb97623c3d8c76330146a717996fb526",
+          "byteSize": 3835813
+        }
+      }
+    },
+    {
+      "id": "gloopies-23",
+      "label": "Gloopies 23",
+      "collectionId": "gloopies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-23.png",
+      "sha256": "38aada6385fad9bb4455b4aecc1544a7d938a21748d96a6681bc5a0419368a8c",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/gloopies/gloopies-23.webm",
+          "sha256": "9a004d282b2fe757554e8ccd642fa1d816a38bef45c1d16a93ffce38a70ea0f1",
+          "byteSize": 1013704
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/gloopies/gloopies-23.mp4",
+          "sha256": "0e15d5b8455ae2e7c342ae40839199946db8948a990a1f392590ab90d5f9a08e",
+          "byteSize": 1849548
+        }
+      }
+    },
+    {
+      "id": "pollies-2",
+      "label": "Figgies 2",
+      "collectionId": "pollies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/pollies/pollies-2.png",
+      "sha256": "811dd4b6c753ca6558253db36a3176dd5348c7166cbde2612b6b2e34708dbe7c",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/pollies/pollies-2.webm",
+          "sha256": "ac930dbe8786256e9b4453c9efe812c5709d609001c3d6f751b4575221cc5e96",
+          "byteSize": 565656
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/pollies/pollies-2.mp4",
+          "sha256": "7bcc65015eb1f94a84c97549457daddfed4af1c3248c6b76d47f42dc5a618f0e",
+          "byteSize": 3488672
+        }
+      }
+    },
+    {
+      "id": "pollies-9",
+      "label": "Figgies 9",
+      "collectionId": "pollies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/pollies/pollies-9.png",
+      "sha256": "a6197f2132d213e77d8fab5be9f567f6303e085f35113928063503af416859a4",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/pollies/pollies-9.webm",
+          "sha256": "99e540acfa14142db3dc5bb13a78e38c83f0a7b5b67f651b1b77dbf49474bd8a",
+          "byteSize": 852972
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/pollies/pollies-9.mp4",
+          "sha256": "71b114e9fa6f7c230c9157609a9e24970f1bdd4148b3a9a137bad1d080dfb9b7",
+          "byteSize": 3915571
+        }
+      }
+    },
+    {
+      "id": "pollies-10",
+      "label": "Figgies 10",
+      "collectionId": "pollies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/pollies/pollies-10.png",
+      "sha256": "0395210b784a95136924caee72f1875f127166aef3e16a4688b8eb543c43d628",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/pollies/pollies-10.webm",
+          "sha256": "9eb87df9af3ec0e22f532b117af4e20700b943e08c1567521c108e1d944fe7a2",
+          "byteSize": 844811
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/pollies/pollies-10.mp4",
+          "sha256": "e551151fe160db4565fb0f8eeda157b3095dedddbc8d28f02f687ebacbdb02b3",
+          "byteSize": 4091774
+        }
+      }
+    },
+    {
+      "id": "pollies-21",
+      "label": "Figgies 21",
+      "collectionId": "pollies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/pollies/pollies-21.png",
+      "sha256": "919e45975dfaffe81e09ee37b89a23d686ce31aceb148b04e1e530d939501d8e",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/pollies/pollies-21.webm",
+          "sha256": "afdf5e61ec21e666e12172d62478d8309fd8e1f4b784ee6f1c07578e601662da",
+          "byteSize": 882785
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/pollies/pollies-21.mp4",
+          "sha256": "48122e74bc8d56b08e8883577193f1866d2ed8dcf37a068e73beb73b476c339c",
+          "byteSize": 4145152
+        }
+      }
+    },
+    {
+      "id": "pollies-23",
+      "label": "Figgies 23",
+      "collectionId": "pollies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/pollies/pollies-23.png",
+      "sha256": "4f50bc3a8b6f996b6386c022083476b81f97c98f5a1ec5efc59a67504ac43a30",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/pollies/pollies-23.webm",
+          "sha256": "864219907f2b8015098b635431fd1de8e8c801b02513a4ce117e05e62f1434c1",
+          "byteSize": 701590
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/pollies/pollies-23.mp4",
+          "sha256": "9148b6601c61b2fd65f35a80268a7b2d2a7cc6c503c73cf2563e0860a7e56f43",
+          "byteSize": 3509150
+        }
+      }
+    },
+    {
+      "id": "pollies-24",
+      "label": "Figgies 24",
+      "collectionId": "pollies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/pollies/pollies-24.png",
+      "sha256": "c8956094bd38ac1d1ad51f8898eacd7a07f6bc2e8367e620f4cd07b763429ec8",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/pollies/pollies-24.webm",
+          "sha256": "4ed71c5a2b81d2955dfd9cabd9415887fb3c266711e4037af215738a60fef2fb",
+          "byteSize": 964063
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/pollies/pollies-24.mp4",
+          "sha256": "fd9d0d9d9523c1f4040b913ea66ef48eccca190640d704c8544f74e87e8aacf4",
+          "byteSize": 4268558
+        }
+      }
+    },
+    {
+      "id": "pollies-25",
+      "label": "Figgies 25",
+      "collectionId": "pollies",
+      "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/pollies/pollies-25.png",
+      "sha256": "c96ec63987bcd451f8fe57f5ce7b951504ff3361fd957174e643f1635e8da989",
+      "animations": {
+        "webm": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/webm/pollies/pollies-25.webm",
+          "sha256": "d870b628f40d77c4f891bd82393f5abe4db0df37487ba783bc68502b8daa7593",
+          "byteSize": 1018033
+        },
+        "hevc": {
+          "url": "https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/hevc/pollies/pollies-25.mp4",
+          "sha256": "7d88a9084c4b076ef60cc898192fd98fda967fc2ca2b2e5b6409f31ab7d19059",
+          "byteSize": 4286977
+        }
+      }
+    }
+  ]
+}
