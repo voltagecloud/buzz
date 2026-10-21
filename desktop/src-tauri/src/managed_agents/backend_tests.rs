@@ -522,6 +522,24 @@ esac"#,
 }
 
 #[test]
+fn subagent_capability_is_public_but_credentials_still_fail() {
+    for enabled in [true, false] {
+        assert!(
+            validate_provider_config(&serde_json::json!({"pod_options": {
+                "enable_subagents": enabled, "priority_class_name": "agent-session"
+            }}))
+            .is_ok()
+        );
+    }
+    for credential in [
+        serde_json::json!({"access_token":"secret"}),
+        serde_json::json!({"api_key":"secret"}),
+    ] {
+        assert!(validate_provider_config(&serde_json::json!({"pod_options":credential})).is_err());
+    }
+}
+
+#[test]
 fn validate_provider_config_rejects_secret_key() {
     let cfg = serde_json::json!({"api_key": "val"});
     assert!(validate_provider_config(&cfg).is_err());

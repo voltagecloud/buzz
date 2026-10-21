@@ -105,6 +105,14 @@ pub struct PodOptions {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     /// Expose the server-assigned Pod UID to a bounded owner setup gate.
     pub setup_pending: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    /// Mount a short-lived ServiceAccount token so an orchestrating agent can
+    /// claim sub-agent Sandboxes (§Sub-agents). Off by default.
+    pub enable_subagents: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Optional priority class (a DNS subdomain name), also usable by
+    /// namespace-scoped resource quotas.
+    pub priority_class_name: Option<String>,
 }
 
 impl PodOptions {
@@ -217,6 +225,20 @@ fn optional_u64(cfg: &serde_json::Value, field: &str) -> Result<Option<u64>, Str
     }
 }
 
+/// An RFC 1123 subdomain (≤253 chars of dot-separated labels), the name
+/// format of cluster objects such as PriorityClasses.
+fn valid_dns_subdomain(name: &str) -> bool {
+    name.len() <= 253
+        && name.split('.').all(|label| {
+            !label.is_empty()
+                && label.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+                && label.ends_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+                && label
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        })
+}
+
 /// A Kubernetes namespace name: RFC 1123 label, ≤63 chars. Validated here so a
 /// typo fails with a named field instead of an apiserver rejection partway
 /// through a deploy.
@@ -277,11 +299,21 @@ pub fn parse(cfg: &serde_json::Value) -> Result<ProviderConfig, String> {
         Some(n) => Some(n),
     };
 
-    let pod_options: PodOptions = match cfg.get("pod_options") {
+    let mut pod_options: PodOptions = match cfg.get("pod_options") {
         None => PodOptions::default(),
         Some(value) => serde_json::from_value(value.clone())
             .map_err(|e| format!("provider_config.pod_options: {e}"))?,
     };
+    if let Some(name) = pod_options.priority_class_name.as_mut() {
+        *name = name.trim().to_string();
+        if !valid_dns_subdomain(name) {
+            return Err(
+                "provider_config.pod_options.priority_class_name must be a PriorityClass name \
+                 (DNS subdomain: lowercase letters, digits, '-' and '.')"
+                    .into(),
+            );
+        }
+    }
     if pod_options.active_deadline_seconds.is_some_and(|n| n <= 0) {
         return Err("provider_config.pod_options.active_deadline_seconds must be positive".into());
     }
@@ -320,13 +352,24 @@ pub fn parse(cfg: &serde_json::Value) -> Result<ProviderConfig, String> {
         }
     }
 
+    let service_account = optional_string(cfg, "service_account")?;
+    // Without a named ServiceAccount the token would be minted for the
+    // namespace's `default` account, which the deployment does not scope.
+    if pod_options.enable_subagents && service_account.is_none() {
+        return Err(
+            "provider_config.pod_options.enable_subagents requires provider_config.service_account: \
+             the sub-agent token is minted for that ServiceAccount, never `default`"
+                .into(),
+        );
+    }
+
     Ok(ProviderConfig {
         context: optional_string(cfg, "context")?,
         namespace,
         image,
         resources,
         inactivity_seconds,
-        service_account: optional_string(cfg, "service_account")?,
+        service_account,
         pod_options,
     })
 }
@@ -410,7 +453,9 @@ pub fn config_schema() -> serde_json::Value {
                     "ephemeral_storage_request": {"type": "string", "minLength": 1},
                     "ephemeral_storage_limit": {"type": "string", "minLength": 1},
                     "active_deadline_seconds": {"type": "integer", "minimum": 1},
-                    "setup_pending": {"type": "boolean", "default": false}
+                    "setup_pending": {"type": "boolean", "default": false},
+                    "enable_subagents": {"type": "boolean", "default": false},
+                    "priority_class_name": {"type": "string", "minLength": 1}
                 }
             },
             "service_account": {
@@ -640,12 +685,43 @@ mod tests {
             serde_json::json!({"workspace_size_limit": " "}),
             serde_json::json!({"unknown": true}),
             serde_json::json!({"node_selector": "amd64"}),
+            serde_json::json!({"priority_class_name": ""}),
+            serde_json::json!({"priority_class_name": "  "}),
+            serde_json::json!({"priority_class_name": "Agent-Session"}),
+            serde_json::json!({"priority_class_name": "agent_session"}),
+            serde_json::json!({"priority_class_name": "agent..session"}),
+            serde_json::json!({"priority_class_name": "-agent"}),
+            serde_json::json!({"priority_class_name": "a".repeat(254)}),
+            serde_json::json!({"priority_class_name": 5}),
+            // No service account: the token would belong to `default`.
+            serde_json::json!({"enable_subagents": true}),
         ] {
             let mut cfg = minimal();
-            cfg["pod_options"] = bad;
-            assert!(parse(&cfg).unwrap_err().contains("pod_options"));
+            cfg["pod_options"] = bad.clone();
+            assert!(parse(&cfg).unwrap_err().contains("pod_options"), "{bad}");
         }
         assert!(parse(&minimal()).unwrap().pod_options.is_default());
+    }
+
+    #[test]
+    fn accepts_subagents_with_a_service_account_and_a_trimmed_priority_class() {
+        let mut cfg = minimal();
+        cfg["service_account"] = " agent-sa ".into();
+        cfg["pod_options"] = serde_json::json!({
+            "enable_subagents": true,
+            "priority_class_name": " buzz-agent.session-1 ",
+        });
+        let parsed = parse(&cfg).unwrap();
+        assert_eq!(parsed.service_account.as_deref(), Some("agent-sa"));
+        assert!(parsed.pod_options.enable_subagents);
+        assert_eq!(
+            parsed.pod_options.priority_class_name.as_deref(),
+            Some("buzz-agent.session-1")
+        );
+        cfg["pod_options"]["priority_class_name"] = "a".repeat(253).into();
+        assert!(parse(&cfg).is_ok());
+        cfg["service_account"] = " ".into();
+        assert!(parse(&cfg).unwrap_err().contains("enable_subagents"));
     }
 
     #[test]
