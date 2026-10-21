@@ -35,6 +35,8 @@ jobs:
         working-directory: apps/buzz-gpui
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
       - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
       # The dev shell provides the toolchain and the native libraries. Its Rust
       # goes on PATH so rust-cache keys on the Rust that builds.
@@ -62,6 +64,8 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
       - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
       - name: Dev shell
         run: nix develop --command sh -c 'dirname "$(command -v rustc)"; dirname "$(command -v cargo)"' >> "$GITHUB_PATH"
@@ -82,6 +86,8 @@ jobs:
         working-directory: apps/buzz-gpui
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
       - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
       # Types, tests and the build of the client's own Node plugins.
       - name: Check
@@ -96,6 +102,8 @@ jobs:
         working-directory: apps/buzz-gpui
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
       - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
       # The dependency build's store path changes only with its inputs
       # (Cargo.lock, the manifests, the toolchain), so keep it between runs
@@ -143,6 +151,8 @@ jobs:
       - if: runner.os == 'Windows'
         run: git config --system core.longpaths true
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
       - uses: ./apps/buzz-gpui/.github/actions/gstreamer
       # The Rust that the Nix dev shell gets from the locked nixpkgs.
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
