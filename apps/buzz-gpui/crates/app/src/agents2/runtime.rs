@@ -13,6 +13,7 @@ use super::service::Agents2;
 pub use super::working::Working;
 use buzz_host::api::{
     AppAgentEvent, AppAgentRequest, AppAgentResponse, HostProtocol, Request, Response,
+    SandboxRequest, SandboxResponse,
 };
 use buzz_host_rpc::{HostClient, RpcError};
 use futures::FutureExt;
@@ -22,6 +23,7 @@ use serde_json::Value;
 use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// Why an agent woke.
 #[derive(Clone, Debug)]
@@ -188,6 +190,40 @@ impl HostLink {
             Err(RpcError::Failed(message)) => Err(message),
             Err(error) => Err(error.to_string()),
         }
+    }
+
+    /// Asks the host's remote workspace backend, waiting as long as the
+    /// provider may take. A host from before this answers as one without
+    /// a backend.
+    pub(crate) async fn sandbox(&self, request: SandboxRequest) -> Result<SandboxResponse, String> {
+        let client = self.client.clone();
+        let within = sandbox_timeout(&request);
+        let response = self
+            .runtime
+            .spawn(async move {
+                client
+                    .request_within(Request::Sandbox(request), within)
+                    .await
+            })
+            .await
+            .map_err(|_| "The request was cancelled".to_string())?;
+        match response {
+            Ok(Response::Sandbox(response)) => Ok(response),
+            Ok(_) => Err("The host answered with something else".into()),
+            Err(error) if error.is_unsupported() => Ok(SandboxResponse::unsupported()),
+            Err(RpcError::Failed(message)) => Err(message),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+}
+
+/// How long the GUI waits for a sandbox request: a little longer than the
+/// provider is given, 10 minutes to start a session and 2 to end one.
+fn sandbox_timeout(request: &SandboxRequest) -> Duration {
+    match request {
+        SandboxRequest::Start { .. } | SandboxRequest::Recover { .. } => Duration::from_secs(660),
+        SandboxRequest::End { .. } => Duration::from_secs(150),
+        SandboxRequest::Providers | SandboxRequest::Lifecycle { .. } => Duration::from_secs(30),
     }
 }
 
@@ -461,3 +497,6 @@ impl AgentHandle {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

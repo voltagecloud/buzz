@@ -74,6 +74,7 @@ mod status;
 mod tab_drag;
 pub mod terminal;
 pub mod thread;
+pub mod thread_banners;
 pub(crate) mod time;
 pub mod toasts;
 mod typing;
