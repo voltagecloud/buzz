@@ -147,7 +147,7 @@ impl SettingsPage {
             } else {
                 c.text_subtle
             },
-            format!("Version {}", env!("CARGO_PKG_VERSION")),
+            format!("Version {}", crate::updates::VERSION),
             status,
             state.action.map(|(label, action)| {
                 button("check-updates", label)
