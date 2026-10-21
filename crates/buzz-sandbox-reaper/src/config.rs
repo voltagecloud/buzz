@@ -36,7 +36,7 @@ pub struct Namespace {
     pub checkpoint_prefix: String,
 }
 
-fn is_dns_label(name: &str) -> bool {
+pub(crate) fn is_dns_label(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 63
         && name.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
@@ -46,7 +46,7 @@ fn is_dns_label(name: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
-fn is_owner(value: &str) -> bool {
+pub(crate) fn is_owner(value: &str) -> bool {
     value.len() == 64
         && value
             .bytes()
