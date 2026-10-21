@@ -14,14 +14,24 @@ path = "src/main.rs"
 # never in buzz-backend-kubernetes, whose binary ships inside the desktop app.
 [dependencies]
 buzz-backend-kubernetes = { path = "../buzz-backend-kubernetes" }
+kube = { workspace = true, features = ["runtime"] }
+k8s-openapi = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures-util = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
+axum = { workspace = true }
+http = "1"
+http-body-util = "0.1"
 metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
 tracing = { workspace = true }
 aws-config = { version = "1", default-features = false, features = ["rt-tokio", "default-https-client"] }
 aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "default-https-client"] }
 
 [dev-dependencies]
+tower = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
 proptest = { workspace = true }

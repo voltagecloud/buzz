@@ -1569,6 +1569,21 @@ waits for a later pass. It never records `missing` because S3 failed.
 `timeout` or `other` for an outage, `access_denied` or `not_found_bucket` for
 a misconfigured role or bucket.
 
+The reaper keeps observed receipts in memory only. A reaper restart, or a
+watch gap while a stop or replacement deletes the Pod, can lose a receipt.
+When the bound Pod is gone and no receipt for it was observed, the reaper
+therefore treats the receipt as unknown, not as absent. It records the newest
+object directly under the session's own `<developer prefix><generation>/`
+prefix, by S3 `LastModified`, and records `missing` only when that listing is
+empty. The prefix again comes from the configuration and the Sandbox, never
+from the Pod. All sessions of one developer share one IAM role, so a
+compromised session of the same developer could write into that prefix; it
+cannot reach another developer's prefix.
+
+Each pass has a 60-second deadline. Liveness (`/healthz`) records when each
+pass starts, so slow S3 or apiserver responses fail only readiness
+(`/readyz`) and do not restart the reaper.
+
 A recovered session that has no verified checkpoint of its own (for example,
 its restore failed) keeps the checkpoint it was recovered from. The reaper
 takes the key from the provider-written `restore-checkpoint` annotation,

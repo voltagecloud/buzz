@@ -8,5 +8,7 @@
 mod config;
 mod evidence;
 mod plan;
+mod reconcile;
+mod server;
 
 fn main() {}
