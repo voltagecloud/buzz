@@ -126,6 +126,8 @@ fn main() {
         channel_templates::init(cx);
         agent_plugins::claude_code::init(cx);
         agent_plugins::codex::init(cx);
+        #[cfg(feature = "voltage-sandbox")]
+        agent_plugins::remote_workspace::init(cx);
         mission_control::init(cx);
         ui::pages::init(cx);
         ui::agent_activity::init(cx);

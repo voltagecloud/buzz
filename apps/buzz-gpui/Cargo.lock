@@ -1048,6 +1048,7 @@ dependencies = [
  "buzz-keychain",
  "buzz-pair-mobile",
  "buzz-relay-client",
+ "buzz-remote-sessions",
  "buzz-sandbox-host",
  "buzz-ui",
  "buzzodz-plugins",
