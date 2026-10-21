@@ -37,24 +37,41 @@ cd "$(git rev-parse --show-toplevel)"
 repository=$(sed -n 's/^repository=//p' "$prefix/UPSTREAM")
 upstream_slug=$(sed -E 's#^https://github.com/([^/]+/[^/.]+)(\.git)?$#\1#' <<<"$repository")
 
-outside=$(git diff --name-only "$range" -- . ":(exclude)$prefix")
-if [ -n "$outside" ]; then
-  echo "These commits also change files outside $prefix:" >&2
-  echo "$outside" >&2
+[ -n "$(git rev-list "$range")" ] || { echo "No commits in $range." >&2; exit 1; }
+# format-patch leaves merge commits out, and with them any conflict
+# resolution they carry.
+if [ -n "$(git rev-list --merges "$range")" ]; then
+  echo "$range contains merge commits. Offer a linear series of commits." >&2
+  exit 1
+fi
+# Check each commit, not just the range's endpoints: format-patch --relative
+# silently drops changes outside $prefix, even ones a later commit reverts.
+refused=false
+for commit in $(git rev-list --reverse "$range"); do
+  files=$(git diff-tree --no-commit-id --name-only -r "$commit")
+  outside=$(grep -v "^$prefix/" <<<"$files" || true)
+  if [ -n "$outside" ]; then
+    echo "$(git log -1 --format='%h %s' "$commit") also changes files outside $prefix:" >&2
+    sed 's/^/  /' <<<"$outside" >&2
+    refused=true
+  fi
+  if grep -qx "$prefix/UPSTREAM" <<<"$files"; then
+    echo "$(git log -1 --format='%h %s' "$commit") changes $prefix/UPSTREAM, which is Voltage-only." >&2
+    refused=true
+  fi
+done
+if $refused; then
   echo "Split the upstreamable part into its own commits." >&2
   exit 1
 fi
-if [ -n "$(git diff --name-only "$range" -- "$prefix/UPSTREAM")" ]; then
-  echo "These commits change $prefix/UPSTREAM, which is Voltage-only." >&2
-  exit 1
-fi
-[ -n "$(git rev-list "$range")" ] || { echo "No commits in $range." >&2; exit 1; }
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 git format-patch --quiet --relative="$prefix" -o "$work/patches" "$range"
 
 git clone --quiet --depth 200 --branch "$base" "$repository" "$work/upstream"
+# A tag base leaves no origin/<base> ref, so list the new commits from this.
+base_commit=$(git -C "$work/upstream" rev-parse HEAD)
 git -C "$work/upstream" checkout --quiet -b "$branch"
 if ! git -C "$work/upstream" am --quiet -3 -S "$work"/patches/*.patch; then
   git -C "$work/upstream" am --abort || true
@@ -62,7 +79,7 @@ if ! git -C "$work/upstream" am --quiet -3 -S "$work"/patches/*.patch; then
   exit 1
 fi
 echo "Built $branch on $upstream_slug $base:"
-git -C "$work/upstream" log --format='  %h %G? %s' "origin/$base..HEAD"
+git -C "$work/upstream" log --format='  %h %G? %s' "$base_commit..HEAD"
 
 if $dry_run; then echo "Dry run: nothing pushed."; exit 0; fi
 
@@ -71,7 +88,7 @@ case "$fork" in
   *) push_url="git@github.com:$fork.git" ;;
 esac
 git -C "$work/upstream" push --quiet "$push_url" "$branch"
-fork_owner=$(sed -E 's#^(git@github.com:|https://github.com/)?([^/]+)/.*#\2#' <<<"$fork")
+fork_owner=$(sed -E 's#^(ssh://)?(git@github\.com[:/]|https://github\.com/)?([^/]+)/.*#\3#' <<<"$fork")
 echo "Pushed $branch to $fork."
 if $open; then
   gh pr create --repo "$upstream_slug" --base "$base" --head "$fork_owner:$branch" --fill --draft
