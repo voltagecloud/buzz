@@ -1048,6 +1048,7 @@ dependencies = [
  "buzz-keychain",
  "buzz-pair-mobile",
  "buzz-relay-client",
+ "buzz-sandbox-host",
  "buzz-ui",
  "buzzodz-plugins",
  "chrono",
@@ -1240,6 +1241,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-remote-sessions"
+version = "0.1.0"
+dependencies = [
+ "dirs 6.0.0",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "uuid",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "buzz-sandbox-host"
+version = "0.2.0"
+dependencies = [
+ "buzz-host",
+ "buzz-host-rpc",
+ "buzz-identity",
+ "buzz-remote-sessions",
+ "futures",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "buzz-ui"
 version = "0.2.0"
 dependencies = [
@@ -1258,6 +1290,7 @@ dependencies = [
  "buzz-host",
  "buzz-host-rpc",
  "buzz-keychain",
+ "buzz-sandbox-host",
  "clap",
  "dirs 6.0.0",
  "gethostname",
