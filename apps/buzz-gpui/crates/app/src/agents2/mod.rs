@@ -27,7 +27,7 @@ mod service;
 pub mod store;
 pub mod teams;
 mod typing;
-mod working;
+pub(crate) mod working;
 
 use attention::{AttentionObject, TimerState};
 use serde_json::Value;

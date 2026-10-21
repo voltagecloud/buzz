@@ -8,6 +8,8 @@ mod opened;
 pub mod owner_relay;
 pub mod process;
 mod provider;
+#[cfg(feature = "voltage-sandbox")]
+pub mod remote_workspace;
 pub(crate) mod tabs;
 mod transcript_view;
 
