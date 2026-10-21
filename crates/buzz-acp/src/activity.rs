@@ -32,7 +32,7 @@ impl ActivityRecorder {
     pub(crate) fn record(&mut self, event: &ObserverEvent) -> Option<Value> {
         let mut details = json!({});
         let kind = match event.kind.as_str() {
-            "checkpoint_started" => event.kind.as_str(),
+            "checkpoint_started" | "checkpoint_receipt_failed" => event.kind.as_str(),
             "checkpoint_failed" => {
                 details["reason"] = event.payload["reason"].as_str().into();
                 details["exit_code"] = event.payload["exit_code"].as_i64().into();
@@ -308,6 +308,15 @@ mod tests {
         e.kind = "acp_write".into();
         e.payload = json!({"method":"session/prompt","params":{"prompt":"SECRET"}});
         assert!(recorder.record(&e).is_none());
+    }
+
+    #[test]
+    fn checkpoint_receipt_failures_are_platform_records() {
+        let mut recorder = ActivityRecorder::new();
+        let mut e = event(json!({"error_kind": "permission denied"}));
+        e.kind = "checkpoint_receipt_failed".into();
+        let record = recorder.record(&e).unwrap();
+        assert_eq!(record["event"], "checkpoint_receipt_failed");
     }
 
     #[test]
