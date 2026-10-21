@@ -1309,6 +1309,8 @@ declare global {
       status: PresenceStatus;
     }) => void;
     __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
+      /** Persist without live delivery when arranging a cold-query fixture. */
+      emitLive?: boolean;
       channelName: string;
       content: string;
       parentEventId?: string | null;
@@ -5253,6 +5255,7 @@ function emitMockChannelMessage(
   createdAt?: number,
   pending?: boolean,
   id?: string,
+  emitLive = true,
 ) {
   const eventKind = kind ?? 9;
   if (!parentEventId) {
@@ -5272,7 +5275,7 @@ function emitMockChannelMessage(
     );
     if (pending) event.pending = true;
     recordMockMessage(channelId, event);
-    emitMockLiveEvent(channelId, event);
+    if (emitLive) emitMockLiveEvent(channelId, event);
     return event;
   }
 
@@ -5305,9 +5308,13 @@ function emitMockChannelMessage(
   );
   if (pending) event.pending = true;
   recordMockMessage(channelId, event);
-  emitMockLiveEvent(channelId, event);
+  if (emitLive) emitMockLiveEvent(channelId, event);
   const rootEvent = history.find((candidate) => candidate.id === rootEventId);
-  if (rootEvent && mockHuddle?.state.ephemeral_channel_id === channelId) {
+  if (
+    emitLive &&
+    rootEvent &&
+    mockHuddle?.state.ephemeral_channel_id === channelId
+  ) {
     const summary = buildMockChannelThreadSummary(
       channelId,
       rootEvent,
@@ -11646,6 +11653,7 @@ export function maybeInstallE2eTauriMocks() {
     createdAt,
     pending,
     id,
+    emitLive,
   }) => {
     const channel = mockChannels.find(
       (candidate) => candidate.name === channelName,
@@ -11665,6 +11673,7 @@ export function maybeInstallE2eTauriMocks() {
       createdAt,
       pending,
       id,
+      emitLive,
     );
   };
   window.__BUZZ_E2E_SET_MOCK_USER_STATUS__ = ({
