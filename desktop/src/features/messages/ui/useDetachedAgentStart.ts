@@ -8,7 +8,15 @@ import type { ManagedAgent } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { getErrorMessage } from "./useMentionSendFlow.helpers";
 import type { RemoteAgentSession } from "@/shared/api/remoteAgentSession";
-import { usesThreadSandbox } from "@/features/messages/lib/remoteAgentSession";
+import {
+  remoteSessionRecoveryKind,
+  remoteSessionErrorCode,
+  usesThreadSandbox,
+} from "@/features/messages/lib/remoteAgentSession";
+import {
+  clearRemoteSessionRecoveryPrompt,
+  recordRemoteSessionRecoveryPrompt,
+} from "@/features/messages/lib/remoteSessionRecoveryPrompts";
 
 /**
  * Detached starts still in flight, keyed by the full tenant scope the wake
@@ -203,7 +211,36 @@ export function useDetachedAgentStart(): (
         replayFloorUnix: replayFloorUnix ?? Math.floor(Date.now() / 1000),
         sessionScope,
       })
+        .then(() => {
+          if (sessionScope) {
+            clearRemoteSessionRecoveryPrompt({
+              agentPubkey: agent.pubkey,
+              session: sessionScope,
+              expectedRelayUrl,
+              expectedSignerPubkey,
+            });
+          }
+        })
         .catch((error: unknown) => {
+          // A thread session that ended or wedged is never redeployed
+          // implicitly. Record the failure so the thread can offer the
+          // explicit end/recover actions; the panel fences it by tenant.
+          const message = getErrorMessage(error, "");
+          const recoverable =
+            usesThreadSandbox(agent) &&
+            sessionScope &&
+            remoteSessionRecoveryKind(error) !== null;
+          if (recoverable) {
+            recordRemoteSessionRecoveryPrompt({
+              agentPubkey: agent.pubkey,
+              agentName: agent.name,
+              session: sessionScope,
+              expectedRelayUrl,
+              expectedSignerPubkey,
+              error: message,
+              code: remoteSessionErrorCode(error),
+            });
+          }
           // This settles arbitrarily long after the send, and `<Toaster />`
           // mounts outside the community remount boundary — so an unfenced
           // warning would render this community's agent name and error detail
