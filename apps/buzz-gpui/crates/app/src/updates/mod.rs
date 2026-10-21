@@ -29,7 +29,14 @@ use std::time::Duration;
 
 /// The latest published release; GitHub leaves drafts and prereleases
 /// out of it.
-const LATEST_URL: &str = "https://api.github.com/repos/benthecarman/buzz-gpui/releases/latest";
+const LATEST_URL: &str = "https://api.github.com/repos/voltagecloud/buzz/releases/latest";
+/// This build's version. Release builds set `BUZZ_GPUI_RELEASE_VERSION` to
+/// `<version>+voltage.<n>`, which sorts after the release before it and after
+/// the upstream release of the same version.
+pub const VERSION: &str = match option_env!("BUZZ_GPUI_RELEASE_VERSION") {
+    Some(version) if !version.is_empty() => version,
+    _ => env!("CARGO_PKG_VERSION"),
+};
 /// Development builds can point checks at a stand-in server.
 const URL_OVERRIDE: &str = "BUZZ_UPDATE_URL";
 /// Device preference holding [`Preferences`].
@@ -127,7 +134,7 @@ pub fn init(cx: &mut App) {
         kind,
         platform: Platform::current(),
         preferences,
-        current: semver::Version::parse(env!("CARGO_PKG_VERSION")).expect("a semver version"),
+        current: semver::Version::parse(VERSION).expect("a semver version"),
         url,
         client: fetch::client(),
         cache: Arc::default(),

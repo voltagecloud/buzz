@@ -17,6 +17,22 @@ macOS and Windows) when `apps/buzz-gpui` changes. GitHub does not run the
 workflows under `apps/buzz-gpui/.github/workflows`; port changes to them by
 hand.
 
+### Releases
+
+Run the `Buzz GPUI Release` workflow (`voltage-buzz-gpui-release.yml`) on
+`main`. It builds the .deb, .dmg and .zip packages and publishes them as the
+latest release of `voltagecloud/buzz`, which is where the in-app updater looks.
+
+Releases are versioned `<upstream version>+voltage.<n>` and tagged
+`v<version>`, for example `v0.2.0+voltage.1`. The workflow picks the next `n`
+for the upstream version in `apps/buzz-gpui/Cargo.toml`. Each Voltage release
+sorts after the one before and after the upstream release of the same
+version, so installed copies never update to an upstream build. The suffix
+also keeps the tags clear of the `block/buzz` `v*` tags this fork carries.
+
+The updater reads only the repository's latest release. Publish any other
+release from this repository with `--latest=false`.
+
 `UPSTREAM` records the upstream repository, ref, and commit of the snapshot.
 The import keeps no upstream history: each sync is one signed, signed-off
 commit, as `main` requires.

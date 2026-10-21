@@ -8,7 +8,7 @@ use gpui_kit::*;
 const NOTICE: &str = include_str!("../../../../../NOTICE.md");
 
 pub(super) fn render(cx: &App) -> AnyElement {
-    let version = env!("CARGO_PKG_VERSION");
+    let version = crate::updates::VERSION;
     let info = rows_group(
         vec![
             preference_row(

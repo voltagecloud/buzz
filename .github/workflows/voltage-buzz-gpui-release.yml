@@ -1,0 +1,195 @@
+name: Buzz GPUI Release
+
+# Builds the GPUI client's packages and publishes them as a release of this
+# repository, which the in-app updater reads (apps/buzz-gpui/crates/app/src/
+# updates). Ports apps/buzz-gpui/.github/workflows/build.yml, which GitHub does
+# not run from a subdirectory.
+#
+# A release is <upstream version>+voltage.<n>, tagged v<version>. Each release
+# for an upstream version takes the next n, so it sorts after the release
+# before it and after the upstream release of the same version, and the
+# suffix keeps the tag clear of the upstream block/buzz v* tags. Pull requests
+# that change the packaging build the packages without publishing them.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/voltage-buzz-gpui-release.yml
+      - apps/buzz-gpui/.github/actions/**
+      - apps/buzz-gpui/scripts/package-*
+      - apps/buzz-gpui/scripts/bundle-macos-*
+      - apps/buzz-gpui/scripts/check-macos-*
+
+concurrency:
+  group: buzz-gpui-release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    name: GPUI release version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      upstream: ${{ steps.version.outputs.upstream }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - id: version
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+        run: |
+          upstream=$(python3 -c 'import tomllib; print(tomllib.load(open("apps/buzz-gpui/Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          echo "upstream=benthecarman/buzz-gpui $(sed -n 's/^ref=//p' apps/buzz-gpui/UPSTREAM) ($(sed -n 's/^commit=//p' apps/buzz-gpui/UPSTREAM))" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT" != workflow_dispatch ]; then
+            echo "version=$upstream+voltage.0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$REF" != refs/heads/main ]; then
+            echo "::error::Releases are built from main only."
+            exit 1
+          fi
+          last=$(git ls-remote --tags origin \
+            | sed -nE "s#.*refs/tags/v${upstream//./\\.}\+voltage\.([0-9]+)\$#\1#p" \
+            | sort -n | tail -1)
+          echo "version=$upstream+voltage.$(( ${last:-0} + 1 ))" >> "$GITHUB_OUTPUT"
+
+  linux:
+    name: GPUI Linux x86_64 (.deb)
+    needs: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      BUZZ_GPUI_RELEASE_VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      # Builds inside ubuntu:26.04, so the package links Ubuntu's libraries.
+      - run: scripts/package-deb.sh
+        working-directory: apps/buzz-gpui
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: buzz-gpui-linux-x86_64
+          path: apps/buzz-gpui/dist/*.deb
+          if-no-files-found: error
+
+  macos:
+    name: GPUI macOS ${{ matrix.arch }} (.dmg)
+    needs: version
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    env:
+      BUZZ_GPUI_RELEASE_VERSION: ${{ needs.version.outputs.version }}
+      # The root rust-toolchain.toml pins block/buzz's Rust, and rustup reads
+      # it from apps/buzz-gpui too, so name the GPUI toolchain explicitly.
+      RUSTUP_TOOLCHAIN: 1.98.1
+    defaults:
+      run:
+        working-directory: apps/buzz-gpui
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: ./apps/buzz-gpui/.github/actions/gstreamer
+      # The Rust that the Nix dev shell gets from the locked nixpkgs.
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+        with:
+          workspaces: apps/buzz-gpui
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # Keep the release build when packaging fails after it.
+          cache-on-failure: true
+      - run: scripts/package-macos.sh
+      # The bundle loads only what it carries, and plays media with the
+      # GStreamer framework moved away.
+      - run: scripts/check-macos-dmg.sh dist/*.dmg
+      - run: ls -l dist/*.dmg
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: buzz-gpui-macos-${{ matrix.arch }}
+          path: apps/buzz-gpui/dist/*.dmg
+          if-no-files-found: error
+
+  windows:
+    name: GPUI Windows x86_64 (.zip)
+    needs: version
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      BUZZ_GPUI_RELEASE_VERSION: ${{ needs.version.outputs.version }}
+      RUSTUP_TOOLCHAIN: 1.98.1
+    steps:
+      # The buzz-app git dependencies have paths past MAX_PATH.
+      - run: git config --system core.longpaths true
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: ./apps/buzz-gpui/.github/actions/gstreamer
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+        with:
+          workspaces: apps/buzz-gpui
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo build --locked --release -p buzz-gpui -p buzzd
+        working-directory: apps/buzz-gpui
+      - run: |
+          python -m pip install pefile
+          python scripts/package-windows.py "$env:GSTREAMER_ROOT"
+        working-directory: apps/buzz-gpui
+      # The bundled Node runs every bundled plugin.
+      - run: dist/Buzz/lib/buzz-gpui/node/bin/node.exe scripts/check-plugins.mjs dist/Buzz/share/buzz-gpui/plugins
+        working-directory: apps/buzz-gpui
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: buzz-gpui-windows-x86_64
+          path: apps/buzz-gpui/dist/*.zip
+          if-no-files-found: error
+
+  release:
+    name: GPUI publish release
+    if: github.event_name == 'workflow_dispatch'
+    needs: [version, linux, macos, windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          pattern: buzz-gpui-*
+          merge-multiple: true
+      # The in-app updater installs a package only if its checksum is listed
+      # here.
+      - run: cd dist && sha256sum -- * > SHA256SUMS && cat SHA256SUMS
+      # The release stays a draft until every asset is up, so installed copies
+      # never see it half uploaded. Publishing marks it latest, which is the
+      # release the updater reads.
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ needs.version.outputs.version }}
+          UPSTREAM: ${{ needs.version.outputs.upstream }}
+        run: |
+          notes="Buzz GPUI built from $GITHUB_REPOSITORY@$GITHUB_SHA, on $UPSTREAM."
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "Buzz GPUI ${TAG#v}" --notes "$notes" --draft
+          gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY"
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest

@@ -214,6 +214,21 @@ mod tests {
     }
 
     #[test]
+    fn orders_voltage_releases() {
+        let release = |tag: &str| Release {
+            tag_name: tag.into(),
+            ..release()
+        };
+        let first = release("v0.2.0+voltage.1");
+        assert!(first.newer_than(&v("0.2.0")));
+        assert!(!first.newer_than(&v("0.2.0+voltage.1")));
+        assert!(release("v0.2.0+voltage.10").newer_than(&v("0.2.0+voltage.9")));
+        assert!(!first.newer_than(&v("0.2.0+voltage.2")));
+        assert!(release("v0.3.0+voltage.1").newer_than(&v("0.2.0+voltage.9")));
+        assert!(!first.newer_than(&v("0.3.0")));
+    }
+
+    #[test]
     fn skips_drafts_prereleases_and_odd_tags() {
         let base = release();
         let current = v("0.1.0");

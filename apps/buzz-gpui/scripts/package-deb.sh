@@ -4,6 +4,9 @@
 #
 # Usage: scripts/package-deb.sh            -> dist/buzz-gpui_<version>_amd64.deb
 #
+# BUZZ_GPUI_RELEASE_VERSION, when set, is the package version and the version
+# the app reports.
+#
 # The package carries Buzz's own Node plugins (plugins/) and the Node that
 # runs them, pinned below and checked against its published checksum.
 set -euo pipefail
@@ -24,6 +27,7 @@ docker run --rm \
   -e OWNER="$(id -u):$(id -g)" \
   -e NODE_VERSION="$node_version" \
   -e NODE_SHA256="$node_sha256" \
+  -e BUZZ_GPUI_RELEASE_VERSION \
   -w "$here" \
   ubuntu:26.04 bash -euo pipefail -c '
     export DEBIAN_FRONTEND=noninteractive
@@ -63,7 +67,8 @@ docker run --rm \
     command -v cargo-deb >/dev/null || cargo install -q --locked cargo-deb
     # cargo-deb maps the target/release asset paths onto CARGO_TARGET_DIR.
     cargo build --locked --release -p buzz-gpui
-    cargo deb --no-build -p buzz-gpui -o dist/
+    cargo deb --no-build -p buzz-gpui -o dist/ \
+      ${BUZZ_GPUI_RELEASE_VERSION:+--deb-version "$BUZZ_GPUI_RELEASE_VERSION"}
     chown -R "$OWNER" dist
   '
 ls -la "$here"/dist/*.deb
