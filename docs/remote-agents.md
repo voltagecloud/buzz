@@ -1844,6 +1844,63 @@ workers instead of retaining them. Set `restartPolicy: Never` when completion
 cleanup depends on worker exit. Enforce these settings for every worker claim;
 claim-count quota alone does not ensure cleanup.
 
+### Relay transport {#relay-transport}
+
+A provider can reach the cluster through the Buzz relay instead of a
+kubeconfig. It sends each provider protocol request to an in-cluster session
+manager as a kind `24210` event (`KIND_SANDBOX_SESSION_CONTROL`), and the
+manager does the Kubernetes work with its own credentials. The wire types are
+in `crates/buzz-session-control`.
+
+Kind `24210` is ephemeral (20000–29999): the relay fans it out to connected
+subscribers and never stores it. No stored fallback kind exists.
+
+| Event | Signer | Clear-text tags | Encrypted content (NIP-44 v2) |
+| --- | --- | --- | --- |
+| Request | agent key (`private_key_nsec`); owner key for `enroll` | `["p", <manager>]`, the owner's NIP-OA `auth` tag (not on `enroll`), `expiration` | `{"v":1,"op","request_id","payload"}`, to the manager |
+| Reply | manager key | `["p", <requester>]`, `["e", <request event id>]`, `expiration` | `{"v":1,"request_id","status","response"}`, to the requester |
+
+- `op` is `info`, `deploy`, `stop` or `enroll`. Recovery is a `deploy` with
+  `provider_config.sandbox.recovery`, as in the stdin protocol.
+- `payload` is the provider protocol request, the same JSON as the stdin
+  request, including `op`. `response` is the provider protocol response,
+  including its `code` on a refusal.
+- `status` is `accepted`, then optionally `progress`, then `done`. Only
+  `done` carries `response`.
+- `request_id` is the idempotency key. A retry sends a new event with the
+  same `request_id`.
+- Every event has a NIP-40 `expiration` 120 s after its `created_at`. The
+  receiver refuses a `created_at` more than 60 s from its clock.
+
+**Confidentiality.** A request carries the agent's `private_key_nsec` and
+launch secrets, and `enroll` carries model API keys, so no clear-text data
+travels in these events:
+
+- `content` is always NIP-44 v2 ciphertext, for requests, replies and
+  refusals. The builders take typed envelopes and have no parameter for
+  content. The parser refuses plain JSON, NIP-04 and other NIP-44 versions
+  (`not_ciphertext`), and ciphertext for a different key (`undecryptable`).
+- The parser refuses any tag other than `p`, `e`, `auth` and `expiration`,
+  and any repeated tag. The operation, request id, namespace, agent details
+  and errors are only in the ciphertext.
+- Logs name only the event id, the operation and an error label; never the
+  content or a decrypted payload.
+
+**Residual risk.** The relay does not store these events, but until `24210`
+is in `P_GATED_KINDS` (`crates/buzz-core/src/kind.rs`), any community member
+can subscribe to the kind and see who sent a request to the manager and when.
+That member can also record the ciphertext. NIP-44 has no forward secrecy, so
+a later leak of the manager key exposes every recorded request. Mitigations:
+
+- Add `24210` to `P_GATED_KINDS` upstream, so only the `p`-tagged recipient
+  receives each event. This is required before developers other than admins
+  use the manager.
+- Rotate the manager key. Accepting a previous key during a rotation is a
+  follow-up: the relay accepts events only from the authenticated key, so it
+  needs a second relay connection.
+- The short `expiration` on every event limits how long a relay may hold it
+  for delivery.
+
 ### Distribution
 
 Its own release workflow (macOS arm64/x64 + Linux musl; the sprig workflow's

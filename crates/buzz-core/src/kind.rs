@@ -472,6 +472,11 @@ pub const KIND_AGENT_OBSERVER_FRAME: u32 = 24200;
 /// Ephemeral: huddle emoji reaction burst. Channel-scoped to the ephemeral
 /// huddle channel with an `h` tag; never stored in the timeline.
 pub const KIND_HUDDLE_REACTION: u32 = 24810;
+/// Ephemeral: NIP-44 encrypted Sandbox session control request or reply
+/// between a remote-agent provider and its session manager
+/// (`crates/buzz-session-control`). `p`-tagged to the recipient. Must stay
+/// ephemeral: the content carries agent keys and launch secrets.
+pub const KIND_SANDBOX_SESSION_CONTROL: u32 = 24210;
 // Stream messaging
 /// NIP-29 group chat message kind. V1 used kind:10001 (replaceable range — wrong), then 40001.
 ///
@@ -707,6 +712,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_BLOSSOM_AUTH,
     KIND_PAIRING,
     KIND_AGENT_OBSERVER_FRAME,
+    KIND_SANDBOX_SESSION_CONTROL,
     KIND_HTTP_AUTH,
     KIND_STREAM_MESSAGE,
     KIND_STREAM_MESSAGE_V2,
@@ -894,6 +900,7 @@ const _: () = assert!(KIND_AUTH <= u16::MAX as u32);
 const _: () = assert!(KIND_CANVAS <= u16::MAX as u32);
 const _: () = assert!(KIND_HUDDLE_GUIDELINES <= u16::MAX as u32);
 const _: () = assert!(EPHEMERAL_KIND_MIN < EPHEMERAL_KIND_MAX);
+const _: () = assert!(is_ephemeral(KIND_SANDBOX_SESSION_CONTROL));
 // Compile-time: KIND_AGENT_TURN_METRIC is a regular stored kind (not ephemeral, not replaceable).
 const _: () = assert!(!is_ephemeral(KIND_AGENT_TURN_METRIC));
 const _: () = assert!(!is_replaceable(KIND_AGENT_TURN_METRIC));
