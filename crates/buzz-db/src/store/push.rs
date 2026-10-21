@@ -29,56 +29,29 @@ async fn begin_operation_transaction(
     Ok(sqlx::Transaction::begin(connection, None).await?)
 }
 
-/// Namespace for the per-community push-gate advisory lock. Must match the
-/// key built inside the `enqueue_push_match_job` trigger (migration 0023):
-/// event inserts take it SHARED there; every lease transition that can make
-/// match eligibility true takes it EXCLUSIVE here, forcing a total order so
-/// a concurrent event insert either sees the committed lease or strictly
-/// precedes the activation (in which case no wake was owed). Distinct key
-/// domain from the audit lock and the lease address/author locks.
+/// Namespace for the per-community push-gate advisory lock. Event inserts
+/// take it SHARED in `event_follow_up::enqueue_push_match` (and in the
+/// `enqueue_push_match_job` trigger from migration 0023 until it is retired);
+/// every lease transition that can make match eligibility true takes it
+/// EXCLUSIVE here, forcing a total order so a concurrent event insert either
+/// sees the committed lease or strictly precedes the activation (in which case
+/// no wake was owed). Distinct key domain from the audit lock and the lease
+/// address/author locks.
 const PUSH_GATE_LOCK_NAMESPACE: &str = "buzz_push_gate:";
+
+/// The push-gate advisory lock key for `community`. Both sides of the lock
+/// protocol build it here, so the SHARED and EXCLUSIVE keys cannot drift.
+pub(crate) fn push_gate_lock_key(community: CommunityId) -> String {
+    format!("{PUSH_GATE_LOCK_NAMESPACE}{}", community.as_uuid())
+}
 
 async fn acquire_push_gate_lock(tx: &mut sqlx::PgConnection, community: CommunityId) -> Result<()> {
     crate::observability::observe_advisory_lock(
         crate::observability::LockType::PushGate,
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(format!("{PUSH_GATE_LOCK_NAMESPACE}{}", community.as_uuid()))
+            .bind(push_gate_lock_key(community))
             .execute(&mut *tx),
     )
-    .await?;
-    Ok(())
-}
-
-/// Recovery window for the activation backfill: recent events that the gate
-/// legitimately skipped (no eligible lease at their commit time) are enqueued
-/// when a lease activates, so a user who registers moments after a message
-/// still gets woken. Product coverage only — the advisory-lock total order is
-/// what makes the gate correct; see `PUSH_GATE_LOCK_NAMESPACE`.
-const PUSH_GATE_BACKFILL_SECS: i64 = 120;
-
-/// Enqueue match jobs for recent gate-skipped events. MUST run inside the same
-/// transaction that holds the exclusive push-gate lock: after this commit,
-/// every event is either backfilled here or ordered after the activation and
-/// enqueued by the trigger — running it post-commit would reopen the gap.
-/// Keyed on relay `received_at` (not author-controlled `created_at`); the kind
-/// list mirrors the trigger allowlist; `ON CONFLICT DO NOTHING` dedups against
-/// rows the trigger already enqueued.
-async fn backfill_push_match_jobs(
-    tx: &mut sqlx::PgConnection,
-    community: CommunityId,
-) -> Result<()> {
-    sqlx::query(
-        "INSERT INTO push_match_queue (community_id, event_id) \
-         SELECT community_id, id FROM events \
-         WHERE community_id = $1 \
-           AND kind IN (9, 40002, 45001, 45003) \
-           AND deleted_at IS NULL \
-           AND received_at > now() - make_interval(secs => $2) \
-         ON CONFLICT DO NOTHING",
-    )
-    .bind(community.as_uuid())
-    .bind(PUSH_GATE_BACKFILL_SECS as f64)
-    .execute(&mut *tx)
     .await?;
     Ok(())
 }
@@ -280,7 +253,8 @@ pub async fn accept_lease_event(
     )
     .await?;
     // T1b: an activation can flip the community from "no eligible lease" to
-    // "eligible", so it must serialize against the trigger's shared gate lock.
+    // "eligible", so it must serialize against the event producer's shared
+    // gate lock.
     // Acquired after the address/author locks to keep one global lock order.
     if active.is_some() {
         acquire_push_gate_lock(tx.conn(), community).await?;
@@ -395,6 +369,14 @@ pub async fn accept_lease_event(
         }
         return Err(error.into());
     }
+    // The row above is always kind 30350 with no channel.
+    crate::store::event_follow_up::after_admitted_insert(
+        &mut tx,
+        event.id.as_bytes().as_slice(),
+        30350,
+        None,
+    )
+    .await?;
 
     let (is_active, app_profile, endpoint_hash, endpoint_grant, max_class, subscriptions) = active
         .map_or((false, None, None, None, None, None), |active| {
@@ -428,9 +410,6 @@ pub async fn accept_lease_event(
             return Ok(outcome);
         }
         return Err(error.into());
-    }
-    if is_active {
-        backfill_push_match_jobs(tx.conn(), community).await?;
     }
     tx.commit().await?;
     Ok(AcceptLeaseOutcome::Accepted)
@@ -512,8 +491,8 @@ async fn replace_lease(
         };
 
     // T1b: an activating replacement can flip the community from "no eligible
-    // lease" to "eligible"; serialize it against the trigger's shared gate
-    // lock (gate → lease row, matching accept_lease_event's global order).
+    // lease" to "eligible"; serialize it against the event producer's shared
+    // gate lock (gate → lease row, matching accept_lease_event's global order).
     // Revocations (is_active = false) never make eligibility true and skip it.
     let mut tx =
         begin_operation_transaction(pool, crate::observability::WriterOperation::EventWrite)
@@ -573,9 +552,6 @@ async fn replace_lease(
     .await?;
 
     if accepted.is_some() {
-        if is_active {
-            backfill_push_match_jobs(&mut tx, community).await?;
-        }
         tx.commit().await?;
         return Ok(ReplaceLeaseOutcome::Accepted);
     }
@@ -2440,14 +2416,14 @@ mod postgres_tests {
             .await
             .expect("drain matcher queue");
         let community = make_community(&pool).await;
+        let author = [25; 32];
+        activate(&pool, community, &author, "install", &[26; 32], 1).await;
         let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "poison")
             .sign_with_keys(&nostr::Keys::generate())
             .expect("sign event");
         crate::event::insert_event(&pool, community, &event, None)
             .await
             .expect("insert event");
-        let author = [25; 32];
-        activate(&pool, community, &author, "install", &[26; 32], 1).await;
         let wake_id = match enqueue_wake(
             &pool,
             community,
@@ -2775,38 +2751,14 @@ mod postgres_tests {
         );
     }
 
-    /// T1b lost-wake race, forced (migration 0023): with no eligible lease the
-    /// events trigger must skip the match enqueue, and a lease activation
-    /// racing an in-flight event insert must be ordered AFTER it by the gate
-    /// lock — so the activation's backfill enqueues the event the trigger
-    /// skipped, exactly once. Without the shared/exclusive advisory pair, the
-    /// trigger could read "no lease" while the activation commits
-    /// concurrently, dropping that wake with no retry.
+    // Lease activation must wait for an event insert holding the shared gate lock.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn gate_orders_lease_activation_after_in_flight_event_and_backfills_it() {
+    async fn gate_orders_lease_activation_after_in_flight_event() {
         let pool = setup_pool().await;
         let community = make_community(&pool).await;
 
-        // Phase 0: no lease anywhere in this community — a committed gated-kind
-        // event must not be enqueued.
-        let skipped = nostr::EventBuilder::new(nostr::Kind::Custom(9), "gate skips me")
-            .sign_with_keys(&nostr::Keys::generate())
-            .expect("sign skipped event");
-        crate::event::insert_event(&pool, community, &skipped, None)
-            .await
-            .expect("insert lease-less event");
-        let queued: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM push_match_queue WHERE community_id=$1")
-                .bind(community.as_uuid())
-                .fetch_one(&pool)
-                .await
-                .expect("count queue after lease-less insert");
-        assert_eq!(queued, 0, "gate must skip enqueue with no eligible lease");
-
-        // Phase 1: hold an event-insert transaction open past its INSERT. The
-        // (non-deferred) trigger has already run: shared gate lock held, EXISTS
-        // saw no lease, enqueue skipped — the classic lost-wake window.
+        // Hold the insert transaction open after its trigger takes the shared gate lock.
         let raced = nostr::EventBuilder::new(nostr::Kind::Custom(9), "raced wake")
             .sign_with_keys(&nostr::Keys::generate())
             .expect("sign raced event");
@@ -2822,6 +2774,11 @@ mod postgres_tests {
         .execute(&mut *insert_tx)
         .await
         .expect("insert raced event inside held txn");
+
+        let insert_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *insert_tx)
+            .await
+            .expect("read insert backend pid");
 
         // A concurrent activation must block on the exclusive gate lock until
         // the insert transaction resolves.
@@ -2852,8 +2809,10 @@ mod postgres_tests {
         let mut parked = false;
         for _ in 0..100 {
             let waiting: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND NOT granted",
+                "SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND NOT granted \
+                 AND $1 = ANY(pg_blocking_pids(pid))",
             )
+            .bind(insert_pid)
             .fetch_one(&pool)
             .await
             .expect("inspect advisory waiters");
@@ -2866,8 +2825,7 @@ mod postgres_tests {
         assert!(parked, "activation must block on the exclusive gate lock");
         assert!(!activation.is_finished());
 
-        // Release the event; the activation acquires the gate, and its
-        // backfill must enqueue the event the trigger skipped — exactly once.
+        // Committing the insert releases the shared lock so activation can proceed.
         insert_tx.commit().await.expect("commit raced insert");
         assert_eq!(
             tokio::time::timeout(std::time::Duration::from_secs(10), activation)
@@ -2876,33 +2834,21 @@ mod postgres_tests {
                 .expect("join activation"),
             ReplaceLeaseOutcome::Accepted
         );
-        let backfilled: Vec<Vec<u8>> = sqlx::query_scalar(
-            "SELECT event_id FROM push_match_queue WHERE community_id=$1 ORDER BY created_at",
-        )
-        .bind(community.as_uuid())
-        .fetch_all(&pool)
-        .await
-        .expect("read backfilled queue");
-        assert!(
-            backfilled.contains(&raced.id.as_bytes().to_vec()),
-            "raced event must be recovered by the activation backfill"
-        );
-
-        // Phase 2: with the lease now active, the trigger enqueues directly and
-        // the backfill's ON CONFLICT dedup keeps it single.
+        // The active lease makes subsequent messages eligible for enqueueing.
         let direct = nostr::EventBuilder::new(nostr::Kind::Custom(9), "direct enqueue")
             .sign_with_keys(&nostr::Keys::generate())
             .expect("sign direct event");
         crate::event::insert_event(&pool, community, &direct, None)
             .await
             .expect("insert post-activation event");
-        let per_event: Vec<i64> = sqlx::query_scalar(
-            "SELECT count(*) FROM push_match_queue WHERE community_id=$1 GROUP BY event_id",
+        let queued: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM push_match_queue WHERE community_id=$1 AND event_id=$2",
         )
         .bind(community.as_uuid())
-        .fetch_all(&pool)
+        .bind(direct.id.as_bytes().as_slice())
+        .fetch_one(&pool)
         .await
-        .expect("count queue rows per event");
-        assert!(per_event.iter().all(|count| *count == 1));
+        .expect("count post-activation message jobs");
+        assert_eq!(queued, 1);
     }
 }
