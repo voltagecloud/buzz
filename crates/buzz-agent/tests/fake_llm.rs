@@ -983,7 +983,10 @@ async fn steer_rejected_on_run_id_mismatch() {
         )
         .await;
 
+    // The fake turn can finish before the steer is handled, so the two
+    // responses arrive in either order; wait for both.
     let mut saw_reject = false;
+    let mut turn_done = false;
     for _ in 0..40 {
         let v = h.recv().await;
         if v["id"] == json!(s_id) {
@@ -994,10 +997,15 @@ async fn steer_rejected_on_run_id_mismatch() {
             saw_reject = true;
         } else if v["id"] == json!(p_id) {
             // Turn finishes normally regardless of the rejected steer.
+            assert_eq!(v["result"]["stopReason"], "end_turn");
+            turn_done = true;
+        }
+        if saw_reject && turn_done {
             break;
         }
     }
     assert!(saw_reject, "run-id mismatch was not rejected");
+    assert!(turn_done, "turn did not finish after the rejected steer");
     h.shutdown().await;
 }
 
