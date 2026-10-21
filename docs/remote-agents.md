@@ -401,6 +401,13 @@ response: {"ok": true, "name": str, "version": str,
 timeout:  10s
 ```
 
+**Planned (added in a later change):** an `ops: [str]` field that lists the
+operations the provider answers. It will be additive within protocol
+version 1: a provider that omits it answers only `info` and `deploy`. The
+desktop will show Sandbox session controls (§Sandbox lifecycle) only when
+`ops` contains `stop`. The provider does not advertise `ops` yet, so that
+desktops that predate the field keep accepting `info`.
+
 `version` is the provider's *software* version — useful in error reports,
 useless for compatibility. `protocol_version` (this document: `1`) is the
 wire-contract version, following the pattern Docker's CLI plugins
@@ -469,8 +476,27 @@ collide with or reconstruct a reserved key.
 returns the pod name). `D` stores it as `backend_agent_id`; its presence is
 the `deployed` axis of I3.
 
-**There is no `undeploy` op in v1.** Deletion of a remote agent from `D`
-orphans the substrate objects; the UI therefore requires an explicit
+### `stop`
+
+```
+request:  {"op": "stop", "request_id": "<uuid>",
+           "agent": <payload>, "provider_config": {…}}
+response: {"ok": true, "agent_id": str, "state": "ending" | "ended" | "absent"}
+timeout:  600s
+```
+
+`stop` ends one Agent Sandbox session (§Sandbox lifecycle). The request is
+the `deploy` request with a different `op`. `provider_config.sandbox` and an
+approved `identity_policy` are required, and the provider checks them before
+it contacts the cluster. `stop` refuses a `recovery` field. `ending` means
+the provider suspended the session and the reaper will record it as ended;
+`ended` and `absent` mean that there was nothing to stop. `stop` is for a
+wedged session: the normal stop is still `!shutdown` (§Stop and Delete),
+because only the harness can drain turns and save a checkpoint first.
+
+**There is no `undeploy` op in v1.** `stop` ends a Sandbox session but
+keeps its record; it does not delete an agent. Deletion of a remote agent
+from `D` orphans the substrate objects; the UI therefore requires an explicit
 `force_remote_delete` confirmation, and the binding's GC + I5 bound the
 orphan's cost (the agent self-stops; the pod residue is reaped on the next
 deploy of the same key, or manually).
@@ -894,7 +920,7 @@ can yield two live instances in one scope.
 
 ### Stop and Delete
 
-- **Stop** is not a provider operation. `D` publishes `!shutdown` mentioning
+- **Normal stop** is not a provider operation. `D` publishes `!shutdown` mentioning
   the agent on `R`; the harness verifies the sender is the owner and exits
   through its graceful path: agent-pool shutdown, drain of in-flight turns,
   publish presence `offline`, close relay connection. **The spec does not
@@ -929,6 +955,12 @@ can yield two live instances in one scope.
   budget (§K8s Grace: 300s); anyone re-deriving "~37s" from the segment
   constants is reading numbers without their variables. The desktop's
   local stop command rejects remote agents.
+- **Agent Sandbox sessions** stop the same way: `!shutdown` lets the harness
+  drain and save its workspace checkpoint. A session that does not respond
+  can be ended with the provider `stop` op, which suspends the Sandbox. The
+  controller then deletes the Pod with `SIGTERM`, so the harness still gets
+  its checkpoint window. Neither path restarts the session (§Sandbox
+  lifecycle).
 - **Delete** with a live `backend_agent_id` requires `force_remote_delete:
   true` from the UI's orphan-warning confirmation — a buggy IPC caller
   cannot silently orphan substrate objects.
@@ -1572,7 +1604,9 @@ or reused, and a new refusal gets a new code. They are defined in
 The `session_ended` text names the ended reason only when it is one of the
 spellings in §Sandbox lifecycle; any other annotation value is not repeated.
 Transient and configuration failures (apiserver errors, timeouts) carry no
-`code`.
+`code`. A `stop` refusal uses the same codes: `identity_mismatch` for a
+Sandbox of a different agent, owner, or thread, and `lifecycle_unknown` for
+a lifecycle value that `stop` must not overwrite.
 
 ### Distribution
 
