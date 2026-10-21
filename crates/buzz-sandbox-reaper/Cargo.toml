@@ -10,11 +10,18 @@ description = "In-cluster reaper for ended and orphaned Buzz Agent Sandbox sessi
 name = "buzz-sandbox-reaper"
 path = "src/main.rs"
 
+# Heavy, cluster-only dependencies (aws-sdk-s3, axum, metrics) live here and
+# never in buzz-backend-kubernetes, whose binary ships inside the desktop app.
 [dependencies]
 buzz-backend-kubernetes = { path = "../buzz-backend-kubernetes" }
+tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
+metrics = { workspace = true }
+tracing = { workspace = true }
+aws-config = { version = "1", default-features = false, features = ["rt-tokio", "default-https-client"] }
+aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "default-https-client"] }
 
 [dev-dependencies]
 proptest = { workspace = true }

@@ -1554,6 +1554,30 @@ configuration lists for the namespace. It records a Warning Event for a
 managed Sandbox that it leaves alone (foreign owner, foreign Pod,
 inconsistent lifecycle).
 
+**Checkpoint evidence.** After a successful checkpoint on stop, the harness
+writes `{"version":1,"checkpoint":"<key>"}` to `/dev/termination-log` (the
+Pod keeps `terminationMessagePolicy: File`). The reaper reads the bound
+Pod's termination message. A Pod watch keeps the message after a stop or a
+replacement deletes the Pod. The reaper accepts a key only if it is under
+`<developer prefix><generation>/` (prefix from the reaper configuration,
+generation from the Sandbox, 32 lowercase hex characters) and an S3
+`ListObjectsV2` (`s3:ListBucket` only) finds exactly that key. Otherwise it
+records `missing`. A compromised Pod therefore cannot point a tombstone at
+the checkpoint of a different session. If S3 cannot be reached, the reaper
+waits for a later pass. It never records `missing` because S3 failed.
+`buzz_sandbox_reaper_s3_errors_total{kind}` counts these failures by kind:
+`timeout` or `other` for an outage, `access_denied` or `not_found_bucket` for
+a misconfigured role or bucket.
+
+A recovered session that has no verified checkpoint of its own (for example,
+its restore failed) keeps the checkpoint it was recovered from. The reaper
+takes the key from the provider-written `restore-checkpoint` annotation,
+requires a valid generation and an object directly under the configured
+developer prefix, and confirms it with S3. The key can belong to an older
+ancestor than `recovered-from` after repeated failed recovery. The 24-hour
+hold still applies. The tombstone then records that key instead of `missing`,
+so the developer can retry recovery.
+
 **Recovery.** An ordinary deploy to an ended session is refused with
 `session_ended` (§Sandbox error codes). The desktop then offers two actions
 in the thread. Each sends `provider_config.sandbox.recovery` once, for that
