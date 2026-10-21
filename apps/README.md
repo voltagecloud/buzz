@@ -11,6 +11,11 @@ or shipped.
 
 `apps/buzz-gpui` is its own Cargo workspace. The root workspace does not
 include it, and changes under `apps/` do not select any `block/buzz` CI suite.
+`.github/workflows/voltage-buzz-gpui.yml` runs the client's own checks
+(format, clippy, tests, Node plugins, the `buzzd` Nix package, and clippy on
+macOS and Windows) when `apps/buzz-gpui` changes. GitHub does not run the
+workflows under `apps/buzz-gpui/.github/workflows`; port changes to them by
+hand.
 
 `UPSTREAM` records the upstream repository, ref, and commit of the snapshot.
 The import keeps no upstream history: each sync is one signed, signed-off

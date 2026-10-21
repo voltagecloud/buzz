@@ -1,0 +1,161 @@
+name: Buzz GPUI
+
+# CI for the GPUI client vendored at apps/buzz-gpui. It ports the jobs of
+# apps/buzz-gpui/.github/workflows/ci.yml, which GitHub does not run from a
+# subdirectory, and keeps them in this separate file so upstream block/buzz
+# syncs never conflict with it. The root ci.yml selects no suite for apps/.
+on:
+  push:
+    branches: [main]
+    paths:
+      - apps/buzz-gpui/**
+      - .github/workflows/voltage-buzz-gpui.yml
+  pull_request:
+    paths:
+      - apps/buzz-gpui/**
+      - .github/workflows/voltage-buzz-gpui.yml
+
+concurrency:
+  group: buzz-gpui-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+# Build caches are saved only from main; pull requests restore them. This keeps
+# the repository under GitHub's 10 GB cache limit, which the root CI shares.
+
+jobs:
+  lint:
+    name: GPUI Format and lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: apps/buzz-gpui
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      # The dev shell provides the toolchain and the native libraries. Its Rust
+      # goes on PATH so rust-cache keys on the Rust that builds.
+      - name: Dev shell
+        run: nix develop --command sh -c 'dirname "$(command -v rustc)"; dirname "$(command -v cargo)"' >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+        with:
+          workspaces: apps/buzz-gpui
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Format
+        run: nix develop --command cargo fmt --all --check
+      - name: Clippy
+        run: nix develop --command cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    name: GPUI Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: apps/buzz-gpui
+    env:
+      # Backtraces keep file and line numbers, but the test build skips the
+      # full debug info that much of its compile and link time goes to.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      - name: Dev shell
+        run: nix develop --command sh -c 'dirname "$(command -v rustc)"; dirname "$(command -v cargo)"' >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+        with:
+          workspaces: apps/buzz-gpui
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # Tests that need the local test relay skip themselves without it.
+      - name: Test
+        run: nix develop --command cargo test --workspace --locked
+
+  plugins:
+    name: GPUI Node plugins
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: apps/buzz-gpui
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      # Types, tests and the build of the client's own Node plugins.
+      - name: Check
+        run: nix develop --command sh -c 'cd plugins && npm ci --no-audit --no-fund && npm run check'
+
+  buzzd:
+    name: GPUI Nix package (buzzd)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: apps/buzz-gpui
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      # The dependency build's store path changes only with its inputs
+      # (Cargo.lock, the manifests, the toolchain), so keep it between runs
+      # under that path and rebuild only this workspace's crates.
+      - name: Find the dependency build
+        id: deps
+        run: |
+          path=$(nix eval --raw .#buzzd.cargoArtifacts.outPath)
+          echo "path=$path" >> "$GITHUB_OUTPUT"
+          echo "key=buzz-gpui-buzzd-deps-$(basename "$path")" >> "$GITHUB_OUTPUT"
+      - name: Restore the dependency build
+        id: restore
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: /tmp/buzzd-deps.nar
+          key: ${{ steps.deps.outputs.key }}
+      # The dependency build refers to the vendored crate sources, which are
+      # not in the kept build, so fetch them before importing it.
+      - name: Import the dependency build
+        if: steps.restore.outputs.cache-hit == 'true'
+        run: |
+          nix build --no-link .#buzzd.cargoArtifacts.cargoVendorDir
+          sudo "$(command -v nix-store)" --import < /tmp/buzzd-deps.nar
+      - run: nix build .#buzzd --print-build-logs
+      - name: Export the dependency build
+        if: steps.restore.outputs.cache-hit != 'true' && github.ref == 'refs/heads/main'
+        run: nix-store --export "${{ steps.deps.outputs.path }}" > /tmp/buzzd-deps.nar
+      - name: Save the dependency build
+        if: steps.restore.outputs.cache-hit != 'true' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: /tmp/buzzd-deps.nar
+          key: ${{ steps.deps.outputs.key }}
+
+  check-other:
+    name: GPUI Check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest]
+    steps:
+      # The buzz-app git dependencies have paths past MAX_PATH.
+      - if: runner.os == 'Windows'
+        run: git config --system core.longpaths true
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./apps/buzz-gpui/.github/actions/gstreamer
+      # The Rust that the Nix dev shell gets from the locked nixpkgs.
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: 1.98.1
+          components: clippy
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+        with:
+          workspaces: apps/buzz-gpui
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # The root rust-toolchain.toml pins block/buzz's Rust, and rustup reads
+      # it from apps/buzz-gpui too, so name the GPUI toolchain explicitly.
+      - run: cargo clippy --workspace --locked -- -D warnings
+        working-directory: apps/buzz-gpui
+        env:
+          RUSTUP_TOOLCHAIN: 1.98.1
