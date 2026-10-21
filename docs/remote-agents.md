@@ -1522,7 +1522,10 @@ keys (`buzz-backend-kubernetes` library, `lifecycle.rs`):
 | `buzz.block.xyz/recovered-from` | the generation of the tombstone that a recovered session replaced |
 
 The reaper classifies each Sandbox on every pass. All timers use the
-apiserver `Date` header, not the reaper's clock.
+apiserver `Date` header, not the reaper's clock. The 24-hour hold of a
+Completed session starts when the reaper first sees it Completed, not at the
+container's `finishedAt` (the node clock writes that value). A reaper restart
+starts the hold again; this only delays the tombstone.
 
 | State | Detection | Reaper action |
 | --- | --- | --- |

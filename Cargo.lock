@@ -1517,6 +1517,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-sandbox-reaper"
+version = "0.1.0"
+dependencies = [
+ "buzz-backend-kubernetes",
+ "chrono",
+ "proptest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "buzz-sdk"
 version = "0.1.0"
 dependencies = [

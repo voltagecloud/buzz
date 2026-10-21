@@ -1,0 +1,20 @@
+[package]
+name = "buzz-sandbox-reaper"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "In-cluster reaper for ended and orphaned Buzz Agent Sandbox sessions (docs/remote-agents.md §Sandbox lifecycle)"
+
+[[bin]]
+name = "buzz-sandbox-reaper"
+path = "src/main.rs"
+
+[dependencies]
+buzz-backend-kubernetes = { path = "../buzz-backend-kubernetes" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
