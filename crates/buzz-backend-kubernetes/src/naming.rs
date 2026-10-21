@@ -9,7 +9,7 @@ use nostr::nips::nip19::FromBech32;
 /// The management marker (identity half: `app.kubernetes.io/managed-by`;
 /// schema half: `buzz.block.xyz/binding-version`). Spelled once, in the
 /// library shared with the in-cluster reaper.
-pub use buzz_backend_kubernetes::lifecycle::{
+pub use crate::lifecycle::{
     ANNOTATION_PUBKEY_FULL, LABEL_BINDING_VERSION, LABEL_MANAGED_BY, MANAGED_BY,
 };
 
