@@ -58,6 +58,7 @@ pub async fn probe_backend_provider(binary_path: String) -> Result<serde_json::V
     });
     tokio::task::spawn_blocking(move || {
         invoke_provider(&canonical, &request, std::time::Duration::from_secs(10))
+            .map_err(String::from)
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?

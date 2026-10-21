@@ -6,7 +6,8 @@ use crate::{
     app_state::AppState,
     managed_agents::{
         discover_provider_candidates, load_managed_agents, provider_deploy,
-        resolve_provider_binary, save_managed_agents, BackendKind, REPLAY_FLOOR_ENV_VAR,
+        resolve_provider_binary, save_managed_agents, BackendKind, ProviderFailure,
+        REPLAY_FLOOR_ENV_VAR,
     },
     util::now_iso,
 };
@@ -21,6 +22,18 @@ pub struct RemoteSessionScope {
     thread_root: String,
 }
 
+/// How an explicit user action recovers an ended thread session. Sent as
+/// `provider_config.sandbox.recovery` for one invocation only; never stored
+/// on the agent record, so no later deploy can resurrect a session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RemoteRecoveryMode {
+    /// Restore the ended session's verified checkpoint.
+    Checkpoint,
+    /// Start a new session with an empty workspace.
+    Fresh,
+}
+
 /// Replace a thread Sandbox's `sandbox: true` request with the published
 /// thread and the rebuilt payload's verified owner. Callers decide eligibility
 /// with [`BackendKind::is_thread_sandbox`] on the rebuilt record.
@@ -29,6 +42,7 @@ fn bind_sandbox_scope(
     scope: Option<&RemoteSessionScope>,
     agent_pubkey: &str,
     payload: &serde_json::Value,
+    recovery: Option<RemoteRecoveryMode>,
 ) -> Result<(), String> {
     let scope = scope.ok_or("Mention this agent in a channel thread to start its workspace")?;
     if scope.thread_root.len() != 64
@@ -46,56 +60,27 @@ fn bind_sandbox_scope(
     config["sandbox"] = serde_json::json!({
         "channel_id": scope.channel_id.to_string(), "thread_root": scope.thread_root,
     });
+    if let Some(mode) = recovery {
+        config["sandbox"]["recovery"] = serde_json::json!({ "mode": mode });
+    }
     config["identity_policy"] = serde_json::json!({
         "agent_pubkey": agent_pubkey, "owner_pubkey": owner,
     });
     Ok(())
 }
 
-/// Deploy an agent to a provider backend. Resolves the binary, calls deploy via
-/// spawn_blocking, and persists the result (backend_agent_id or last_error).
+/// Serialize provider operations per agent. The guard must stay alive until
+/// the provider invocation finishes.
 ///
-/// Idempotency: calling deploy on an already-deployed agent sends the same payload
-/// again. Providers are expected to handle this as an update-in-place or no-op.
-/// The protocol has no explicit `undeploy` operation or acknowledgement that an
-/// existing process stopped, so a successful redeploy delegates access-policy
-/// revocation semantics to the provider implementation (deferred to v2).
-/// Returns Ok(()) on success, Err(message) on failure. Either way the record is
-/// updated and saved before returning.
-///
-/// Callers with a captured tenant scope (Projects agent starts) pass
-/// `expected_relay_url` / `expected_signer_pubkey`; they are asserted against
-/// the payload REBUILT after the deploy lock — the exact value invoked — so a
-/// workspace or identity switch landing while this call waited behind another
-/// deployment fails closed instead of deploying a stale start into the new
-/// tenant under the new tenant's owner identity. `None` preserves the
-/// unscoped behavior for callers without a tenant boundary.
-///
-/// `replay_floor_unix`: optional unix-seconds replay floor from a
-/// publish-first mention send. It is injected into the rebuilt payload's
-/// `launch.policy_env` as `BUZZ_ACP_REPLAY_FLOOR`, so the remote harness's
-/// startup watermark replays back past the already-published triggering
-/// message exactly like a local spawn. Per-invocation only — never persisted
-/// on the record, so later redeploys do not carry a stale floor.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn deploy_to_provider<R: tauri::Runtime>(
-    app: &AppHandle<R>,
+/// One lock per agent, not per thread: it serializes the record rebuild,
+/// provider call, and result write. A thread Sandbox cold start holds it
+/// through the provider's Pod waits (120s bound each), so starts for the same
+/// agent's other threads queue behind it.
+pub(super) async fn lock_provider_operations(
     state: &AppState,
     pubkey: &str,
-    _provider_id: &str,
-    _config: &serde_json::Value,
-    _agent_json: serde_json::Value,
-    _cached_binary_path: Option<&str>,
-    expected_relay_url: Option<&str>,
-    expected_signer_pubkey: Option<&str>,
-    replay_floor_unix: Option<u64>,
-    session_scope: Option<&RemoteSessionScope>,
-) -> Result<(), String> {
-    // One lock per agent, not per thread: it serializes the record rebuild,
-    // provider call, and result write. A thread Sandbox cold start holds it
-    // through the provider's Pod waits (120s bound each), so starts for the
-    // same agent's other threads queue behind it.
-    let deploy_lock = {
+) -> Result<tokio::sync::OwnedMutexGuard<()>, String> {
+    let lock = {
         let mut locks = state
             .provider_deploy_locks
             .lock()
@@ -106,11 +91,63 @@ pub(crate) async fn deploy_to_provider<R: tauri::Runtime>(
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
         )
     };
-    let _deploy_guard = deploy_lock.lock().await;
-    // The payload may have waited behind another deployment. Rebuild it from
-    // the current record so the final provider invocation always carries the
-    // newest saved policy rather than the stale snapshot captured by its caller.
-    let (provider_id, mut config, thread_sandbox, cached_binary_path, mut agent_json) = {
+    Ok(lock.lock_owned().await)
+}
+
+/// A provider invocation rebuilt from the current record after the lock.
+pub(super) struct ProviderInvocation {
+    pub(super) binary: std::path::PathBuf,
+    pub(super) config: serde_json::Value,
+    pub(super) agent_json: serde_json::Value,
+}
+
+/// What one provider invocation does for the user.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ProviderAction {
+    /// Start or update the agent (an ordinary deploy).
+    #[default]
+    Deploy,
+    /// End the thread's session with the provider's `stop`.
+    End,
+    /// Recover the thread's ended session: a deploy carrying the mode.
+    Recover(RemoteRecoveryMode),
+}
+
+/// Session inputs for one provider invocation. None of them are persisted.
+///
+/// Callers with a captured tenant scope (Projects agent starts, remote session
+/// actions) set `expected_relay_url` / `expected_signer_pubkey`; they are
+/// asserted against the payload REBUILT after the deploy lock, the exact value
+/// invoked. `None` preserves the unscoped behavior for callers without a
+/// tenant boundary.
+#[derive(Default)]
+pub(crate) struct InvocationScope<'a> {
+    pub(crate) expected_relay_url: Option<&'a str>,
+    pub(crate) expected_signer_pubkey: Option<&'a str>,
+    pub(crate) session: Option<&'a RemoteSessionScope>,
+    pub(crate) action: ProviderAction,
+}
+
+impl InvocationScope<'_> {
+    fn recovery(&self) -> Option<RemoteRecoveryMode> {
+        match self.action {
+            ProviderAction::Recover(mode) => Some(mode),
+            ProviderAction::Deploy | ProviderAction::End => None,
+        }
+    }
+}
+
+/// Rebuild the invocation from the current record. Call only while holding
+/// [`lock_provider_operations`]: the payload may have waited behind another
+/// operation, so the final invocation must carry the newest saved policy, not
+/// the stale snapshot its caller captured.
+pub(super) fn prepare_provider_invocation<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    state: &AppState,
+    pubkey: &str,
+    scope: &InvocationScope<'_>,
+) -> Result<ProviderInvocation, String> {
+    let (provider_id, mut config, thread_sandbox, cached_binary_path, agent_json) = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -134,33 +171,93 @@ pub(crate) async fn deploy_to_provider<R: tauri::Runtime>(
     };
     // The rebuild above re-read the live workspace relay and owner identity.
     // Assert the caller's captured scope against THIS payload — the exact
-    // value invoked below — not the pre-lock snapshot its caller validated.
-    assert_payload_scope(&agent_json, expected_relay_url, expected_signer_pubkey)?;
+    // value invoked — not the pre-lock snapshot its caller validated.
+    assert_payload_scope(&agent_json, scope)?;
+    // `config` is a copy: binding the session and any recovery mode never
+    // reaches the record's saved `sandbox: true`.
     if thread_sandbox {
-        bind_sandbox_scope(&mut config, session_scope, pubkey, &agent_json)?;
+        bind_sandbox_scope(
+            &mut config,
+            scope.session,
+            pubkey,
+            &agent_json,
+            scope.recovery(),
+        )?;
+    } else if scope.action != ProviderAction::Deploy {
+        return Err("Only thread workspaces can be ended or recovered".into());
     }
-    // The floor is invocation state, not record state, so the post-lock
-    // rebuild cannot restore it — inject it into the payload actually invoked.
-    apply_replay_floor(&mut agent_json, replay_floor_unix);
-    // Resolve via discovered candidates only. Cached path must match BOTH
-    // "is a discovered candidate" AND "belongs to this provider_id". A tampered
-    // record cannot redirect deploys to a different provider's binary.
-    let bin_path = cached_binary_path
-        .as_deref()
+    Ok(ProviderInvocation {
+        binary: resolve_record_provider_binary(&provider_id, cached_binary_path.as_deref())?,
+        config,
+        agent_json,
+    })
+}
+
+/// Resolve via discovered candidates only. Cached path must match BOTH
+/// "is a discovered candidate" AND "belongs to this provider_id". A tampered
+/// record cannot redirect provider calls to a different provider's binary.
+pub(super) fn resolve_record_provider_binary(
+    provider_id: &str,
+    cached_binary_path: Option<&str>,
+) -> Result<std::path::PathBuf, String> {
+    cached_binary_path
         .map(std::path::PathBuf::from)
         .filter(|p| p.exists())
         .map(|p| p.canonicalize().unwrap_or(p))
         .filter(|canonical| {
             discover_provider_candidates().iter().any(|(id, cp)| {
-                id == &provider_id && cp.canonicalize().ok().as_ref() == Some(canonical)
+                id == provider_id && cp.canonicalize().ok().as_ref() == Some(canonical)
             })
         })
-        .map_or_else(|| resolve_provider_binary(&provider_id), Ok)?;
+        .map_or_else(|| resolve_provider_binary(provider_id), Ok)
+}
+
+/// Deploy an agent to a provider backend. Resolves the binary, calls deploy via
+/// spawn_blocking, and persists the result (backend_agent_id or last_error).
+///
+/// Idempotency: calling deploy on an already-deployed agent sends the same payload
+/// again. Providers are expected to handle this as an update-in-place or no-op.
+/// Thread-sandbox providers end a session with the separate `stop` operation
+/// (`end_remote_agent_session`); other providers have no undeploy operation, so
+/// a successful redeploy delegates access-policy revocation semantics to the
+/// provider implementation.
+/// Returns Ok(()) on success, Err on failure, with the provider's refusal code
+/// when it sent one. Either way the record is updated and saved before
+/// returning.
+///
+/// `scope`'s tenant expectations are asserted against the payload rebuilt
+/// after the deploy lock, so a workspace or identity switch landing while this
+/// call waited behind another deployment fails closed instead of deploying a
+/// stale start into the new tenant under the new tenant's owner identity. A
+/// recovery mode in `scope.action` rides only this invocation's config.
+///
+/// `replay_floor_unix`: optional unix-seconds replay floor from a
+/// publish-first mention send. It is injected into the rebuilt payload's
+/// `launch.policy_env` as `BUZZ_ACP_REPLAY_FLOOR`, so the remote harness's
+/// startup watermark replays back past the already-published triggering
+/// message exactly like a local spawn. Per-invocation only — never persisted
+/// on the record, so later redeploys do not carry a stale floor.
+pub(crate) async fn deploy_to_provider<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    state: &AppState,
+    pubkey: &str,
+    scope: &InvocationScope<'_>,
+    replay_floor_unix: Option<u64>,
+) -> Result<(), ProviderFailure> {
+    let _deploy_guard = lock_provider_operations(state, pubkey).await?;
+    let ProviderInvocation {
+        binary: bin_path,
+        config,
+        mut agent_json,
+        ..
+    } = prepare_provider_invocation(app, state, pubkey, scope)?;
+    // The floor is invocation state, not record state, so the post-lock
+    // rebuild cannot restore it — inject it into the payload actually invoked.
+    apply_replay_floor(&mut agent_json, replay_floor_unix);
 
     let deployed_agent_json = agent_json.clone();
-    let config_clone = config.clone();
     let deploy_result =
-        tokio::task::spawn_blocking(move || provider_deploy(&bin_path, &agent_json, &config_clone))
+        tokio::task::spawn_blocking(move || provider_deploy(&bin_path, &agent_json, &config))
             .await
             .map_err(|e| format!("spawn_blocking failed: {e}"))?;
 
@@ -175,9 +272,14 @@ pub(crate) async fn deploy_to_provider<R: tauri::Runtime>(
         .find(|r| r.pubkey == pubkey)
         .ok_or_else(|| format!("agent {pubkey} not found"))?;
 
-    let result = apply_deploy_result(rec, deploy_result, &deployed_agent_json);
+    let code = deploy_result.as_ref().err().and_then(|e| e.code.clone());
+    let result = apply_deploy_result(
+        rec,
+        deploy_result.map_err(String::from),
+        &deployed_agent_json,
+    );
     save_managed_agents(app, &records)?;
-    result
+    result.map_err(|message| ProviderFailure { message, code })
 }
 
 /// Assert a caller-captured tenant scope against the payload that will
@@ -189,16 +291,29 @@ pub(crate) async fn deploy_to_provider<R: tauri::Runtime>(
 /// deploy on behalf of a scoped callback.
 fn assert_payload_scope(
     agent_json: &serde_json::Value,
-    expected_relay_url: Option<&str>,
-    expected_signer_pubkey: Option<&str>,
+    scope: &InvocationScope<'_>,
 ) -> Result<(), String> {
+    let (expected_relay_url, expected_signer_pubkey) =
+        (scope.expected_relay_url, scope.expected_signer_pubkey);
+    // The shared checks word a mismatch for a message send; say what this
+    // action did instead, keeping the "active ... changed" prefix.
+    let reword = |error: String, what: &str| match scope.action {
+        ProviderAction::Deploy => error,
+        ProviderAction::End => {
+            format!("active {what} changed before the session was ended; nothing was changed")
+        }
+        ProviderAction::Recover(_) => {
+            format!("active {what} changed before the session was recovered; nothing was changed")
+        }
+    };
     let has_expectation =
         |expected: Option<&str>| expected.map(str::trim).filter(|s| !s.is_empty()).is_some();
     match agent_json.get("relay_url").and_then(|v| v.as_str()) {
         Some(embedded_relay) => crate::relay::assert_expected_relay_scope(
             expected_relay_url,
             &crate::relay::relay_http_base_url(embedded_relay),
-        )?,
+        )
+        .map_err(|error| reword(error, "community"))?,
         None if has_expectation(expected_relay_url) => {
             return Err("deploy payload carries no relay; not deployed".to_string());
         }
@@ -209,7 +324,8 @@ fn assert_payload_scope(
         .and_then(|launch| launch.get("owner_pubkey"))
         .and_then(|v| v.as_str())
     {
-        Some(owner) => crate::relay::assert_expected_signer(expected_signer_pubkey, owner)?,
+        Some(owner) => crate::relay::assert_expected_signer(expected_signer_pubkey, owner)
+            .map_err(|error| reword(error, "identity"))?,
         None if has_expectation(expected_signer_pubkey) => {
             return Err("deploy payload carries no owner identity; not deployed".to_string());
         }
@@ -318,19 +434,101 @@ mod tests {
         };
         let mut config = serde_json::json!({"sandbox":true});
         let payload = serde_json::json!({"launch":{"owner_pubkey":"owner"}});
-        assert!(bind_sandbox_scope(&mut config, None, "agent", &payload).is_err());
+        assert!(bind_sandbox_scope(&mut config, None, "agent", &payload, None).is_err());
         assert_eq!(config["sandbox"], true);
-        bind_sandbox_scope(&mut config, Some(&scope), "agent", &payload).unwrap();
+        bind_sandbox_scope(&mut config, Some(&scope), "agent", &payload, None).unwrap();
         assert_eq!(config["sandbox"]["thread_root"], scope.thread_root);
         assert_eq!(config["identity_policy"]["owner_pubkey"], "owner");
+        assert!(
+            config["sandbox"].get("recovery").is_none(),
+            "an ordinary deploy must never carry a recovery mode"
+        );
         let mut missing_owner = serde_json::json!({"sandbox":true});
         assert!(bind_sandbox_scope(
             &mut missing_owner,
             Some(&scope),
             "agent",
-            &serde_json::json!({})
+            &serde_json::json!({}),
+            None
         )
         .is_err());
+    }
+
+    fn thread_scope() -> RemoteSessionScope {
+        RemoteSessionScope {
+            channel_id: uuid::Uuid::new_v4(),
+            thread_root: "b".repeat(64),
+        }
+    }
+
+    #[test]
+    fn recovery_mode_rides_only_the_bound_invocation_config() {
+        let payload = serde_json::json!({"launch":{"owner_pubkey":"owner"}});
+        for (mode, wire) in [
+            (RemoteRecoveryMode::Checkpoint, "checkpoint"),
+            (RemoteRecoveryMode::Fresh, "fresh"),
+        ] {
+            let mut record = record();
+            record.backend = BackendKind::Provider {
+                id: "kubernetes".into(),
+                config: serde_json::json!({"sandbox": true}),
+            };
+            // Same copy-then-bind sequence as `prepare_provider_invocation`.
+            let BackendKind::Provider { config, .. } = &record.backend else {
+                unreachable!()
+            };
+            let mut invoked = config.clone();
+            bind_sandbox_scope(
+                &mut invoked,
+                Some(&thread_scope()),
+                "agent",
+                &payload,
+                Some(mode),
+            )
+            .unwrap();
+            assert_eq!(
+                invoked["sandbox"]["recovery"],
+                serde_json::json!({"mode": wire})
+            );
+            assert_eq!(invoked["sandbox"]["thread_root"], "b".repeat(64));
+
+            apply_deploy_result(&mut record, Ok("remote".into()), &payload).unwrap();
+            let saved = serde_json::to_value(&record).unwrap();
+            assert_eq!(
+                saved["backend"]["config"],
+                serde_json::json!({"sandbox": true}),
+                "recovery must never be persisted on the agent record"
+            );
+        }
+    }
+
+    #[test]
+    fn recovery_is_refused_without_a_thread_workspace() {
+        let payload = serde_json::json!({"launch":{"owner_pubkey":"owner"}});
+        let mut sandbox = serde_json::json!({"sandbox": true});
+        let error = bind_sandbox_scope(
+            &mut sandbox,
+            None,
+            "agent",
+            &payload,
+            Some(RemoteRecoveryMode::Fresh),
+        )
+        .unwrap_err();
+        assert!(error.contains("channel thread"), "{error}");
+        assert_eq!(sandbox, serde_json::json!({"sandbox": true}));
+    }
+
+    #[test]
+    fn recovery_mode_deserializes_from_lowercase_wire_names() {
+        assert_eq!(
+            serde_json::from_str::<RemoteRecoveryMode>(r#""checkpoint""#).unwrap(),
+            RemoteRecoveryMode::Checkpoint
+        );
+        assert_eq!(
+            serde_json::from_str::<RemoteRecoveryMode>(r#""fresh""#).unwrap(),
+            RemoteRecoveryMode::Fresh
+        );
+        assert!(serde_json::from_str::<RemoteRecoveryMode>(r#""Checkpoint""#).is_err());
     }
 
     fn record() -> crate::managed_agents::ManagedAgentRecord {
@@ -358,12 +556,50 @@ mod tests {
 
     // ── assert_payload_scope: post-lock rebuilt-payload validation ──────────
 
+    fn tenant<'a>(relay: Option<&'a str>, signer: Option<&'a str>) -> InvocationScope<'a> {
+        InvocationScope {
+            expected_relay_url: relay,
+            expected_signer_pubkey: signer,
+            ..InvocationScope::default()
+        }
+    }
+
+    #[test]
+    fn a_scope_mismatch_names_the_session_action_it_refused() {
+        let payload = scoped_payload("wss://tenant-b.example", "bb22");
+        for (action, relay_text, signer_text) in [
+            (
+                ProviderAction::End,
+                "active community changed before the session was ended",
+                "active identity changed before the session was ended",
+            ),
+            (
+                ProviderAction::Recover(RemoteRecoveryMode::Fresh),
+                "active community changed before the session was recovered",
+                "active identity changed before the session was recovered",
+            ),
+        ] {
+            let relay = InvocationScope {
+                action,
+                ..tenant(Some("wss://tenant-a.example"), None)
+            };
+            let error = assert_payload_scope(&payload, &relay).unwrap_err();
+            assert!(error.starts_with(relay_text), "{error}");
+            let signer = InvocationScope {
+                action,
+                ..tenant(None, Some("aa11"))
+            };
+            let error = assert_payload_scope(&payload, &signer).unwrap_err();
+            assert!(error.starts_with(signer_text), "{error}");
+            assert!(!error.contains("not sent"), "{error}");
+        }
+    }
+
     #[test]
     fn matching_scope_and_signer_pass_on_the_rebuilt_payload() {
         assert_payload_scope(
             &scoped_payload("wss://tenant-a.example", "aa11"),
-            Some("wss://tenant-a.example"),
-            Some("aa11"),
+            &tenant(Some("wss://tenant-a.example"), Some("aa11")),
         )
         .unwrap();
     }
@@ -375,8 +611,7 @@ mod tests {
         // refused — the pre-lock snapshot its caller validated is irrelevant.
         let error = assert_payload_scope(
             &scoped_payload("wss://tenant-b.example", "aa11"),
-            Some("wss://tenant-a.example"),
-            Some("aa11"),
+            &tenant(Some("wss://tenant-a.example"), Some("aa11")),
         )
         .unwrap_err();
         assert!(error.contains("active community changed"), "{error}");
@@ -389,8 +624,7 @@ mod tests {
         // caller never validated.
         let error = assert_payload_scope(
             &scoped_payload("wss://tenant-a.example", "bb22"),
-            Some("wss://tenant-a.example"),
-            Some("aa11"),
+            &tenant(Some("wss://tenant-a.example"), Some("aa11")),
         )
         .unwrap_err();
         assert!(error.contains("active identity changed"), "{error}");
@@ -400,9 +634,10 @@ mod tests {
     fn scoped_caller_with_an_unverifiable_payload_fails_closed() {
         let payload = serde_json::json!({});
         let relay_error =
-            assert_payload_scope(&payload, Some("wss://tenant-a.example"), None).unwrap_err();
+            assert_payload_scope(&payload, &tenant(Some("wss://tenant-a.example"), None))
+                .unwrap_err();
         assert!(relay_error.contains("no relay"), "{relay_error}");
-        let signer_error = assert_payload_scope(&payload, None, Some("aa11")).unwrap_err();
+        let signer_error = assert_payload_scope(&payload, &tenant(None, Some("aa11"))).unwrap_err();
         assert!(signer_error.contains("no owner identity"), "{signer_error}");
     }
 
@@ -410,11 +645,10 @@ mod tests {
     fn unscoped_callers_deploy_any_payload() {
         assert_payload_scope(
             &scoped_payload("wss://anywhere.example", "cc33"),
-            None,
-            None,
+            &tenant(None, None),
         )
         .unwrap();
-        assert_payload_scope(&serde_json::json!({}), None, None).unwrap();
+        assert_payload_scope(&serde_json::json!({}), &tenant(None, None)).unwrap();
     }
 
     // ── apply_replay_floor: publish-first floor threading into the payload ──

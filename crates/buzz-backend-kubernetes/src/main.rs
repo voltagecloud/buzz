@@ -253,7 +253,10 @@ mod tests {
         assert_eq!(json["ok"], true);
         assert_eq!(json["protocol_version"], wire::PROTOCOL_VERSION);
         assert!(json["config_schema"]["properties"]["namespace"].is_object());
-        assert!(json.get("ops").is_none());
+        assert_eq!(
+            json["ops"],
+            serde_json::json!(["info", "deploy", "stop", "recover"])
+        );
     }
 
     /// `stop` is gated like a preflight: no approved identity policy, no

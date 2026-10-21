@@ -401,12 +401,12 @@ response: {"ok": true, "name": str, "version": str,
 timeout:  10s
 ```
 
-**Planned (added in a later change):** an `ops: [str]` field that lists the
-operations the provider answers. It will be additive within protocol
-version 1: a provider that omits it answers only `info` and `deploy`. The
-desktop will show Sandbox session controls (§Sandbox lifecycle) only when
-`ops` contains `stop`. The provider does not advertise `ops` yet, so that
-desktops that predate the field keep accepting `info`.
+The additive `ops: [str]` field lists provider capabilities within protocol
+version 1. Providers that omit it support only `info` and `deploy`.
+The Kubernetes provider advertises `info`, `deploy`, `stop`, and `recover`.
+`recover` means that `deploy` accepts `provider_config.sandbox.recovery`;
+it is a capability marker, not a separate request operation. The desktop
+shows session controls only when `ops` contains `recover`.
 
 `version` is the provider's *software* version — useful in error reports,
 useless for compatibility. `protocol_version` (this document: `1`) is the
@@ -1648,6 +1648,11 @@ or reused, and a new refusal gets a new code. They are defined in
 | `no_checkpoint` | Checkpoint recovery was requested, but the tombstone has no verified checkpoint. | start fresh |
 | `recovery_interrupted` | A recovery deleted the tombstone but did not finish. | explicit recovery |
 | `recovery_mode_conflict` | A recovery in the other mode already created the replacement. | retry the same mode, or end the session first |
+
+The desktop preserves provider refusals as `{ "message": str, "code": str }`
+Tauri command errors. Errors without a code remain strings for compatibility
+with older providers. Session end and recovery commands require the captured
+relay URL and signer identity, and verify both after acquiring the agent lock.
 
 The `session_ended` text names the ended reason only when it is one of the
 spellings in §Sandbox lifecycle; any other annotation value is not repeated.

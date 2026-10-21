@@ -12,6 +12,74 @@ const STDERR_CAP: usize = 65536;
 const STDOUT_CAP: usize = 1_048_576; // 1 MB
 const PROVIDER_PROTOCOL_VERSION: u64 = 1;
 
+/// A failed provider operation, or a command that ended in one.
+///
+/// `code` is the provider's stable refusal code (`docs/remote-agents.md`
+/// §Sandbox error codes). It is absent for transient failures, desktop-side
+/// failures, and providers that predate codes. As a Tauri command error it
+/// serializes as the plain message when there is no code, and as
+/// `{"message": ..., "code": ...}` when there is one; the frontend's
+/// `invokeTauri` accepts both shapes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderFailure {
+    pub message: String,
+    pub code: Option<String>,
+}
+
+impl From<String> for ProviderFailure {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            code: None,
+        }
+    }
+}
+
+impl From<&str> for ProviderFailure {
+    fn from(message: &str) -> Self {
+        message.to_string().into()
+    }
+}
+
+impl From<ProviderFailure> for String {
+    fn from(failure: ProviderFailure) -> Self {
+        failure.message
+    }
+}
+
+impl std::fmt::Display for ProviderFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl serde::Serialize for ProviderFailure {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let Some(code) = &self.code else {
+            return serializer.serialize_str(&self.message);
+        };
+        let mut failure = serializer.serialize_struct("ProviderFailure", 2)?;
+        failure.serialize_field("message", &self.message)?;
+        failure.serialize_field("code", code)?;
+        failure.end()
+    }
+}
+
+/// A provider's refusal code, if it is a well-formed snake_case token.
+/// Anything else is dropped rather than passed to the frontend.
+fn refusal_code(response: &serde_json::Value) -> Option<String> {
+    response
+        .get("code")
+        .and_then(serde_json::Value::as_str)
+        .filter(|code| {
+            (1..=64).contains(&code.len())
+                && code.starts_with(|c: char| c.is_ascii_lowercase())
+                && code.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+        })
+        .map(String::from)
+}
+
 fn validate_provider_info(info: &serde_json::Value) -> Result<(), String> {
     let object = info
         .as_object()
@@ -52,6 +120,7 @@ fn validate_provider_info(info: &serde_json::Value) -> Result<(), String> {
         "name",
         "version",
         "protocol_version",
+        "ops",
         "description",
         "config_schema",
     ];
@@ -63,7 +132,37 @@ fn validate_provider_info(info: &serde_json::Value) -> Result<(), String> {
             "provider info response contains unknown field {field}"
         ));
     }
-    Ok(())
+    advertised_ops(info).map(drop)
+}
+
+/// Operations a provider advertises in `info.ops`. The field is additive
+/// within protocol v1: a provider that omits it answers only `info` and
+/// `deploy`, so it has no `stop` and no session recovery.
+pub(crate) fn advertised_ops(info: &serde_json::Value) -> Result<Vec<String>, String> {
+    const MAX_OPS: usize = 32;
+    let Some(ops) = info.get("ops") else {
+        return Ok(vec!["info".to_string(), "deploy".to_string()]);
+    };
+    ops.as_array()
+        .filter(|ops| ops.len() <= MAX_OPS)
+        .ok_or_else(|| format!("provider info ops must be an array of at most {MAX_OPS} strings"))?
+        .iter()
+        .map(|op| {
+            op.as_str()
+                .filter(|op| !op.is_empty())
+                .map(String::from)
+                .ok_or_else(|| "provider info ops must contain non-empty strings".to_string())
+        })
+        .collect()
+}
+
+/// The terminal state a `stop` response reports for the thread's session.
+fn stop_response_state(response: &serde_json::Value) -> Result<String, String> {
+    match response.get("state").and_then(serde_json::Value::as_str) {
+        Some(state @ ("ending" | "ended" | "absent")) => Ok(state.to_string()),
+        Some(state) => Err(format!("stop response has unknown state {state:?}")),
+        None => Err("stop response missing state".to_string()),
+    }
 }
 
 /// Invoke a provider binary: write JSON to stdin, read JSON from stdout.
@@ -78,7 +177,7 @@ pub fn invoke_provider(
     binary: &Path,
     request: &serde_json::Value,
     timeout: Duration,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, ProviderFailure> {
     let request_bytes = format!(
         "{}\n",
         serde_json::to_string(request).map_err(|e| e.to_string())?
@@ -155,7 +254,7 @@ pub fn invoke_provider(
     if let Err(e) = stdin_result {
         let _ = child.kill();
         let _ = child.wait();
-        return Err(format!("stdin write failed: {e}"));
+        return Err(format!("stdin write failed: {e}").into());
     }
 
     // Poll try_wait with a deadline, collecting stdout chunks and draining
@@ -189,14 +288,14 @@ pub fn invoke_provider(
                 if std::time::Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Err(format!("provider timed out after {timeout_secs}s"));
+                    return Err(format!("provider timed out after {timeout_secs}s").into());
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
             Err(e) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!("wait error: {e}"));
+                return Err(format!("wait error: {e}").into());
             }
         }
     };
@@ -253,11 +352,9 @@ pub fn invoke_provider(
     if !exited_ok {
         let stderr_snippet = &stderr_redacted[..stderr_redacted.len().min(4096)];
         if stderr_snippet.is_empty() {
-            return Err(format!("provider failed ({exit_info}, empty stderr)"));
+            return Err(format!("provider failed ({exit_info}, empty stderr)").into());
         } else {
-            return Err(format!(
-                "provider failed ({exit_info}). stderr: {stderr_snippet}"
-            ));
+            return Err(format!("provider failed ({exit_info}). stderr: {stderr_snippet}").into());
         }
     }
 
@@ -282,7 +379,10 @@ pub fn invoke_provider(
 
     if response.get("ok").and_then(|v| v.as_bool()) == Some(false) {
         let error = response["error"].as_str().unwrap_or("unknown error");
-        return Err(redact_secrets_with(error, &env_secret_refs));
+        return Err(ProviderFailure {
+            message: redact_secrets_with(error, &env_secret_refs),
+            code: refusal_code(&response),
+        });
     }
 
     Ok(response)
@@ -505,20 +605,33 @@ fn stage_provider(
     ))
 }
 
+/// Run `info` on a staged provider and return the operations it advertises.
+fn negotiate_staged_provider(staged: &Path) -> Result<Vec<String>, String> {
+    let info_request = serde_json::json!({
+        "op": "info",
+        "request_id": uuid::Uuid::new_v4().to_string(),
+    });
+    let info = invoke_provider(staged, &info_request, Duration::from_secs(10))?;
+    validate_provider_info(&info)?;
+    advertised_ops(&info)
+}
+
+/// Operations a provider advertises. Runs only `info`, which carries no
+/// agent secret, on a staged copy of the binary.
+pub fn provider_ops(binary: &Path) -> Result<Vec<String>, String> {
+    let (_directory, staged, _digest, _execution_guard) = stage_provider(binary)?;
+    negotiate_staged_provider(&staged)
+}
+
 /// Deploy through one immutable staged copy: negotiate protocol v1 before the
 /// secret-bearing request, then invoke deploy on those exact same bytes.
 pub fn provider_deploy(
     binary: &Path,
     agent: &serde_json::Value,
     provider_config: &serde_json::Value,
-) -> Result<String, String> {
+) -> Result<String, ProviderFailure> {
     let (_directory, staged, _digest, _execution_guard) = stage_provider(binary)?;
-    let info_request = serde_json::json!({
-        "op": "info",
-        "request_id": uuid::Uuid::new_v4().to_string(),
-    });
-    let info = invoke_provider(&staged, &info_request, Duration::from_secs(10))?;
-    validate_provider_info(&info)?;
+    negotiate_staged_provider(&staged)?;
 
     let request = serde_json::json!({
         "op": "deploy",
@@ -530,7 +643,35 @@ pub fn provider_deploy(
     resp["agent_id"]
         .as_str()
         .map(String::from)
-        .ok_or_else(|| "deploy response missing agent_id".to_string())
+        .ok_or_else(|| "deploy response missing agent_id".into())
+}
+
+/// End a remote session through one immutable staged copy. The `stop`
+/// request carries the same secret-bearing payload as `deploy`, so it is sent
+/// only after the same bytes negotiated protocol v1 and advertised `stop`.
+/// Returns the session state: `ending`, `ended`, or `absent`.
+pub fn provider_stop(
+    binary: &Path,
+    agent: &serde_json::Value,
+    provider_config: &serde_json::Value,
+) -> Result<String, ProviderFailure> {
+    let (_directory, staged, _digest, _execution_guard) = stage_provider(binary)?;
+    if !negotiate_staged_provider(&staged)?
+        .iter()
+        .any(|op| op == "stop")
+    {
+        return Err(
+            "this provider cannot end remote sessions; update the provider and try again".into(),
+        );
+    }
+    let request = serde_json::json!({
+        "op": "stop",
+        "request_id": uuid::Uuid::new_v4().to_string(),
+        "agent": agent,
+        "provider_config": provider_config,
+    });
+    let response = invoke_provider(&staged, &request, Duration::from_secs(120))?;
+    Ok(stop_response_state(&response)?)
 }
 
 /// Bound public provider configuration and reject secret-like keys at every depth.

@@ -149,9 +149,12 @@ fn info_response_carries_the_contract_fields() {
     assert_eq!(info["ok"], true);
     assert_eq!(info["protocol_version"], 1);
     assert_eq!(info["name"], "kubernetes");
-    // `ops` is not advertised yet: a desktop that predates it must keep
-    // accepting `info`. A later change adds it, additive within version 1.
-    assert!(info.get("ops").is_none());
+    // Additive within protocol version 1; the desktop gates its session
+    // end/recover actions on `recover`.
+    assert_eq!(
+        info["ops"],
+        serde_json::json!(["info", "deploy", "stop", "recover"])
+    );
     let schema = &info["config_schema"];
     assert_eq!(
         schema["required"],
