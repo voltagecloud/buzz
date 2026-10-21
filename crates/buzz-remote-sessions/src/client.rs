@@ -91,8 +91,9 @@ impl AgentLocks {
         Ok(lock.lock_owned().await)
     }
 
-    /// Whether an operation holds `agent_pubkey`'s lock.
-    #[cfg(test)]
+    /// Whether an operation holds `agent_pubkey`'s lock. Only the Unix
+    /// tests use it, so it is compiled with them.
+    #[cfg(all(test, unix))]
     pub(crate) fn is_held(&self, agent_pubkey: &str) -> bool {
         self.0
             .lock()
