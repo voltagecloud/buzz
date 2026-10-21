@@ -10,10 +10,12 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use buzz_backend_kubernetes::lifecycle::{
-    annotation, owned_pod, sandbox_resource, EndedReason, Lifecycle, OperatingMode, CHANNEL,
-    CHECKPOINTING, CHECKPOINTING_DISABLED, CHECKPOINTING_ENABLED, ENDED_REASON, GENERATION,
-    INITIAL_POD, OWNER, SANDBOX_BINDING_VERSION, SESSION, THREAD,
+    annotation, owned_pod, sandbox_resource, EndedReason, Lifecycle, OperatingMode,
+    BIND_TIMEOUT_SECS, CHANNEL, CHECKPOINTING, CHECKPOINTING_DISABLED, CHECKPOINTING_ENABLED,
+    ENDED_REASON, GENERATION, INITIAL_POD, OWNER, RESTORE_CHECKPOINT, SANDBOX_BINDING_VERSION,
+    SESSION, THREAD,
 };
+use chrono::{DateTime, Utc};
 use k8s_openapi::api::core::v1::{EnvVar, EnvVarSource, ObjectFieldSelector, Pod, Secret};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use kube::api::{Api, ListParams, PostParams};
@@ -25,6 +27,16 @@ use sha2::{Digest, Sha256};
 
 use crate::wire::{ErrorCode, ProviderError};
 use crate::{config::ProviderConfig, intent::Fingerprint, naming, pod};
+
+/// Secret env key carrying the checkpoint a recovered session restores from.
+/// Always present (empty unless recovering) so its *key* is part of every
+/// fingerprint and a later ordinary deploy matches the recovered Sandbox.
+pub const RESTORE_KEY_ENV: &str = "BUZZ_CHECKPOINT_RESTORE_KEY";
+
+/// How long one deploy waits for its binding, and then for startup.
+const DEPLOY_DEADLINE_SECS: u64 = 120;
+/// Allowance for skew between this host's clock and the apiserver's.
+const CLOCK_SKEW_SECS: i64 = 60;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -182,9 +194,35 @@ fn verify_identity(
     Ok(())
 }
 
+/// Launch fingerprints a live Sandbox may carry and still be reused.
+struct Fingerprints {
+    /// Every key this version writes, including [`RESTORE_KEY_ENV`].
+    current: Fingerprint,
+    /// The same launch from a provider that predates [`RESTORE_KEY_ENV`].
+    /// Accepted only on reuse, so Sandboxes created before this version keep
+    /// working while desktop versions are mixed; never written.
+    legacy: Fingerprint,
+}
+
+impl Fingerprints {
+    fn new(cfg: &ProviderConfig, env: &BTreeMap<String, String>) -> Self {
+        let keys = || env.keys().cloned();
+        Self {
+            current: pod::intent_template(cfg, keys()).fingerprint(),
+            legacy: pod::intent_template(cfg, keys().filter(|key| key != RESTORE_KEY_ENV))
+                .fingerprint(),
+        }
+    }
+
+    fn accepts(&self, sandbox: &DynamicObject) -> bool {
+        let recorded = annotation(sandbox, naming::ANNOTATION_CREATE_INTENT);
+        recorded == Some(self.current.as_str()) || recorded == Some(self.legacy.as_str())
+    }
+}
+
 /// The Sandbox is a live session this deploy may reuse. Every refusal names the
 /// lifecycle state so the desktop can offer the right explicit action.
-fn verify_live(sandbox: &DynamicObject, fingerprint: &Fingerprint) -> Result<(), ProviderError> {
+fn verify_live(sandbox: &DynamicObject, fingerprints: &Fingerprints) -> Result<(), ProviderError> {
     let refused = |code, message: &str| Err(ProviderError::refused(code, message));
     if sandbox.metadata.deletion_timestamp.is_some() {
         return refused(
@@ -225,7 +263,7 @@ fn verify_live(sandbox: &DynamicObject, fingerprint: &Fingerprint) -> Result<(),
             "Sandbox is not an active managed session; explicit recovery is required",
         );
     }
-    if annotation(sandbox, naming::ANNOTATION_CREATE_INTENT) != Some(fingerprint.as_str()) {
+    if !fingerprints.accepts(sandbox) {
         return refused(
             ErrorCode::ConfigDiffers,
             "Sandbox launch configuration differs; end the session, then explicit recovery is required",
@@ -294,7 +332,7 @@ struct Session<'a> {
     identity: &'a naming::AgentIdentity,
     scope: &'a Options,
     owner: &'a str,
-    fingerprint: Fingerprint,
+    fingerprints: Fingerprints,
 }
 
 impl<'a> Session<'a> {
@@ -304,7 +342,7 @@ impl<'a> Session<'a> {
         identity: &'a naming::AgentIdentity,
         scope: &'a Options,
         owner: &'a str,
-        fingerprint: Fingerprint,
+        fingerprints: Fingerprints,
     ) -> Self {
         Self {
             sandboxes: api(client.clone(), namespace),
@@ -314,7 +352,7 @@ impl<'a> Session<'a> {
             identity,
             scope,
             owner,
-            fingerprint,
+            fingerprints,
         }
     }
 }
@@ -337,8 +375,8 @@ pub async fn deploy(
         return Err("Sandbox requires pod_options.active_deadline_seconds".into());
     }
     let checkpointing = apply_session_env(scope, &mut env)?;
-    let fingerprint = pod::intent_template(cfg, env.keys().cloned()).fingerprint();
-    let session = Session::new(client, &cfg.namespace, identity, scope, owner, fingerprint);
+    let fingerprints = Fingerprints::new(cfg, &env);
+    let session = Session::new(client, &cfg.namespace, identity, scope, owner, fingerprints);
     let existing = session
         .sandboxes
         .get_opt(&session.name)
@@ -349,7 +387,7 @@ pub async fn deploy(
         None => create_new(&session, cfg, checkpointing).await?,
     };
     verify_identity(&sandbox, identity, scope, owner)?;
-    verify_live(&sandbox, &session.fingerprint)?;
+    verify_live(&sandbox, &session.fingerprints)?;
     bind(&session, cfg, sandbox, env).await
 }
 
@@ -396,8 +434,10 @@ fn apply_session_env(scope: &Options, env: &mut BTreeMap<String, String>) -> Res
     if checkpointing {
         env.insert("BUZZ_ACP_CHECKPOINT_ON_STOP".into(), "true".into());
     }
-    // Include the UID binding key in the fingerprint without hashing its value.
+    // Include the binding keys in the fingerprint without hashing their
+    // values; both are filled in from the Sandbox when the Secret is written.
     env.insert("BUZZ_SANDBOX_INITIAL_POD_UID".into(), String::new());
+    env.insert(RESTORE_KEY_ENV.into(), String::new());
     Ok(checkpointing)
 }
 
@@ -449,7 +489,7 @@ async fn create_new(
         session.scope,
         session.owner,
         &new,
-        &session.fingerprint,
+        &session.fingerprints.current,
     )?;
     match session
         .sandboxes
@@ -469,7 +509,39 @@ async fn create_new(
     }
 }
 
+/// The reaper ends a never-started binding once its Pod is
+/// [`BIND_TIMEOUT_SECS`] old, by a CAS on the Sandbox that a Secret write does
+/// not bump. A deploy stops resuming early enough to write the Secret and see
+/// the container start before then.
+fn resume_window_closed(pod: &Pod, now: DateTime<Utc>) -> bool {
+    let window = BIND_TIMEOUT_SECS - DEPLOY_DEADLINE_SECS as i64 - CLOCK_SKEW_SECS;
+    pod.metadata
+        .creation_timestamp
+        .as_ref()
+        .is_some_and(|created| now - created.0 >= chrono::Duration::seconds(window))
+}
+
+fn container_started(pod: &Pod) -> bool {
+    pod.status
+        .as_ref()
+        .and_then(|s| s.container_statuses.as_ref())
+        .and_then(|containers| containers.iter().find(|c| c.name == "agent"))
+        .is_some_and(|c| {
+            c.restart_count > 0
+                || c.last_state
+                    .as_ref()
+                    .is_some_and(|s| s.terminated.is_some() || s.running.is_some())
+                || c.state
+                    .as_ref()
+                    .is_some_and(|s| s.terminated.is_some() || s.running.is_some())
+        })
+}
+
 /// Bind credentials to the Sandbox's first Pod and wait for it to start.
+///
+/// Resumable: a session bound to its first Pod whose Secret is missing and
+/// whose container never started is completed by whichever deploy observes
+/// it, with the Sandbox's own generation and an ownerRef to that Pod.
 async fn bind(
     session: &Session<'_>,
     cfg: &ProviderConfig,
@@ -481,8 +553,9 @@ async fn bind(
     let generation = annotation(&sandbox, GENERATION)
         .ok_or("Sandbox generation is missing")?
         .to_string();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(DEPLOY_DEADLINE_SECS);
     loop {
+        let expired = tokio::time::Instant::now() >= deadline;
         let Some(child) = session
             .pods
             .get_opt(name)
@@ -495,7 +568,7 @@ async fn bind(
                     "Sandbox lost its original Pod; explicit recovery is required",
                 ));
             }
-            if tokio::time::Instant::now() >= deadline {
+            if expired {
                 return Err(
                     "Sandbox controller has not created its Pod; inspect the Sandbox and retry"
                         .into(),
@@ -529,38 +602,25 @@ async fn bind(
             sandbox
                 .annotations_mut()
                 .insert(INITIAL_POD.into(), uid.into());
-            sandbox = match session
+            match session
                 .sandboxes
                 .replace(name, &PostParams::default(), &sandbox)
                 .await
             {
-                Ok(bound) => bound,
+                Ok(bound) => {
+                    sandbox = bound;
+                }
                 Err(e) if reason_is(&e, "Conflict") => {
                     sandbox = refresh(session, &generation).await?;
-                    if tokio::time::Instant::now() >= deadline {
+                    if expired {
                         return Err(
                             "Sandbox kept changing during credential binding; retry deploy".into(),
                         );
                     }
-                    continue;
                 }
                 Err(e) => return Err(format!("bind Sandbox to its first Pod: {e}").into()),
-            };
-            let secret = bound_secret(identity, cfg, &generation, name, uid, env);
-            session
-                .secrets
-                .create(&PostParams::default(), &secret)
-                .await
-                .map_err(|e| {
-                    ProviderError::refused(
-                        ErrorCode::BindingIncomplete,
-                        format!(
-                            "could not create bound Sandbox credentials ({}); explicit recovery is required",
-                            api_failure(&e)
-                        ),
-                    )
-                })?;
-            return wait_for_start(&session.pods, &sandbox, name, uid).await;
+            }
+            continue;
         };
         if uid != initial_uid {
             return Err(ProviderError::refused(
@@ -568,23 +628,52 @@ async fn bind(
                 "Sandbox Pod was replaced; credentials remain bound to the original session, explicit recovery is required",
             ));
         }
-        let secret = session
+        let secret_name = identity.secret_name(&generation);
+        let secret =
+            session.secrets.get_opt(&secret_name).await.map_err(|e| {
+                format!("could not check Sandbox launch Secret: {}", api_failure(&e))
+            })?;
+        if let Some(secret) = secret {
+            check_secret(&secret, identity, uid, &env)?;
+            return wait_for_start(&session.pods, &sandbox, name, uid).await;
+        }
+        if container_started(&child) {
+            return Err(ProviderError::refused(
+                ErrorCode::CredentialsMissing,
+                "Sandbox credentials are missing from a started session; explicit recovery is required",
+            ));
+        }
+        if expired {
+            return Err(ProviderError::refused(
+                ErrorCode::BindingIncomplete,
+                "Sandbox credential binding is incomplete; retry deploy",
+            ));
+        }
+        if resume_window_closed(&child, Utc::now()) {
+            return Err(ProviderError::refused(
+                ErrorCode::BindingExpired,
+                "Sandbox credential binding is too old to resume; explicit recovery is required once the session has ended",
+            ));
+        }
+        let secret = bound_secret(identity, cfg, &sandbox, &generation, name, uid, env.clone());
+        match session
             .secrets
-            .get_opt(&identity.secret_name(&generation))
+            .create(&PostParams::default(), &secret)
             .await
-            .map_err(|e| format!("could not check Sandbox launch Secret: {}", api_failure(&e)))?;
-        let Some(secret) = secret else {
-            if tokio::time::Instant::now() >= deadline {
-                return Err(ProviderError::refused(
-                    ErrorCode::BindingIncomplete,
-                    "Sandbox credential binding is incomplete; explicit recovery is required",
-                ));
+        {
+            // Either way, the next pass re-reads and verifies what was stored.
+            Ok(_) => {}
+            Err(e) if reason_is(&e, "AlreadyExists") => {}
+            Err(e) => {
+                // The write may have succeeded despite a lost response.
+                // Keep the Pod binding so retries verify the same session.
+                return Err(format!(
+                    "could not create bound Sandbox credentials ({}); retry deploy",
+                    api_failure(&e)
+                )
+                .into());
             }
-            tokio::time::sleep(Duration::from_millis(250)).await;
-            continue;
-        };
-        check_secret(&secret, identity, uid, &env)?;
-        return wait_for_start(&session.pods, &sandbox, name, uid).await;
+        }
     }
 }
 
@@ -596,7 +685,7 @@ async fn refresh(session: &Session<'_>, generation: &str) -> Result<DynamicObjec
         .await
         .map_err(|e| format!("refresh Sandbox binding: {e}"))?;
     verify_identity(&sandbox, session.identity, session.scope, session.owner)?;
-    verify_live(&sandbox, &session.fingerprint)?;
+    verify_live(&sandbox, &session.fingerprints)?;
     if annotation(&sandbox, GENERATION) != Some(generation) {
         return Err(ProviderError::refused(
             ErrorCode::SessionReplaced,
@@ -609,6 +698,7 @@ async fn refresh(session: &Session<'_>, generation: &str) -> Result<DynamicObjec
 fn bound_secret(
     identity: &naming::AgentIdentity,
     cfg: &ProviderConfig,
+    sandbox: &DynamicObject,
     generation: &str,
     name: &str,
     uid: &str,
@@ -616,6 +706,14 @@ fn bound_secret(
 ) -> Secret {
     env.insert("BUZZ_MANAGED_AGENT_START_NONCE".into(), generation.into());
     env.insert("BUZZ_SANDBOX_INITIAL_POD_UID".into(), uid.into());
+    // The restore key comes from the Sandbox, never from the request, so a
+    // resumed binding keeps the recovery its Sandbox was created with.
+    env.insert(
+        RESTORE_KEY_ENV.into(),
+        annotation(sandbox, RESTORE_CHECKPOINT)
+            .unwrap_or_default()
+            .into(),
+    );
     let mut secret = pod::build_secret(identity, &cfg.namespace, generation, env);
     secret.labels_mut().insert(
         naming::LABEL_BINDING_VERSION.into(),
@@ -674,7 +772,7 @@ async fn wait_for_start(
     name: &str,
     uid: &str,
 ) -> Result<String, ProviderError> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(DEPLOY_DEADLINE_SECS);
     loop {
         let child = pods
             .get_opt(name)

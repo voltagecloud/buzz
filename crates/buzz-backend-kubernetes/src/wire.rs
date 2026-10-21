@@ -158,8 +158,13 @@ pub enum ErrorCode {
     /// The session was launched against a different relay.
     RelayDiffers,
     /// The session is bound to its first Pod, but its credentials were not
-    /// written.
+    /// written within this deploy's deadline; a retry resumes the binding.
     BindingIncomplete,
+    /// The session is bound to its first Pod without credentials, and the
+    /// Pod is too old to resume before the reaper ends the binding.
+    BindingExpired,
+    /// The bound container started without its credentials.
+    CredentialsMissing,
     /// The Pod the session is bound to is gone.
     PodLost,
     /// The controller replaced the Pod the session is bound to.

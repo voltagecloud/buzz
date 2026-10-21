@@ -4,7 +4,8 @@
 //! It models only what the Sandbox paths touch: Sandbox CRUD with
 //! resourceVersion CAS, a controller that creates the Sandbox's Pod while it
 //! is Running, Pods whose agent container runs once their `envFrom` Secret
-//! exists, and Secret create.
+//! exists (or whose status a test overrides), and Secret create with failure
+//! injection.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -22,8 +23,18 @@ pub struct State {
     pub secrets: BTreeMap<String, Value>,
     /// Pod UIDs by name; Pods are rendered from their Sandbox on read.
     pub pods: BTreeMap<String, String>,
+    /// Pod `creationTimestamp`s (RFC 3339) by name; set when the controller
+    /// creates the Pod.
+    pub pod_created: BTreeMap<String, String>,
+    /// Fields that replace the derived agent container status, such as
+    /// `restartCount` or `lastState`.
+    pub container_status: Option<Value>,
     pub rv: u64,
     pub uid: u64,
+    /// Fail this many Secret creates with a 500.
+    pub fail_secret_creates: usize,
+    /// Store the Secret, then fail this many create responses with a 500.
+    pub fail_secret_create_responses: usize,
 }
 
 pub type Shared = Arc<Mutex<State>>;
@@ -64,8 +75,11 @@ impl State {
         if running && !self.pods.contains_key(name) {
             let uid = self.next_uid("pod");
             self.pods.insert(name.into(), uid);
+            self.pod_created
+                .insert(name.into(), chrono::Utc::now().to_rfc3339());
         } else if !running {
             self.pods.remove(name);
+            self.pod_created.remove(name);
         }
     }
 
@@ -84,19 +98,26 @@ impl State {
         } else {
             json!({"waiting": {"reason": "CreateContainerConfigError"}})
         };
+        let mut container = json!({
+            "name": "agent", "image": "i", "imageID": "", "ready": started,
+            "restartCount": 0, "state": state});
+        if let Some(Value::Object(fields)) = &self.container_status {
+            for (key, value) in fields {
+                container[key] = value.clone();
+            }
+        }
         Some(json!({
             "apiVersion": "v1", "kind": "Pod",
             "metadata": {
                 "name": name, "uid": uid,
+                "creationTimestamp": self.pod_created.get(name),
                 "labels": template["metadata"]["labels"],
                 "annotations": template["metadata"]["annotations"],
                 "ownerReferences": [{"apiVersion": "agents.x-k8s.io/v1beta1",
                     "kind": "Sandbox", "name": name,
                     "uid": sandbox["metadata"]["uid"], "controller": true}],
             },
-            "status": {"phase": "Pending", "containerStatuses": [{
-                "name": "agent", "image": "i", "imageID": "", "ready": started,
-                "restartCount": 0, "state": state}]},
+            "status": {"phase": "Pending", "containerStatuses": [container]},
         }))
     }
 
@@ -121,6 +142,10 @@ impl State {
                 None => status(404, "NotFound"),
             },
             ["api", "v1", "namespaces", _, "secrets"] if method == Method::POST => {
+                if self.fail_secret_creates > 0 {
+                    self.fail_secret_creates -= 1;
+                    return status(500, "InternalError");
+                }
                 let mut secret: Secret = serde_json::from_slice(body).unwrap();
                 let name = secret.metadata.name.clone().unwrap();
                 if self.secrets.contains_key(&name) {
@@ -135,6 +160,10 @@ impl State {
                 secret.metadata.uid = Some(self.next_uid("secret"));
                 let stored = serde_json::to_value(&secret).unwrap();
                 self.secrets.insert(name, stored.clone());
+                if self.fail_secret_create_responses > 0 {
+                    self.fail_secret_create_responses -= 1;
+                    return status(500, "InternalError");
+                }
                 ok(&stored)
             }
             _ => status(404, "NotFound"),

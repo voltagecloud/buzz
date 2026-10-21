@@ -17,12 +17,12 @@ fn custom_image_is_inside_a_real_sandbox_with_a_downward_uid() {
         channel_id: uuid::Uuid::new_v4().to_string(),
         thread_root: "c".repeat(64),
     };
-    let fp = pod::intent_template(&cfg, vec![]).fingerprint();
+    let fps = Fingerprints::new(&cfg, &BTreeMap::new());
     let new = NewSession {
         generation: "generation",
         checkpointing: false,
     };
-    let mut sandbox = build(&identity, &cfg, &scope, "owner", &new, &fp).unwrap();
+    let mut sandbox = build(&identity, &cfg, &scope, "owner", &new, &fps.current).unwrap();
     assert_eq!(
         sandbox.types.as_ref().unwrap().api_version,
         "agents.x-k8s.io/v1beta1"
@@ -44,8 +44,9 @@ fn custom_image_is_inside_a_real_sandbox_with_a_downward_uid() {
     assert_eq!(spec["volumes"][0]["emptyDir"]["sizeLimit"], "50Gi");
     assert_eq!(spec["containers"][0]["terminationMessagePolicy"], "File");
     assert_eq!(annotation(&sandbox, CHECKPOINTING), Some("disabled"));
+    assert_eq!(annotation(&sandbox, RESTORE_CHECKPOINT), None);
     verify_identity(&sandbox, &identity, &scope, "owner").unwrap();
-    verify_live(&sandbox, &fp).unwrap();
+    verify_live(&sandbox, &fps).unwrap();
     sandbox
         .annotations_mut()
         .insert(OWNER.into(), "different-owner".into());
@@ -430,7 +431,7 @@ fn sandbox_json(state: &fake::Shared, name: &str) -> serde_json::Value {
 }
 
 #[tokio::test(start_paused = true)]
-async fn fresh_deploy_binds_and_reuses_its_session() {
+async fn fresh_deploy_binds_and_always_carries_an_empty_restore_key() {
     let state = fake::Shared::default();
     let (identity, cfg, scope) = (fake_identity(), fake_cfg(), fake_scope());
     let name = deploy(
@@ -464,6 +465,8 @@ async fn fresh_deploy_binds_and_reuses_its_session() {
         })
         .collect();
     assert_eq!(secret_owner_uids, [initial_pod_uid]);
+    assert!(annotations.get(RESTORE_CHECKPOINT).is_none());
+    assert_eq!(secret_env(&state, RESTORE_KEY_ENV), [""]);
     assert_eq!(
         secret_env(&state, "BUZZ_MANAGED_AGENT_START_NONCE"),
         [annotations[GENERATION].as_str().unwrap()]
@@ -594,5 +597,288 @@ async fn deploy_refuses_a_sandbox_that_is_not_a_reusable_live_session() {
         let guard = state.lock().unwrap();
         assert!(guard.secrets.is_empty(), "{case}: wrote a Secret");
         assert_eq!(guard.sandboxes[&name], before, "{case}: wrote the Sandbox");
+    }
+}
+
+/// The medium bug: bound to the first Pod, Secret never written, container
+/// never started. A later deploy must finish the binding, not strand it.
+#[tokio::test(start_paused = true)]
+async fn a_bound_session_without_its_secret_is_resumed() {
+    let state = fake::Shared::default();
+    let (identity, cfg, scope) = (fake_identity(), fake_cfg(), fake_scope());
+    deploy(
+        fake::client(&state),
+        &identity,
+        &cfg,
+        &scope,
+        "owner",
+        plain_env(),
+    )
+    .await
+    .unwrap();
+    let name = scope.name(&identity);
+    let (generation, pod_uid) = {
+        let mut guard = state.lock().unwrap();
+        guard.secrets.clear();
+        let sandbox = &guard.sandboxes[&name];
+        (
+            sandbox["metadata"]["annotations"][GENERATION].clone(),
+            guard.pods[&name].clone(),
+        )
+    };
+    deploy(
+        fake::client(&state),
+        &identity,
+        &cfg,
+        &scope,
+        "owner",
+        plain_env(),
+    )
+    .await
+    .unwrap();
+    let guard = state.lock().unwrap();
+    let (secret_name, secret) = guard.secrets.iter().next().unwrap();
+    assert!(secret_name.ends_with(generation.as_str().unwrap()));
+    assert_eq!(secret["metadata"]["ownerReferences"][0]["uid"], pod_uid);
+    assert_eq!(
+        sandbox_json_locked(&guard, &name)["metadata"]["annotations"][GENERATION],
+        generation
+    );
+}
+
+fn sandbox_json_locked(state: &fake::State, name: &str) -> serde_json::Value {
+    state.sandboxes[name].clone()
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_secret_create_failure_preserves_the_binding_and_the_retry_succeeds() {
+    assert_secret_create_retry(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_secret_create_response_preserves_the_live_session() {
+    assert_secret_create_retry(true).await;
+}
+
+async fn assert_secret_create_retry(stored_before_error: bool) {
+    let state = fake::Shared::default();
+    if stored_before_error {
+        state.lock().unwrap().fail_secret_create_responses = 1;
+    } else {
+        state.lock().unwrap().fail_secret_creates = 1;
+    }
+    let (identity, cfg, scope) = (fake_identity(), fake_cfg(), fake_scope());
+    let error = deploy(
+        fake::client(&state),
+        &identity,
+        &cfg,
+        &scope,
+        "owner",
+        plain_env(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, None, "{error}");
+    assert!(error.message.ends_with("retry deploy"), "{error}");
+    let name = scope.name(&identity);
+    let sandbox = sandbox_json(&state, &name);
+    let pod_uid = state.lock().unwrap().pods[&name].clone();
+    assert_eq!(
+        sandbox["metadata"]["annotations"][INITIAL_POD], pod_uid,
+        "an uncertain Secret write must not discard the original Pod binding"
+    );
+    assert_eq!(
+        state.lock().unwrap().secrets.len(),
+        usize::from(stored_before_error)
+    );
+    deploy(
+        fake::client(&state),
+        &identity,
+        &cfg,
+        &scope,
+        "owner",
+        plain_env(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(sandbox_json(&state, &name), sandbox);
+    let guard = state.lock().unwrap();
+    assert_eq!(guard.pods[&name], pod_uid);
+    assert_eq!(guard.secrets.len(), 1);
+    let secret = guard.secrets.values().next().unwrap();
+    assert_eq!(secret["metadata"]["ownerReferences"][0]["uid"], pod_uid);
+}
+
+#[test]
+fn the_restore_key_is_fingerprinted_by_name_not_value() {
+    let cfg = fake_cfg();
+    let scope = fake_scope();
+    let mut plain = plain_env();
+    apply_session_env(&scope, &mut plain).unwrap();
+    assert_eq!(plain[RESTORE_KEY_ENV], "");
+    let mut restored = plain.clone();
+    restored.insert(RESTORE_KEY_ENV.into(), "dev/g/x.tar.gz".into());
+    assert_eq!(
+        pod::intent_template(&cfg, plain.keys().cloned()).fingerprint(),
+        pod::intent_template(&cfg, restored.keys().cloned()).fingerprint()
+    );
+    let mut without = plain.clone();
+    without.remove(RESTORE_KEY_ENV);
+    assert_ne!(
+        pod::intent_template(&cfg, plain.keys().cloned()).fingerprint(),
+        pod::intent_template(&cfg, without.keys().cloned()).fingerprint()
+    );
+}
+
+/// Sandboxes created before the restore key existed carry a fingerprint
+/// without it. Mixed desktop versions must keep reusing them; any other
+/// fingerprint is still a configuration change.
+#[tokio::test(start_paused = true)]
+async fn a_sandbox_from_before_the_restore_key_is_still_reused() {
+    let state = fake::Shared::default();
+    let (identity, cfg, scope) = (fake_identity(), fake_cfg(), fake_scope());
+    let name = deploy(
+        fake::client(&state),
+        &identity,
+        &cfg,
+        &scope,
+        "owner",
+        plain_env(),
+    )
+    .await
+    .unwrap();
+    let mut env = plain_env();
+    apply_session_env(&scope, &mut env).unwrap();
+    let fingerprints = Fingerprints::new(&cfg, &env);
+    assert_ne!(fingerprints.legacy, fingerprints.current);
+    let set_intent = |value: &str| {
+        state.lock().unwrap().sandboxes.get_mut(&name).unwrap()["metadata"]["annotations"]
+            [naming::ANNOTATION_CREATE_INTENT] = value.into();
+    };
+    set_intent(fingerprints.legacy.as_str());
+    let redeploy = || {
+        deploy(
+            fake::client(&state),
+            &identity,
+            &cfg,
+            &scope,
+            "owner",
+            plain_env(),
+        )
+    };
+    assert_eq!(redeploy().await.unwrap(), name);
+    set_intent(&"0".repeat(64));
+    assert_eq!(
+        redeploy().await.unwrap_err().code,
+        Some(ErrorCode::ConfigDiffers)
+    );
+}
+
+/// Deploy once, then drop the launch Secret: a bound session whose
+/// credentials were never written.
+async fn unbound_credentials(
+    identity: &naming::AgentIdentity,
+    cfg: &ProviderConfig,
+    scope: &Options,
+) -> (fake::Shared, String) {
+    let state = fake::Shared::default();
+    let name = deploy(
+        fake::client(&state),
+        identity,
+        cfg,
+        scope,
+        "owner",
+        plain_env(),
+    )
+    .await
+    .unwrap();
+    state.lock().unwrap().secrets.clear();
+    (state, name)
+}
+
+/// A container that ever ran without its Secret is not resumed: writing
+/// credentials now would hand them to a process that already started.
+#[tokio::test(start_paused = true)]
+async fn a_started_session_without_credentials_is_not_resumed() {
+    let (identity, cfg, scope) = (fake_identity(), fake_cfg(), fake_scope());
+    for started in [
+        json!({"restartCount": 1}),
+        json!({"lastState": {"terminated": {"exitCode": 1}}}),
+        json!({"state": {"running": {}}}),
+    ] {
+        let (state, _) = unbound_credentials(&identity, &cfg, &scope).await;
+        state.lock().unwrap().container_status = Some(started.clone());
+        let error = deploy(
+            fake::client(&state),
+            &identity,
+            &cfg,
+            &scope,
+            "owner",
+            plain_env(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, Some(ErrorCode::CredentialsMissing), "{started}");
+        assert!(state.lock().unwrap().secrets.is_empty(), "{started}");
+    }
+}
+
+/// The restore key in the Secret is the Sandbox's, whatever the request
+/// carries, so a resumed binding keeps the recovery it was created with.
+#[tokio::test(start_paused = true)]
+async fn the_restore_key_comes_from_the_sandbox_not_the_request() {
+    let (identity, cfg, scope) = (fake_identity(), fake_cfg(), fake_scope());
+    for recorded in [Some("dev/generation/checkpoint.tar.gz"), None] {
+        let (state, name) = unbound_credentials(&identity, &cfg, &scope).await;
+        if let Some(key) = recorded {
+            state.lock().unwrap().sandboxes.get_mut(&name).unwrap()["metadata"]["annotations"]
+                [RESTORE_CHECKPOINT] = key.into();
+        }
+        let mut env = plain_env();
+        env.insert(RESTORE_KEY_ENV.into(), "dev/other/forged.tar.gz".into());
+        deploy(fake::client(&state), &identity, &cfg, &scope, "owner", env)
+            .await
+            .unwrap();
+        assert_eq!(
+            secret_env(&state, RESTORE_KEY_ENV),
+            [recorded.unwrap_or_default()]
+        );
+    }
+}
+
+/// Resuming stops before the reaper's bind timeout can end the session
+/// under a deploy that is still writing credentials or waiting for startup.
+#[tokio::test(start_paused = true)]
+async fn a_binding_too_close_to_the_reaper_timeout_is_not_resumed() {
+    let (identity, cfg, scope) = (fake_identity(), fake_cfg(), fake_scope());
+    let window = BIND_TIMEOUT_SECS - DEPLOY_DEADLINE_SECS as i64 - CLOCK_SKEW_SECS;
+    for (age, resumed) in [(window - 60, true), (window, false)] {
+        let (state, name) = unbound_credentials(&identity, &cfg, &scope).await;
+        let created = Utc::now() - chrono::Duration::seconds(age);
+        state
+            .lock()
+            .unwrap()
+            .pod_created
+            .insert(name, created.to_rfc3339());
+        let result = deploy(
+            fake::client(&state),
+            &identity,
+            &cfg,
+            &scope,
+            "owner",
+            plain_env(),
+        )
+        .await;
+        if resumed {
+            result.unwrap();
+            assert_eq!(state.lock().unwrap().secrets.len(), 1);
+        } else {
+            assert_eq!(
+                result.unwrap_err().code,
+                Some(ErrorCode::BindingExpired),
+                "{age}"
+            );
+            assert!(state.lock().unwrap().secrets.is_empty());
+        }
     }
 }
