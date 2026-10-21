@@ -11,7 +11,7 @@
 //! * **Reads leave `resourceVersion` unset**, which is the quorum read. `"0"`
 //!   is the cache read, and a confirmed absence from a cache is proof of
 //!   nothing (`:761-769`).
-//! * **Deletes never set `grace_period_seconds`**, so the object's own 60s
+//! * **Deletes never set `grace_period_seconds`**, so the object's own declared
 //!   budget applies. Passing `0` is a force-kill that discards the shutdown
 //!   window the pod declares (`:1185-1189`).
 
@@ -216,7 +216,7 @@ impl Substrate for Cluster {
                 uid: Some(fence.uid.clone()),
                 resource_version: Some(fence.resource_version.clone()),
             }),
-            // grace_period_seconds deliberately unset: the pod's own 60s
+            // grace_period_seconds deliberately unset: the pod's own declared
             // budget applies.
             ..Default::default()
         };

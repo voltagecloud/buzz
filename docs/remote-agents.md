@@ -917,9 +917,9 @@ can yield two live instances in one scope.
   declared bounds — currently 2s + 5s = 7s** — which child cleanup may
   never consume: child reaping degrades first (skip remaining per-slot
   waits, force-kill), because a shared deadline without the reservation
-  can legally spend all 60s reaping children and hit SIGKILL before the
+  can legally spend the entire budget reaping children and hit SIGKILL before the
   one action the grace period exists to protect. The binding declares the
-  budget (§K8s Grace: 60s); anyone re-deriving "~37s" from the segment
+  budget (§K8s Grace: 300s); anyone re-deriving "~37s" from the segment
   constants is reading numbers without their variables. The desktop's
   local stop command rejects remote agents.
 - **Delete** with a live `backend_agent_id` requires `force_remote_delete:
@@ -1073,7 +1073,7 @@ PID 1, and a PID-1 bash with no trap never delivers SIGTERM to the harness
 (PID 1 receives kernel-level default-handler signal immunity), so the pod
 rides out the entire grace period and is SIGKILLed with presence still
 online — voiding I5's substrate half and the very staleness window
-`terminationGracePeriodSeconds: 60` was sized to close. The entrypoint
+`terminationGracePeriodSeconds` is intended to close. The entrypoint
 shape and the grace period are one requirement, not two.
 
 **Payload → environment mapping.** The provider builds the pod environment
@@ -1200,7 +1200,7 @@ regardless of `HOME`.
   404) before creating. The delete call MUST use the object's own grace
   period (kube-rs: `DeleteParams { grace_period_seconds: None, .. }`); the
   tempting shortcut of passing `0` to skip the poll is a **force-kill** that
-  discards the 60s shutdown grace pinned below — the poll is mandatory
+  discards the declared shutdown grace pinned below — the poll is mandatory
   precisely because the fast path is wrong. For *terminal*
   (Succeeded/Failed) pods — and for **unscheduled** pods (no assigned node:
   unschedulable or quota-blocked `Pending`, a state users hit while setting
@@ -1208,10 +1208,11 @@ regardless of `HOME`.
   zeroes the grace period and deletes immediately, so the normal restart
   path needs no meaningful wait — do not add a fixed sleep, and do not use
   zero-grace cleanup as a reason to skip the poll in the live-pod arm.
-- **`terminationGracePeriodSeconds: 60` — a declared budget the harness
+- **`terminationGracePeriodSeconds: 300` — a declared budget the harness
   MUST honor, not a sum the spec derived.** Kubernetes' default 30s grace
   would SIGKILL the harness mid-drain, leaving presence stale-online — the
-  avoidable half of I3's staleness window — so the binding declares 60s.
+  avoidable half of I3's staleness window — so the binding declares 300s, including room for the 120s shutdown
+  checkpoint.
   But the shutdown tail is *variable*, not constant (§Stop: the post-drain
   reap segment alone reaches ~87s at default parallelism at `28ae6cd21`,
   and earlier untimed segments precede it — the total is not bounded by
@@ -1222,7 +1223,7 @@ regardless of `HOME`.
   finalization slice (≥ the finalizers' declared bounds, currently 7s) for
   presence `offline` and relay close, child cleanup
   degrading first (§Stop, Known Defect 7). Until the harness enforcement
-  lands, 60s is an operational margin that the tail can exceed.
+  lands, 300s is an operational margin that the tail can exceed.
 - **Hardening defaults (normative).** The workload is a prompted coding
   agent running repository and tool code while holding an nsec; the pod MUST
   NOT hand it ambient cluster credentials or kernel privilege on top:

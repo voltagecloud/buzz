@@ -55,9 +55,21 @@ pub const RUN_AS_GID: i64 = 10001;
 /// (§Working directory).
 pub const WORKSPACE_PATH: &str = "/home/agent";
 
-/// `terminationGracePeriodSeconds` — a declared budget, not a derived sum
-/// (§Pod shape). Kubernetes' default 30s would SIGKILL the harness mid-drain.
-pub const TERMINATION_GRACE_SECONDS: i64 = 60;
+/// Declared shutdown budget, including the 120s checkpoint timeout.
+/// Child reaping is variable; this is operational margin, not a proven bound
+/// on the harness's whole shutdown path (§K8s Grace).
+pub const TERMINATION_GRACE_SECONDS: i64 = 300;
+
+/// `buzz-acp`'s stop checkpoint timeout (`checkpoint::save`).
+const CHECKPOINT_TIMEOUT_SECONDS: i64 = 120;
+
+/// Known stop-path segments at the desktop's default parallelism of 10
+/// (§Stop): wake-task drain and awakened-pool reap, prompt drain and slot
+/// reap (5s post-SIGKILL wait per slot each), presence `offline` (2s), and
+/// relay close (5s).
+const STOP_TAIL_SECONDS: i64 = (30 + 5 * 10) + (30 + 5 * 10) + 2 + 5;
+
+const _: () = assert!(TERMINATION_GRACE_SECONDS >= CHECKPOINT_TIMEOUT_SECONDS + STOP_TAIL_SECONDS);
 
 /// The only restart policy v1 ships. `OnFailure` is double-gated on the
 /// harness exit-code contract *and* a crash-loop classification row the state

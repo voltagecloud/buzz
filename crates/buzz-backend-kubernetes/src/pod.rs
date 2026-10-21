@@ -319,11 +319,10 @@ mod tests {
         assert_eq!(spec(&pod()).restart_policy.as_deref(), Some("Never"));
     }
 
-    /// 60s, not Kubernetes' default 30s — which would SIGKILL the harness
-    /// mid-drain and leave presence stale-online (§Pod shape).
+    /// Allow the harness to drain and run its 120s shutdown checkpoint.
     #[test]
-    fn declares_the_sixty_second_grace_budget() {
-        assert_eq!(spec(&pod()).termination_grace_period_seconds, Some(60));
+    fn declares_the_checkpoint_shutdown_budget() {
+        assert_eq!(spec(&pod()).termination_grace_period_seconds, Some(300));
     }
 
     /// The pod must not override the image's entrypoint: the image execs the
