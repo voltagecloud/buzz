@@ -1,0 +1,10 @@
+#!/bin/sh
+# Hold a node-local heavy-job slot (buzz-heavy) for cargo commands that compile.
+real=/usr/local/bin/cargo
+sub=$1
+case "$sub" in +*) sub=$2 ;; esac
+case "$sub" in
+  b|build|c|check|clippy|bench|d|doc|install|llvm-cov|nextest|r|run|t|test)
+    exec /usr/local/bin/buzz-heavy -- "$real" "$@" ;;
+esac
+exec "$real" "$@"

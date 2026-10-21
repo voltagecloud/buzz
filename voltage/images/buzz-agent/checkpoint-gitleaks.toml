@@ -1,0 +1,9 @@
+[extend]
+useDefault = true
+
+# Profiles may export CLAUDE_CODE_OAUTH_TOKEN; the default rules do not match it.
+[[rules]]
+id = "claude-oauth-token"
+description = "Claude subscription OAuth token"
+regex = '''sk-ant-oat01-[A-Za-z0-9_-]{80,}'''
+keywords = ["sk-ant-oat01-"]
