@@ -6243,6 +6243,11 @@ mod postgres_tests {
         assert_eq!(current_schema.scoped_tables, inventory.schema.scoped_tables);
         assert_eq!(current_schema.fenced_tables, inventory.schema.fenced_tables);
 
+        let mut rejected = db
+            .pool
+            .begin()
+            .await
+            .expect("begin rejected approval insert");
         let mismatched_insert = sqlx::query(
             "INSERT INTO community_deletion_approvals \
              (request_id, community_id, inventory_digest, approved_by) \
@@ -6251,12 +6256,16 @@ mod postgres_tests {
         .bind(request.id)
         .bind(*request.community_id.as_uuid())
         .bind(vec![0_u8; 32])
-        .execute(&db.pool)
+        .execute(&mut *rejected)
         .await;
         assert!(
             mismatched_insert.is_err(),
             "a mismatched approval must be unrepresentable"
         );
+        rejected
+            .rollback()
+            .await
+            .expect("roll back rejected approval insert");
         let approved = store
             .approve(request.id, "approver-a", Some("reviewed"))
             .await
@@ -6276,28 +6285,48 @@ mod postgres_tests {
             approved.inventory_digest,
             Some(hex::encode(inventory.digest().unwrap()))
         );
+        let mut rejected = db
+            .pool
+            .begin()
+            .await
+            .expect("begin rejected approval update");
         let mismatched_approval = sqlx::query(
             "UPDATE community_deletion_approvals SET inventory_digest = $2 WHERE request_id = $1",
         )
         .bind(request.id)
         .bind(vec![0_u8; 32])
-        .execute(&db.pool)
+        .execute(&mut *rejected)
         .await;
         assert!(
             mismatched_approval.is_err(),
             "approval digest must remain database-bound to the frozen request digest"
         );
+        rejected
+            .rollback()
+            .await
+            .expect("roll back rejected approval update");
+        let mut rejected = db
+            .pool
+            .begin()
+            .await
+            .expect("begin rejected request update");
         let mismatched_request = sqlx::query(
             "UPDATE community_deletion_requests SET inventory_digest = $2 WHERE id = $1",
         )
         .bind(request.id)
         .bind(vec![1_u8; 32])
-        .execute(&db.pool)
+        .execute(&mut *rejected)
         .await;
         assert!(
             mismatched_request.is_err(),
             "the frozen request digest must remain bound to its approval"
         );
+        // ErrorResponse can arrive before PostgreSQL releases the row lock.
+        // Await rollback before the claimant uses FOR UPDATE SKIP LOCKED.
+        rejected
+            .rollback()
+            .await
+            .expect("roll back rejected request update");
         assert!(store
             .claim_specific(request.id, "executor-a", DEFAULT_LEASE_DURATION)
             .await
