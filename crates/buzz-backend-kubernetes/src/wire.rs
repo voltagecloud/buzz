@@ -211,6 +211,28 @@ pub enum ErrorCode {
     /// A recovery in the other mode created this session's replacement and
     /// has not finished binding it.
     RecoveryModeConflict,
+    // Session manager refusals (§Relay transport).
+    /// The request has no valid owner attestation, or its owner is not a
+    /// configured developer.
+    UnauthorizedOwner,
+    /// The request is not signed by the key it acts for: the payload's agent
+    /// key, or the owner key for `enroll`.
+    SignerMismatch,
+    /// The request's `created_at` is too far from the manager's clock, or the
+    /// request has expired.
+    StaleRequest,
+    /// The manager has already received this request event.
+    ReplayedRequest,
+    /// The `request_id` is already in use for a different request.
+    RequestIdReused,
+    /// The manager is at its limit of tracked or running requests.
+    ManagerBusy,
+    /// The manager does not support the requested operation.
+    UnsupportedOp,
+    /// The manager does not support the request's envelope version.
+    UnsupportedVersion,
+    /// Client-side: the manager did not answer within the deadline.
+    ManagerUnavailable,
 }
 
 /// A failed operation: the display message and, for a refusal a client can

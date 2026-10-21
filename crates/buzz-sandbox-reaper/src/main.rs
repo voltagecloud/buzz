@@ -9,6 +9,9 @@
 
 mod config;
 mod evidence;
+// Runs once `serve` (the next change) receives requests over the relay.
+#[allow(dead_code)]
+mod manager;
 mod plan;
 mod reconcile;
 mod server;
