@@ -1942,11 +1942,13 @@ dependencies = [
 name = "buzz-sandbox-reaper"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "aws-config",
  "aws-sdk-s3",
  "axum",
  "buzz-backend-kubernetes",
  "chrono",
+ "clap",
  "futures-util",
  "http 1.4.2",
  "http-body-util",
@@ -1955,12 +1957,14 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "proptest",
+ "rustls",
  "serde",
  "serde_json",
  "tokio",
  "tokio-util",
  "tower 0.5.3",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

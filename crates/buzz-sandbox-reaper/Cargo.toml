@@ -22,14 +22,20 @@ futures-util = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
+anyhow = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
 axum = { workspace = true }
 http = "1"
 http-body-util = "0.1"
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 aws-config = { version = "1", default-features = false, features = ["rt-tokio", "default-https-client"] }
 aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "default-https-client"] }
+# Same reason as buzz-backend-kubernetes: the process-level CryptoProvider is
+# installed explicitly because the workspace unifies ring and aws-lc-rs.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 
 [dev-dependencies]
 tower = { workspace = true }
