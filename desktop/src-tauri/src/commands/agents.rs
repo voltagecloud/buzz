@@ -333,7 +333,6 @@ where
 }
 
 pub(crate) use provider_deploy::deploy_to_provider;
-use provider_deploy::{InvocationScope, ProviderAction};
 
 // Async so the blocking body (disk reads of agent/persona records, per-agent
 // process-liveness syscalls, and a possible save) runs on Tauri's worker pool
@@ -846,7 +845,16 @@ async fn create_managed_agent_in<R: tauri::Runtime>(
                     .ok_or_else(|| "agent disappeared".to_string())?;
                 build_deploy_payload(&app, state, rec)?;
             }
-            match deploy_to_provider(&app, state, &pubkey, &Default::default(), None).await {
+            match deploy_to_provider(
+                &app,
+                state,
+                &pubkey,
+                buzz_remote_sessions::Tenant::default(),
+                None,
+                None,
+            )
+            .await
+            {
                 Ok(()) => spawn_error,
                 Err(e) => Some(e.message),
             }
@@ -892,7 +900,7 @@ pub async fn start_managed_agent(
     expected_relay_url: Option<String>,
     expected_signer_pubkey: Option<String>,
     replay_floor_unix: Option<u64>,
-    session_scope: Option<provider_deploy::RemoteSessionScope>,
+    session_scope: Option<buzz_remote_sessions::SessionScope>,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ManagedAgentSummary, ProviderFailure> {
@@ -1002,13 +1010,19 @@ pub async fn start_managed_agent(
             // The replay floor rides along so a publish-first mention send's
             // remote harness replays past the already-published message, same
             // as the local spawn path.
-            let scope = InvocationScope {
-                expected_relay_url: expected_relay_url.as_deref(),
-                expected_signer_pubkey: expected_signer_pubkey.as_deref(),
-                session: session_scope.as_ref(),
-                action: ProviderAction::Deploy,
+            let tenant = buzz_remote_sessions::Tenant {
+                relay_url: expected_relay_url.as_deref(),
+                signer_pubkey: expected_signer_pubkey.as_deref(),
             };
-            deploy_to_provider(&app, &state, &pubkey, &scope, replay_floor_unix).await?;
+            deploy_to_provider(
+                &app,
+                &state,
+                &pubkey,
+                tenant,
+                session_scope.as_ref(),
+                replay_floor_unix,
+            )
+            .await?;
 
             // Return updated summary.
             let _store_guard = state

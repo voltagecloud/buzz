@@ -1,48 +1,28 @@
 //! Explicit lifecycle actions for a thread-sandbox agent's remote session:
-//! end it, or recover it after it ended. Both run only on user action and
-//! share the deploy path's per-agent lock, post-lock payload rebuild, tenant
-//! scope assertion, and session binding.
+//! end it, or recover it after it ended. Both run only on user action, in
+//! `buzz-remote-sessions`, which shares the deploy path's per-agent lock,
+//! post-lock payload rebuild, tenant scope assertion, and session binding.
 //!
 //! Errors carry the provider's refusal `code` when it sent one (see
 //! [`ProviderFailure`]), so the frontend branches on the code, not the text.
 
+use buzz_remote_sessions::{RecoveryMode, SessionScope, StopState, Tenant};
 use tauri::{AppHandle, State};
 
 use crate::{
     app_state::AppState,
-    managed_agents::{
-        load_managed_agents, provider_ops, provider_stop, BackendKind, ManagedAgentSummary,
-        ProviderFailure,
-    },
+    managed_agents::{load_managed_agents, ManagedAgentSummary, ProviderFailure},
 };
 
-use super::provider_deploy::{
-    deploy_to_provider, lock_provider_operations, prepare_provider_invocation,
-    resolve_record_provider_binary, InvocationScope, ProviderAction, ProviderInvocation,
-    RemoteRecoveryMode, RemoteSessionScope,
-};
+use super::provider_deploy::remote_sessions;
 
-/// The `info.ops` entry a provider advertises when it can end a thread
-/// session (`stop`) and recover an ended one (`provider_config.sandbox.recovery`).
-const RECOVER_OP: &str = "recover";
-
-/// The tenant a session action was offered for. Both parts are required: an
-/// action on a remote session is never unscoped.
-fn session_tenant<'a>(
-    expected_relay_url: &'a str,
-    expected_signer_pubkey: &'a str,
-    session: &'a RemoteSessionScope,
-    action: ProviderAction,
-) -> Result<InvocationScope<'a>, ProviderFailure> {
-    if expected_relay_url.trim().is_empty() || expected_signer_pubkey.trim().is_empty() {
-        return Err("remote session actions require the community and identity they were offered for; nothing was changed".into());
+/// The tenant a session action was offered for. The client refuses the
+/// action unless both parts are present.
+fn session_tenant<'a>(expected_relay_url: &'a str, expected_signer_pubkey: &'a str) -> Tenant<'a> {
+    Tenant {
+        relay_url: Some(expected_relay_url),
+        signer_pubkey: Some(expected_signer_pubkey),
     }
-    Ok(InvocationScope {
-        expected_relay_url: Some(expected_relay_url),
-        expected_signer_pubkey: Some(expected_signer_pubkey),
-        session: Some(session),
-        action,
-    })
 }
 
 /// End the remote session for one channel thread with the provider's `stop`
@@ -52,12 +32,12 @@ fn session_tenant<'a>(
 #[tauri::command]
 pub async fn end_remote_agent_session(
     pubkey: String,
-    session_scope: RemoteSessionScope,
+    session_scope: SessionScope,
     expected_relay_url: String,
     expected_signer_pubkey: String,
     app: AppHandle,
     state: State<'_, AppState>,
-) -> Result<String, ProviderFailure> {
+) -> Result<StopState, ProviderFailure> {
     end_session(
         &app,
         &state,
@@ -73,26 +53,17 @@ async fn end_session<R: tauri::Runtime>(
     app: &AppHandle<R>,
     state: &AppState,
     pubkey: &str,
-    session_scope: &RemoteSessionScope,
+    session_scope: &SessionScope,
     expected_relay_url: &str,
     expected_signer_pubkey: &str,
-) -> Result<String, ProviderFailure> {
-    let scope = session_tenant(
-        expected_relay_url,
-        expected_signer_pubkey,
-        session_scope,
-        ProviderAction::End,
-    )?;
-    let _guard = lock_provider_operations(state, pubkey).await?;
-    let ProviderInvocation {
-        binary,
-        config,
-        agent_json,
-        ..
-    } = prepare_provider_invocation(app, state, pubkey, &scope)?;
-    tokio::task::spawn_blocking(move || provider_stop(&binary, &agent_json, &config))
-        .await
-        .map_err(|e| format!("spawn_blocking failed: {e}"))?
+) -> Result<StopState, ProviderFailure> {
+    Ok(remote_sessions(app, state)
+        .end(
+            pubkey,
+            session_tenant(expected_relay_url, expected_signer_pubkey),
+            session_scope,
+        )
+        .await?)
 }
 
 /// Recover the ended remote session for one channel thread, from its
@@ -101,8 +72,8 @@ async fn end_session<R: tauri::Runtime>(
 #[tauri::command]
 pub async fn recover_remote_agent_session(
     pubkey: String,
-    session_scope: RemoteSessionScope,
-    mode: RemoteRecoveryMode,
+    session_scope: SessionScope,
+    mode: RecoveryMode,
     expected_relay_url: String,
     expected_signer_pubkey: String,
     app: AppHandle,
@@ -139,23 +110,24 @@ async fn recover_session<R: tauri::Runtime>(
     app: &AppHandle<R>,
     state: &AppState,
     pubkey: &str,
-    session_scope: &RemoteSessionScope,
-    mode: RemoteRecoveryMode,
+    session_scope: &SessionScope,
+    mode: RecoveryMode,
     expected_relay_url: &str,
     expected_signer_pubkey: &str,
 ) -> Result<(), ProviderFailure> {
-    let scope = session_tenant(
-        expected_relay_url,
-        expected_signer_pubkey,
-        session_scope,
-        ProviderAction::Recover(mode),
-    )?;
-    deploy_to_provider(app, state, pubkey, &scope, None).await
+    Ok(remote_sessions(app, state)
+        .recover(
+            pubkey,
+            session_tenant(expected_relay_url, expected_signer_pubkey),
+            session_scope,
+            mode,
+        )
+        .await?)
 }
 
 /// Whether the agent's provider can end and recover thread sessions, which
-/// it advertises as `recover` in `info.ops`. Runs only `info`. Local agents
-/// and provider agents without thread workspaces return `false`.
+/// it advertises as `stop` and `recover` in `info.ops`. Runs only `info`.
+/// Local agents and provider agents without thread workspaces return `false`.
 #[tauri::command]
 pub async fn remote_agent_session_supports_lifecycle(
     pubkey: String,
@@ -170,31 +142,9 @@ async fn supports_lifecycle<R: tauri::Runtime>(
     state: &AppState,
     pubkey: &str,
 ) -> Result<bool, String> {
-    let target = {
-        let _store_guard = state
-            .managed_agents_store_lock
-            .lock()
-            .map_err(|e| e.to_string())?;
-        let records = load_managed_agents(app)?;
-        let record = records
-            .iter()
-            .find(|r| r.pubkey == pubkey)
-            .ok_or_else(|| format!("agent {pubkey} not found"))?;
-        match &record.backend {
-            BackendKind::Provider { id, .. } if record.backend.is_thread_sandbox() => {
-                Some((id.clone(), record.provider_binary_path.clone()))
-            }
-            _ => None,
-        }
-    };
-    let Some((provider_id, cached_binary_path)) = target else {
-        return Ok(false);
-    };
-    let binary = resolve_record_provider_binary(&provider_id, cached_binary_path.as_deref())?;
-    let ops = tokio::task::spawn_blocking(move || provider_ops(&binary))
-        .await
-        .map_err(|e| format!("spawn_blocking failed: {e}"))??;
-    Ok(ops.iter().any(|op| op == "stop") && ops.iter().any(|op| op == RECOVER_OP))
+    Ok(remote_sessions(app, state)
+        .supports_lifecycle(pubkey)
+        .await?)
 }
 
 #[cfg(all(test, unix))]

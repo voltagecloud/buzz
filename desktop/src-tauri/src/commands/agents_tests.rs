@@ -993,21 +993,18 @@ fn thread_sandbox_deploy_in_confined_child(home: &std::path::Path) {
         ],
     )
     .unwrap();
-    let scope: provider_deploy::RemoteSessionScope = serde_json::from_value(serde_json::json!({
+    let scope: buzz_remote_sessions::SessionScope = serde_json::from_value(serde_json::json!({
         "channelId": "f9ee507e-d03c-4570-baa6-02951c38e1cd",
         "threadRoot": "a".repeat(64),
     }))
     .unwrap();
-    let deploy = |pubkey: &str, scope: Option<&provider_deploy::RemoteSessionScope>| {
-        let scope = provider_deploy::InvocationScope {
-            session: scope,
-            ..Default::default()
-        };
+    let deploy = |pubkey: &str, scope: Option<&buzz_remote_sessions::SessionScope>| {
         tauri::async_runtime::block_on(deploy_to_provider(
             app.handle(),
             &state,
             pubkey,
-            &scope,
+            buzz_remote_sessions::Tenant::default(),
+            scope,
             None,
         ))
     };

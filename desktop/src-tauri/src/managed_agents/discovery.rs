@@ -844,7 +844,7 @@ pub(crate) fn probe_codex_acp_version_with_path(
     command
         .stdout(tmp.try_clone().ok()?)
         .stderr(std::process::Stdio::null());
-    let mut child = super::process_spawn::spawn_with_busy_retry(&mut command).ok()?;
+    let mut child = buzz_remote_sessions::spawn_with_busy_retry(&mut command).ok()?;
 
     // Poll until the deadline rather than blocking on stdout EOF.
     let exit_status = loop {

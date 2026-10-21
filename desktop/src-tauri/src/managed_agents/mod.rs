@@ -10,9 +10,9 @@ pub(crate) use agent_env::{
 };
 mod agent_description;
 pub(crate) use agent_description::{effective_agent_description, record_effective_description};
+mod acp_commands;
 #[cfg(all(test, not(target_os = "windows")))]
 pub(crate) mod admission_test_support;
-mod backend;
 pub(crate) mod bestie_assignment;
 pub(crate) mod claude_config;
 pub(crate) mod config_bridge;
@@ -32,7 +32,7 @@ pub(crate) mod persona_events;
 mod personas;
 #[cfg(windows)]
 mod process_lifecycle;
-mod process_spawn;
+mod provider_client;
 pub(crate) mod readiness;
 pub(crate) mod reconcile;
 mod relay_mesh;
@@ -76,7 +76,7 @@ pub(crate) fn lock_env_mutex() -> std::sync::MutexGuard<'static, ()> {
     PROCESS_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-pub use backend::*;
+pub use acp_commands::*;
 pub(crate) use definition_validation::{
     validate_agent_definition_text, validate_agent_description_text,
     validate_managed_agent_definition_text, validate_visible_text,
@@ -97,6 +97,7 @@ pub use parallelism::{acp_agents_value, effective_parallelism, harness_max_paral
 pub use personas::*;
 #[cfg(windows)]
 pub use process_lifecycle::*;
+pub use provider_client::*;
 pub(crate) use readiness::{
     agent_readiness, resolve_effective_agent_env, resolve_effective_harness_descriptor,
     AgentReadiness, Requirement,
