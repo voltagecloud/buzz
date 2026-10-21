@@ -10,9 +10,13 @@ pub mod api;
 mod app_agents;
 pub mod credentials;
 mod processes;
+pub mod sandbox;
 pub mod terminal;
 
-use api::{AppAgentRequest, HostAnswer, HostAsk, HostEvent, HostProtocol, Request, Response};
+use api::{
+    AppAgentRequest, HostAnswer, HostAsk, HostEvent, HostProtocol, Request, Response,
+    SandboxResponse,
+};
 pub use buzz_agent_controller::Credentials;
 use buzz_host_rpc::{EventSource, HostHandler, HostInfo, Peer, RpcError};
 use futures::future::BoxFuture;
@@ -72,6 +76,8 @@ pub struct HostConfig {
     /// (`~/.local/share` on Linux), to bring them over. `None` leaves only
     /// this host's own v1 agents to bring over.
     pub legacy_dir: Option<PathBuf>,
+    /// Runs remote workspaces; `None` answers that this host does not.
+    pub sandbox: Option<Arc<dyn sandbox::SandboxBackend>>,
 }
 
 /// Asks the GUI on the other end of a connection.
@@ -104,6 +110,7 @@ pub struct AgentHost {
     app_agents: app_agents::AppAgentHost,
     processes: processes::Processes,
     terminals: terminal::Terminals,
+    sandbox: Option<Arc<dyn sandbox::SandboxBackend>>,
 }
 
 impl AgentHost {
@@ -132,6 +139,7 @@ impl AgentHost {
             app_agents,
             processes: processes::Processes::default(),
             terminals: Default::default(),
+            sandbox: config.sandbox,
         }))
     }
 
@@ -167,6 +175,13 @@ impl AgentHost {
                 .await
                 .map(Response::AppAgent)
                 .map_err(RpcError::Failed),
+            Request::Sandbox(request) => Ok(Response::Sandbox(match &self.sandbox {
+                Some(backend) => {
+                    let custody = Arc::new(self.app_agents.clone());
+                    backend.serve(request, custody).await
+                }
+                None => SandboxResponse::unsupported(),
+            })),
             // claude code: served per connection by `RpcHandler`.
             Request::ProcessSpawn { .. }
             | Request::ProcessWrite { .. }

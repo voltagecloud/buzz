@@ -175,6 +175,7 @@ async fn connect_host() -> (Arc<HostClient<HostProtocol>>, Spawner) {
         state_dir: state.join("state"),
         credentials: Arc::new(FileCredentials::new(state.join("keys")).unwrap()),
         legacy_dir: None,
+        sandbox: None,
     })
     .unwrap();
     let (connector, listener) = transport::memory();

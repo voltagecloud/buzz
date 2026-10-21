@@ -12,6 +12,8 @@ buzz-keychain = { path = "../keychain" }
 buzz-desktop.workspace = true
 buzz-host-rpc = { path = "../host-rpc" }
 base64 = "0.22"
+# Agent keys as `nsec1…` for remote workspaces; already in the build.
+bech32 = "0.11"
 futures = "0.3"
 libc = "0.2"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
