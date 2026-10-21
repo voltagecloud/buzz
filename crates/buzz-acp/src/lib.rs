@@ -574,6 +574,10 @@ mod inbound_author_gate {
         owner_cache: &OwnerCache,
         rest_client: &relay::RestClient,
     ) -> bool {
+        // Strict owner mode applies identically in DMs and channels.
+        if matches!(respond_to, RespondTo::Owner) {
+            return owner_cache.get().is_some_and(|owner| owner == author);
+        }
         if is_dm {
             return match respond_to {
                 RespondTo::Nobody => false,
@@ -582,7 +586,7 @@ mod inbound_author_gate {
         }
         match respond_to {
             RespondTo::Anyone => true,
-            RespondTo::Nobody => false,
+            RespondTo::Nobody | RespondTo::Owner => false,
             RespondTo::OwnerOnly => is_owner_or_sibling(author, owner_cache, rest_client).await,
             RespondTo::Allowlist => {
                 allowlist.contains(author)
@@ -700,8 +704,11 @@ mod inbound_author_gate {
             owner_cache: &OwnerCache,
             rest_client: &relay::RestClient,
         ) -> InboundAuthorGateDecision {
-            let effective_author =
-                effective_prompt_author(event, self.relay_self.as_deref(), &self.agent_pubkey_hex);
+            let effective_author = if matches!(respond_to, RespondTo::Owner) {
+                event.pubkey.to_hex()
+            } else {
+                effective_prompt_author(event, self.relay_self.as_deref(), &self.agent_pubkey_hex)
+            };
             let allowed = author_allowed(
                 respond_to,
                 allowlist,
@@ -1840,6 +1847,7 @@ fn handle_relay_observer_control_event(
     observer: Option<&observer::ObserverHandle>,
     owner_pubkey_hex: &str,
     event_publisher: RelayEventPublisher,
+    bound_channel: Option<Uuid>,
 ) {
     // Defense-in-depth: verify signature even though the relay already checked.
     if let Err(e) = buzz_core::verify_event(&event) {
@@ -1880,10 +1888,10 @@ fn handle_relay_observer_control_event(
     let command_type = payload.get("type").and_then(|value| value.as_str());
     match command_type {
         Some("cancel_turn") => {
-            handle_cancel_turn_control(&payload, pool, observer);
+            handle_cancel_turn_control(&payload, pool, observer, bound_channel);
         }
         Some("switch_model") => {
-            handle_switch_model_control(&payload, pool, observer);
+            handle_switch_model_control(&payload, pool, observer, bound_channel);
         }
         Some("publish_project_owner_announcements") => {
             handle_publish_project_owner_announcements_control(
@@ -2042,17 +2050,38 @@ fn emit_project_owner_control_result(
 }
 
 /// Handle a `cancel_turn` control frame: signal the in-flight task to cancel.
-fn handle_cancel_turn_control(
+/// Read a channel control frame's `channelId`. A bound harness refuses every
+/// channel except its bound one.
+fn control_frame_channel_id(
     payload: &serde_json::Value,
-    pool: &mut AgentPool,
-    observer: Option<&observer::ObserverHandle>,
-) {
+    frame: &str,
+    bound_channel: Option<Uuid>,
+) -> Option<Uuid> {
     let Some(channel_id) = payload
         .get("channelId")
         .and_then(|value| value.as_str())
         .and_then(|value| value.parse::<Uuid>().ok())
     else {
-        tracing::warn!("observer cancel_turn control frame missing valid channelId");
+        tracing::warn!("observer {frame} control frame missing valid channelId");
+        return None;
+    };
+    if bound_channel.is_some_and(|bound| bound != channel_id) {
+        tracing::warn!(
+            channel_id = %channel_id,
+            "observer {frame} control frame outside the bound session — dropping"
+        );
+        return None;
+    }
+    Some(channel_id)
+}
+
+fn handle_cancel_turn_control(
+    payload: &serde_json::Value,
+    pool: &mut AgentPool,
+    observer: Option<&observer::ObserverHandle>,
+    bound_channel: Option<Uuid>,
+) {
+    let Some(channel_id) = control_frame_channel_id(payload, "cancel_turn", bound_channel) else {
         return;
     };
 
@@ -2097,13 +2126,9 @@ fn handle_switch_model_control(
     payload: &serde_json::Value,
     pool: &mut AgentPool,
     observer: Option<&observer::ObserverHandle>,
+    bound_channel: Option<Uuid>,
 ) {
-    let Some(channel_id) = payload
-        .get("channelId")
-        .and_then(|value| value.as_str())
-        .and_then(|value| value.parse::<Uuid>().ok())
-    else {
-        tracing::warn!("observer switch_model control frame missing valid channelId");
+    let Some(channel_id) = control_frame_channel_id(payload, "switch_model", bound_channel) else {
         return;
     };
     let Some(model_id) = payload.get("modelId").and_then(|value| value.as_str()) else {
@@ -2942,9 +2967,9 @@ async fn run_harness(
     // Warn if owner-dependent mode but no owner resolved yet.
     if startup_owner.is_none() {
         match &config.respond_to {
-            RespondTo::OwnerOnly => {
+            mode @ (RespondTo::OwnerOnly | RespondTo::Owner) => {
                 tracing::warn!(
-                    "respond-to=owner-only but no owner is set — all events will be \
+                    "respond-to={mode} but no owner is set — all events will be \
                      dropped. Set BUZZ_AUTH_TAG or --agent-owner, or use --respond-to=anyone."
                 );
             }
@@ -3423,6 +3448,7 @@ async fn run_harness(
                                     observer.as_ref(),
                                     owner_hex,
                                     relay.event_publisher(),
+                                    config.bound_session.as_ref().map(|binding| binding.channel_id),
                                 );
                             } else {
                                 tracing::warn!("observer control frame received but no owner resolved — dropping");
@@ -3562,6 +3588,11 @@ async fn run_harness(
 
                             if config.ignore_self && buzz_event.event.pubkey.to_hex() == pubkey_hex {
                                 tracing::debug!(channel_id = %buzz_event.channel_id, "dropping self-authored event");
+                                continue;
+                            }
+
+                            // Control commands also stay inside the bound workspace.
+                            if !bound_session_admits(config.bound_session.as_ref(), &buzz_event, None) {
                                 continue;
                             }
 
@@ -3746,6 +3777,13 @@ async fn run_harness(
                             .await;
                             let session_scope =
                                 ingress.session_scope(config.session_policy, channel_is_dm);
+                            if !bound_session_admits(
+                                config.bound_session.as_ref(),
+                                &ingress.buzz_event,
+                                Some(&session_scope),
+                            ) {
+                                continue;
+                            }
                             tracing::debug!(
                                 channel_id = %session_scope.channel_id(),
                                 scope = %session_scope.telemetry_label(),
@@ -4413,6 +4451,35 @@ fn event_mentions_agent(event: &nostr::Event, agent_pubkey_hex: &str) -> bool {
         t.as_slice().first().map(|s| s.as_str()) == Some("p")
             && t.as_slice().get(1).map(|s| s.as_str()) == Some(agent_pubkey_hex)
     })
+}
+
+/// Whether a bound workspace admits a relay event; an unbound harness admits
+/// everything. Before edit routing resolves (`routed_scope` is `None`), a
+/// kind:9 message is checked against its own thread tags and other kinds only
+/// by channel. Once routed, the resolved session scope must be the bound thread.
+fn bound_session_admits(
+    binding: Option<&config::BoundSession>,
+    buzz_event: &relay::BuzzEvent,
+    routed_scope: Option<&scope::SessionScope>,
+) -> bool {
+    let Some(binding) = binding else {
+        return true;
+    };
+    if buzz_event.channel_id != binding.channel_id {
+        return false;
+    }
+    match routed_scope {
+        Some(scope) => binding.accepts(scope),
+        None => {
+            u32::from(buzz_event.event.kind.as_u16()) != KIND_STREAM_MESSAGE
+                || binding.accepts(&scope::SessionScope::derive(
+                    scope::SessionPolicy::Thread,
+                    buzz_event.channel_id,
+                    false,
+                    &buzz_event.event,
+                ))
+        }
+    }
 }
 
 fn is_owner_control_command(
@@ -5375,6 +5442,22 @@ fn handle_prompt_result(
                 let content = "⚠️ I couldn't process the last request: authentication failed. \
                     Please re-authenticate the CLI (e.g. run `claude /login` or `codex login`) \
                     and then re-send."
+                    .to_string();
+                spawn_failure_notice(rest_client, &batch, content);
+            } else if matches!(
+                &result.outcome,
+                PromptOutcome::Error(acp::AcpError::PermissionModeUnavailable(_))
+            ) {
+                // The adapter cannot run the required mode; a retry or respawn
+                // reaches the same refusal. Fail the batch once, visibly.
+                tracing::warn!(
+                    channel_id = %batch.channel_id,
+                    events = batch.events.len(),
+                    "dead-lettering batch immediately — required permission mode unavailable"
+                );
+                let content = "⚠️ I couldn't process the last request: this agent's adapter \
+                    does not support the agent-full-access permission mode it is configured \
+                    to require. Update the agent runtime or change its permission mode."
                     .to_string();
                 spawn_failure_notice(rest_client, &batch, content);
             } else if let Some(dead) = queue.requeue(batch) {
@@ -6717,8 +6800,8 @@ mod owner_control_command_tests {
             "channelId": ch.to_string(), "modelId": "new-model", "requestId": "pick-1",
         });
 
-        handle_cancel_turn_control(&payload, &mut pool, Some(&observer));
-        handle_switch_model_control(&payload, &mut pool, Some(&observer));
+        handle_cancel_turn_control(&payload, &mut pool, Some(&observer), None);
+        handle_switch_model_control(&payload, &mut pool, Some(&observer), None);
         let results = observer.snapshot();
         assert_eq!(results.len(), 2);
         for result in results {
@@ -6769,12 +6852,56 @@ mod owner_control_command_tests {
             });
             match &signal {
                 ControlSignal::Cancel => {
-                    handle_cancel_turn_control(&payload, &mut pool, Some(&observer))
+                    handle_cancel_turn_control(&payload, &mut pool, Some(&observer), None)
                 }
-                _ => handle_switch_model_control(&payload, &mut pool, Some(&observer)),
+                _ => handle_switch_model_control(&payload, &mut pool, Some(&observer), None),
             }
             assert_eq!(rx.await.unwrap(), signal);
             assert_eq!(observer.snapshot()[0].payload["status"], "sent");
+        }
+    }
+
+    #[tokio::test]
+    async fn bound_harness_drops_observer_channel_controls_for_other_channels() {
+        for cancel in [true, false] {
+            let mut pool = AgentPool::from_slots(vec![]);
+            let bound = Uuid::new_v4();
+            let foreign = Uuid::new_v4();
+            let (foreign_tx, mut foreign_rx) = tokio::sync::oneshot::channel();
+            insert_task_meta(
+                &mut pool,
+                0,
+                scope::SessionScope::Conversation {
+                    channel_id: foreign,
+                },
+                foreign_tx,
+            );
+            let (bound_tx, bound_rx) = tokio::sync::oneshot::channel();
+            insert_task_meta(
+                &mut pool,
+                1,
+                scope::SessionScope::Conversation { channel_id: bound },
+                bound_tx,
+            );
+            let observer = observer::ObserverHandle::in_process();
+            for channel_id in [foreign, bound] {
+                let payload = serde_json::json!({
+                    "channelId": channel_id.to_string(), "modelId": "new-model",
+                });
+                if cancel {
+                    handle_cancel_turn_control(&payload, &mut pool, Some(&observer), Some(bound));
+                } else {
+                    handle_switch_model_control(&payload, &mut pool, Some(&observer), Some(bound));
+                }
+            }
+            assert_eq!(
+                foreign_rx.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            );
+            assert!(bound_rx.await.is_ok());
+            let results = observer.snapshot();
+            assert_eq!(results.len(), 1, "only the bound channel gets a result");
+            assert_eq!(results[0].channel_id, Some(bound.to_string()));
         }
     }
 
@@ -6999,6 +7126,153 @@ mod owner_control_command_tests {
             &keys,
         );
         assert!(unaddressed.is_err());
+    }
+}
+
+#[cfg(test)]
+mod bound_session_admission_tests {
+    use super::*;
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    const AGENT: &str = "ab";
+
+    fn buzz_event(
+        channel_id: Uuid,
+        kind: u16,
+        content: &str,
+        root: Option<&str>,
+    ) -> relay::BuzzEvent {
+        let mut tags = vec![Tag::parse(["p", &AGENT.repeat(32)]).unwrap()];
+        // NIP-10 treats a lone root marker as top-level, so a reply carries both.
+        if let Some(root) = root {
+            tags.push(Tag::parse(["e", root, "", "root"]).unwrap());
+            tags.push(Tag::parse(["e", &"d".repeat(64), "", "reply"]).unwrap());
+        }
+        relay::BuzzEvent {
+            connection_generation: 0,
+            channel_id,
+            event: EventBuilder::new(Kind::Custom(kind), content)
+                .tags(tags)
+                .sign_with_keys(&Keys::generate())
+                .unwrap(),
+        }
+    }
+
+    fn binding() -> config::BoundSession {
+        config::BoundSession {
+            channel_id: Uuid::new_v4(),
+            thread_root: "a".repeat(64),
+        }
+    }
+
+    /// The pre-check runs before `!shutdown` / `!cancel`, so an owner command
+    /// in a foreign thread or channel never reaches the control handlers.
+    #[test]
+    fn owner_controls_outside_the_bound_thread_are_dropped() {
+        let binding = binding();
+        let foreign_root = "b".repeat(64);
+        for command in ["!shutdown", "!cancel"] {
+            let foreign_thread = buzz_event(
+                binding.channel_id,
+                KIND_STREAM_MESSAGE as u16,
+                command,
+                Some(&foreign_root),
+            );
+            assert!(is_owner_control_command(
+                &foreign_thread.event,
+                KIND_STREAM_MESSAGE,
+                command,
+                &AGENT.repeat(32)
+            ));
+            assert!(!bound_session_admits(Some(&binding), &foreign_thread, None));
+
+            let foreign_channel = buzz_event(
+                Uuid::new_v4(),
+                KIND_STREAM_MESSAGE as u16,
+                command,
+                Some(&binding.thread_root),
+            );
+            assert!(!bound_session_admits(
+                Some(&binding),
+                &foreign_channel,
+                None
+            ));
+
+            let in_thread = buzz_event(
+                binding.channel_id,
+                KIND_STREAM_MESSAGE as u16,
+                command,
+                Some(&binding.thread_root),
+            );
+            assert!(bound_session_admits(Some(&binding), &in_thread, None));
+        }
+    }
+
+    #[test]
+    fn only_in_thread_prompts_are_admitted() {
+        let binding = binding();
+        let in_scope = scope::SessionScope::Thread {
+            channel_id: binding.channel_id,
+            root_event_id: binding.thread_root.clone(),
+        };
+        let reply = buzz_event(
+            binding.channel_id,
+            KIND_STREAM_MESSAGE as u16,
+            "@agent continue",
+            Some(&binding.thread_root),
+        );
+        assert!(bound_session_admits(Some(&binding), &reply, None));
+        assert!(bound_session_admits(
+            Some(&binding),
+            &reply,
+            Some(&in_scope)
+        ));
+
+        let foreign_channel_id = Uuid::new_v4();
+        let foreign_channel = buzz_event(
+            foreign_channel_id,
+            KIND_STREAM_MESSAGE as u16,
+            "@agent start",
+            Some(&binding.thread_root),
+        );
+        let foreign_scope = scope::SessionScope::Thread {
+            channel_id: foreign_channel_id,
+            root_event_id: binding.thread_root.clone(),
+        };
+        assert!(!bound_session_admits(
+            Some(&binding),
+            &foreign_channel,
+            None
+        ));
+        assert!(!bound_session_admits(
+            Some(&binding),
+            &foreign_channel,
+            Some(&foreign_scope)
+        ));
+
+        // An edit carries its thread on the original, so the pre-check can
+        // only check its channel; the routed scope decides admission.
+        let edit_kind = buzz_core::kind::KIND_STREAM_MESSAGE_EDIT as u16;
+        let edit = buzz_event(binding.channel_id, edit_kind, "@agent edited", None);
+        assert!(bound_session_admits(Some(&binding), &edit, None));
+        let edited_foreign_thread = scope::SessionScope::Thread {
+            channel_id: binding.channel_id,
+            root_event_id: "c".repeat(64),
+        };
+        assert!(!bound_session_admits(
+            Some(&binding),
+            &edit,
+            Some(&edited_foreign_thread)
+        ));
+        let foreign_edit = buzz_event(foreign_channel_id, edit_kind, "@agent edited", None);
+        assert!(!bound_session_admits(Some(&binding), &foreign_edit, None));
+
+        assert!(bound_session_admits(None, &foreign_channel, None));
+        assert!(bound_session_admits(
+            None,
+            &foreign_channel,
+            Some(&foreign_scope)
+        ));
     }
 }
 
@@ -7622,6 +7896,30 @@ mod author_gate_tests {
                 "{} listener must enforce respond-to=nobody",
                 listener.name()
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn owner_mode_rejects_relay_signed_workflows_in_both_listeners() {
+        for listener in [ListenerBoundary::Normal, ListenerBoundary::Setup] {
+            let relay_keys = nostr::Keys::generate();
+            let owner = nostr::Keys::generate().public_key().to_hex();
+            let decision = listener_boundary_scenario(ListenerBoundaryScenario {
+                listener,
+                relay_keys: &relay_keys,
+                workflow_owner: &owner,
+                responses: std::collections::VecDeque::from([Ok(
+                    serde_json::json!({"self": relay_keys.public_key().to_hex()}),
+                )]),
+                event_generation: 0,
+                channel_type: "stream",
+                respond_to: RespondTo::Owner,
+                allowlist: HashSet::new(),
+                cache_owner: true,
+                cache_sibling: false,
+            })
+            .await;
+            assert!(!decision.1, "strict owner mode must use the actual signer");
         }
     }
 
@@ -8410,6 +8708,38 @@ mod author_gate_tests {
             .await,
             "under the default OwnerOnly, a stranger must be dropped — so it can never reach the mode gate to steer"
         );
+    }
+
+    #[tokio::test]
+    async fn strict_owner_rejects_siblings_strangers_and_missing_owner() {
+        let cache = cache_with_sibling();
+        for is_dm in [false, true] {
+            for author in [OWNER, SIBLING, STRANGER] {
+                assert_eq!(
+                    inbound_author_gate::test_author_allowed(
+                        &RespondTo::Owner,
+                        &HashSet::new(),
+                        author,
+                        is_dm,
+                        &cache,
+                        &dummy_rest_client(),
+                    )
+                    .await,
+                    author == OWNER,
+                );
+            }
+            assert!(
+                !inbound_author_gate::test_author_allowed(
+                    &RespondTo::Owner,
+                    &HashSet::new(),
+                    OWNER,
+                    is_dm,
+                    &OwnerCache::new(None),
+                    &dummy_rest_client(),
+                )
+                .await
+            );
+        }
     }
 
     #[tokio::test]
@@ -10130,6 +10460,7 @@ mod build_mcp_servers_tests {
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
+            bound_session: None,
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
@@ -11227,6 +11558,7 @@ mod error_outcome_emission_tests {
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
+            bound_session: None,
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
@@ -12845,6 +13177,89 @@ mod error_outcome_emission_tests {
             0,
             "auth error must dead-letter immediately — no events should be pending"
         );
+    }
+
+    /// An adapter without agent-full-access fails the same way on every retry
+    /// and respawn. The batch is dead-lettered once, and the healthy agent
+    /// returns to the pool without a crash record or respawn.
+    #[tokio::test]
+    async fn unavailable_permission_mode_fails_once_without_respawn_or_requeue() {
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "test")
+            .sign_with_keys(&nostr::Keys::generate())
+            .unwrap();
+        let channel_id = uuid::Uuid::new_v4();
+        let scope = scope::SessionScope::Conversation { channel_id };
+        let batch = FlushBatch {
+            channel_id,
+            scope: scope.clone(),
+            events: vec![BatchEvent {
+                edit: None,
+                event,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                scope: Some(scope.clone()),
+                turn_id: "test-turn-id".to_string(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let action = handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &test_config(),
+            PromptResult {
+                agent: dummy_agent(0).await,
+                source: PromptSource::Channel(scope),
+                turn_id: "test-turn-id".to_string(),
+                outcome: PromptOutcome::Error(acp::AcpError::PermissionModeUnavailable(
+                    "the adapter does not advertise agent-full-access".into(),
+                )),
+                batch: Some(batch),
+            },
+            &mut false,
+            &HashSet::new(),
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+            None,
+        );
+
+        assert!(matches!(action, LoopAction::Continue));
+        assert_eq!(queue.pending_channels(), 0, "batch must not be requeued");
+        assert_eq!(queue.queued_event_count(channel_id), 0);
+        assert_eq!(
+            pool.live_count(),
+            1,
+            "the healthy agent returns to the pool"
+        );
+        assert!(
+            respawn_tasks.is_empty(),
+            "no respawn for a configuration refusal"
+        );
+        assert!(crash_history[0].crash_times.is_empty());
+        assert!(!crash_history[0].respawn_in_flight);
     }
 
     /// Run a model-not-found turn failure for `event` through

@@ -44,6 +44,9 @@ use crate::queue::{
 use crate::relay::{ChannelInfo, RestClient};
 use crate::scope::SessionScope;
 
+mod permission_mode;
+use permission_mode::{agent_supports_mode, apply_permission_mode};
+
 /// Window within which agent activity before a hard-cap death qualifies
 /// the turn as "recently active" (eligible for requeue instead of dead-letter).
 const RECENT_ACTIVITY_WINDOW: Duration = Duration::from_secs(60);
@@ -1836,6 +1839,13 @@ async fn create_session_and_apply_model(
     // advertises the requested mode in session/new. Agents that don't support
     // the mode (e.g., goose crashes on unrecognized set_config_option values)
     // are safely skipped — the harness auto-approves via handle_permission_request.
+    if ctx.permission_mode == PermissionMode::AgentFullAccess
+        && !agent_supports_mode(&resp.raw, ctx.permission_mode.as_wire_str())
+    {
+        return Err(AcpError::PermissionModeUnavailable(
+            "the adapter does not advertise agent-full-access".into(),
+        ));
+    }
     if !ctx.permission_mode.is_default()
         && agent_supports_mode(&resp.raw, ctx.permission_mode.as_wire_str())
     {
@@ -2145,81 +2155,6 @@ fn patch_config_option_current_value(
             return;
         }
     }
-}
-
-/// Set the session permission mode via `session/set_config_option`.
-///
-/// Non-fatal for most errors: logs and proceeds. The agent falls back
-/// to its default permission mode (`"default"`), which still works via
-/// Check if the agent's `session/new` response advertises a given mode ID
-/// in `result.modes.availableModes[].id`. Returns `false` if the modes
-/// field is absent or the mode isn't listed.
-fn agent_supports_mode(session_new_result: &serde_json::Value, mode_wire: &str) -> bool {
-    session_new_result
-        .get("modes")
-        .and_then(|m| m.get("availableModes"))
-        .and_then(|a| a.as_array())
-        .map(|modes| {
-            modes
-                .iter()
-                .any(|m| m.get("id").and_then(|v| v.as_str()) == Some(mode_wire))
-        })
-        .unwrap_or(false)
-}
-
-/// per-tool auto-approval in `handle_permission_request`.
-///
-/// **Fatal exception:** if the agent process exits (e.g., goose crashes on
-/// unrecognized methods), returns `Err(AgentExited)` so the caller can respawn.
-async fn apply_permission_mode(
-    acp: &mut AcpClient,
-    session_id: &str,
-    mode: &PermissionMode,
-) -> Result<(), AcpError> {
-    let wire = mode.as_wire_str();
-    let result = tokio::time::timeout(PERMISSION_MODE_TIMEOUT, async {
-        acp.session_set_config_option(session_id, "mode", wire)
-            .await
-    })
-    .await;
-
-    match result {
-        Ok(Ok(_)) => {
-            tracing::info!(
-                target: "pool::permission",
-                "applied permission mode {wire:?} on session {session_id}"
-            );
-        }
-        // Transport-class errors may have corrupted the stdio stream — propagate
-        // so the caller can respawn the agent.
-        Ok(Err(e @ AcpError::Io(_)))
-        | Ok(Err(e @ AcpError::WriteTimeout(_)))
-        | Ok(Err(e @ AcpError::Timeout(_)))
-        | Ok(Err(e @ AcpError::Protocol(_)))
-        | Ok(Err(e @ AcpError::AgentExited)) => {
-            tracing::error!(
-                target: "pool::permission",
-                "fatal error setting permission mode {wire:?}: {e}"
-            );
-            return Err(e);
-        }
-        // Application-level errors — agent is fine, just uses default permission mode.
-        Ok(Err(e)) => {
-            tracing::warn!(
-                target: "pool::permission",
-                "failed to set permission mode {wire:?}: {e} — falling back to per-tool auto-approval"
-            );
-        }
-        Err(_) => {
-            // Outer timeout fired — stream may be in unknown state.
-            tracing::error!(
-                target: "pool::permission",
-                "permission mode set timed out ({PERMISSION_MODE_TIMEOUT:?}) — treating as fatal"
-            );
-            return Err(AcpError::Timeout(PERMISSION_MODE_TIMEOUT));
-        }
-    }
-    Ok(())
 }
 
 /// Prepend a legacy agent's standing context to a user-message body.
