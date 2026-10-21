@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use buzz_backend_kubernetes::lifecycle::{
+use crate::lifecycle::{
     annotation, is_checkpoint_key, owned_pod, sandbox_resource, EndedReason, Lifecycle,
     OperatingMode, BIND_TIMEOUT_SECS, CHANNEL, CHECKPOINT, CHECKPOINTING, CHECKPOINTING_DISABLED,
     CHECKPOINTING_ENABLED, ENDED_REASON, GENERATION, INITIAL_POD, LIFECYCLE, LIFECYCLE_ENDING,

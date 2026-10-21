@@ -1,10 +1,9 @@
 use super::*;
-use buzz_backend_kubernetes::lifecycle;
-use buzz_backend_kubernetes::lifecycle::LIFECYCLE_ENDED;
+use crate::lifecycle;
+use crate::lifecycle::LIFECYCLE_ENDED;
 use nostr::nips::nip19::ToBech32;
 
-#[path = "sandbox_fake.rs"]
-mod fake;
+use crate::sandbox_fake as fake;
 
 #[path = "sandbox_recovery_retry_tests.rs"]
 mod recovery_retry;
