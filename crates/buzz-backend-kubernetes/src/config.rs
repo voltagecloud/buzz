@@ -429,7 +429,15 @@ pub fn config_schema() -> serde_json::Value {
                                 "format": "uuid",
                                 "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
                             },
-                            "thread_root": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+                            "thread_root": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                            "recovery": {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "required": ["mode"],
+                                "properties": {
+                                    "mode": {"type": "string", "enum": ["checkpoint", "fresh"]}
+                                }
+                            }
                         }
                     }
                 ],

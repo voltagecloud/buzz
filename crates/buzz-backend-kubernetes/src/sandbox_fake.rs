@@ -2,10 +2,10 @@
 //! `kube::Client` request path (`tower::service_fn`, as `cluster.rs` tests do).
 //!
 //! It models only what the Sandbox paths touch: Sandbox CRUD with
-//! resourceVersion CAS, a controller that creates the Sandbox's Pod while it
-//! is Running, Pods whose agent container runs once their `envFrom` Secret
-//! exists (or whose status a test overrides), and Secret create with failure
-//! injection.
+//! resourceVersion CAS and delete preconditions, a controller that creates
+//! the Sandbox's Pod while it is Running, Pods whose agent container runs once
+//! their `envFrom` Secret exists (or whose status a test overrides), and
+//! Secret create with failure injection.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -29,14 +29,27 @@ pub struct State {
     /// Fields that replace the derived agent container status, such as
     /// `restartCount` or `lastState`.
     pub container_status: Option<Value>,
+    /// Old Pods left by background GC, returned once before new controller Pods.
+    pub lingering_pods: BTreeMap<String, Value>,
     pub rv: u64,
     pub uid: u64,
     /// Fail this many Secret creates with a 500.
     pub fail_secret_creates: usize,
     /// Store the Secret, then fail this many create responses with a 500.
     pub fail_secret_create_responses: usize,
+    /// Fail Pod-owned credential Secret creates, leaving recovery journals intact.
+    pub fail_binding_secret_creates: usize,
+    /// Fail this many Sandbox creates with a 500.
+    pub fail_sandbox_creates: usize,
+    /// Store the Sandbox, then fail this many create responses with a 500.
+    pub fail_sandbox_create_responses: usize,
     /// Answer this many Sandbox patches with a 409 Conflict.
     pub conflict_patches: usize,
+    /// Bump this many Sandboxes' resourceVersion just before a delete is
+    /// checked, as a concurrent writer would.
+    pub touch_before_delete: usize,
+    /// A concurrent deploy's Sandbox, stored in place of the next one deleted.
+    pub peer_sandbox: Option<Value>,
     /// Every merge patch body received.
     pub patches: Vec<Value>,
 }
@@ -152,10 +165,26 @@ impl State {
                 let items: Vec<Value> = names.iter().filter_map(|n| self.pod(n)).collect();
                 ok(&json!({"apiVersion":"v1","kind":"PodList","metadata":{},"items":items}))
             }
-            ["api", "v1", "namespaces", _, "pods", name] => match self.pod(name) {
-                Some(pod) => ok(&pod),
-                None => status(404, "NotFound"),
-            },
+            ["api", "v1", "namespaces", _, "pods", name] => {
+                match self.lingering_pods.remove(*name).or_else(|| self.pod(name)) {
+                    Some(pod) => ok(&pod),
+                    None => status(404, "NotFound"),
+                }
+            }
+            ["api", "v1", "namespaces", _, "secrets", name] if method == Method::DELETE => {
+                let options: Value = serde_json::from_slice(body).unwrap();
+                let Some(secret) = self.secrets.get(*name) else {
+                    return status(404, "NotFound");
+                };
+                if options["preconditions"]["uid"] != secret["metadata"]["uid"]
+                    || options["preconditions"]["resourceVersion"]
+                        != secret["metadata"]["resourceVersion"]
+                {
+                    return status(409, "Conflict");
+                }
+                self.secrets.remove(*name);
+                ok(&json!({"apiVersion":"v1","kind":"Status","status":"Success"}))
+            }
             ["api", "v1", "namespaces", _, "secrets", name] => match self.secrets.get(*name) {
                 Some(secret) => ok(secret),
                 None => status(404, "NotFound"),
@@ -166,6 +195,16 @@ impl State {
                     return status(500, "InternalError");
                 }
                 let mut secret: Secret = serde_json::from_slice(body).unwrap();
+                if self.fail_binding_secret_creates > 0
+                    && secret
+                        .metadata
+                        .owner_references
+                        .as_ref()
+                        .is_some_and(|refs| refs.iter().any(|owner| owner.kind == "Pod"))
+                {
+                    self.fail_binding_secret_creates -= 1;
+                    return status(500, "InternalError");
+                }
                 let name = secret.metadata.name.clone().unwrap();
                 if self.secrets.contains_key(&name) {
                     return status(409, "AlreadyExists");
@@ -196,6 +235,10 @@ impl State {
                 None => status(404, "NotFound"),
             },
             (Method::POST, None) => {
+                if self.fail_sandbox_creates > 0 {
+                    self.fail_sandbox_creates -= 1;
+                    return status(500, "InternalError");
+                }
                 let mut sandbox: Value = serde_json::from_slice(body).unwrap();
                 let name = sandbox["metadata"]["name"].as_str().unwrap().to_string();
                 if self.sandboxes.contains_key(&name) {
@@ -205,6 +248,10 @@ impl State {
                 sandbox["metadata"]["resourceVersion"] = self.next_rv().into();
                 self.sandboxes.insert(name.clone(), sandbox.clone());
                 self.reconcile(&name);
+                if self.fail_sandbox_create_responses > 0 {
+                    self.fail_sandbox_create_responses -= 1;
+                    return status(500, "InternalError");
+                }
                 ok(&sandbox)
             }
             (Method::PUT, Some(name)) => {
@@ -241,6 +288,33 @@ impl State {
                 let updated = current.clone();
                 self.reconcile(name);
                 ok(&updated)
+            }
+            (Method::DELETE, Some(name)) => {
+                let options: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+                if self.touch_before_delete > 0 && self.sandboxes.contains_key(name) {
+                    self.touch_before_delete -= 1;
+                    let rv = self.next_rv();
+                    self.sandboxes.get_mut(name).unwrap()["metadata"]["resourceVersion"] =
+                        rv.into();
+                }
+                let Some(current) = self.sandboxes.get(name) else {
+                    return status(404, "NotFound");
+                };
+                let pre = &options["preconditions"];
+                for (field, key) in [("uid", "uid"), ("resourceVersion", "resourceVersion")] {
+                    if !pre[field].is_null() && pre[field] != current["metadata"][key] {
+                        return status(409, "Conflict");
+                    }
+                }
+                let removed = self.sandboxes.remove(name).unwrap();
+                self.pods.remove(name);
+                if let Some(mut peer) = self.peer_sandbox.take() {
+                    peer["metadata"]["uid"] = self.next_uid("sandbox").into();
+                    peer["metadata"]["resourceVersion"] = self.next_rv().into();
+                    self.sandboxes.insert(name.into(), peer);
+                    self.reconcile(name);
+                }
+                ok(&removed)
             }
             _ => status(405, "MethodNotAllowed"),
         }

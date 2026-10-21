@@ -98,6 +98,7 @@ fn responses_match_their_fixtures() {
         "deploy-relay-mesh-padded",
         "deploy-tag-image",
         "deploy-no-owner",
+        "deploy-sandbox-bad-recovery",
         "stop-no-identity-policy",
     ];
     // The list must cover every response fixture on disk. A literal array is

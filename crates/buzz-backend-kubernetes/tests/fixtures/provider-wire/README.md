@@ -41,4 +41,5 @@ covered by the conformance suite, not by a static fixture.
 `stop-*` fixtures use the same payload as `deploy` with `op: "stop"`; the
 desktop builds both through one path. `stop` requires an approved
 `identity_policy`, so the fixture without one is refused before any cluster
-contact.
+contact. `deploy-sandbox-bad-recovery` pins the refusal of an unknown
+`provider_config.sandbox.recovery` mode.

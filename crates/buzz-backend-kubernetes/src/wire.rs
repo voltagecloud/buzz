@@ -191,6 +191,19 @@ pub enum ErrorCode {
     SessionReplaced,
     /// The agent already has a Pod outside a Sandbox session.
     AgentPodExists,
+    /// Recovery was requested for a session that has not ended.
+    SessionActive,
+    /// Checkpoint recovery was requested, but the thread has no session.
+    NoEndedSession,
+    /// Checkpoint recovery was requested, but the tombstone records no
+    /// verified checkpoint.
+    NoCheckpoint,
+    /// A recovery deleted the tombstone but did not finish; only an explicit
+    /// recovery may continue it.
+    RecoveryInterrupted,
+    /// A recovery in the other mode created this session's replacement and
+    /// has not finished binding it.
+    RecoveryModeConflict,
 }
 
 /// A failed operation: the display message and, for a refusal a client can
