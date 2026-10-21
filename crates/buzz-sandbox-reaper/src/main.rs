@@ -1,19 +1,20 @@
 //! `buzz-sandbox-reaper`: the in-cluster sandbox reaper for Buzz Agent
 //! Sandbox sessions (`docs/remote-agents.md` §Sandbox lifecycle).
 //!
-//! Phase 1 has one subcommand, `reconcile`: classify every managed Sandbox in
-//! the configured developer namespaces, tombstone sessions that have ended,
-//! and delete tombstones once their 30-day checkpoint retention has passed.
-//! It never starts or resumes a session; only an explicit desktop recovery
-//! does that.
+//! `reconcile` classifies every managed Sandbox in the configured developer
+//! namespaces, tombstones sessions that have ended, and deletes tombstones
+//! once their 30-day checkpoint retention has passed. It never starts or
+//! resumes a session; only an explicit recovery does that.
+//!
+//! `serve` is the session manager (§Relay transport): it runs developers'
+//! provider requests, received over the Buzz relay, in their namespaces.
 
 mod config;
 mod evidence;
-// Runs once `serve` (the next change) receives requests over the relay.
-#[allow(dead_code)]
 mod manager;
 mod plan;
 mod reconcile;
+mod serve;
 mod server;
 
 use std::collections::BTreeMap;
@@ -51,6 +52,8 @@ struct Cli {
 enum Command {
     /// Reconcile Agent Sandbox session lifecycles.
     Reconcile(ReconcileArgs),
+    /// Serve Sandbox session requests received over the Buzz relay.
+    Serve(serve::ServeArgs),
 }
 
 #[derive(Args)]
@@ -97,11 +100,14 @@ async fn main() -> Result<()> {
         .json()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+                // Its debug logs quote whole relay frames (§Relay transport).
+                .add_directive("buzz_ws_client=info".parse().expect("static directive")),
         )
         .init();
     match Cli::parse().command {
         Command::Reconcile(args) => reconcile(args).await,
+        Command::Serve(args) => serve::serve(args).await,
     }
 }
 
@@ -237,7 +243,7 @@ async fn once(reconciler: &Reconciler<S3Store>, config: &Config) -> Result<()> {
     Ok(())
 }
 
-async fn shutdown() {
+pub(crate) async fn shutdown() {
     #[cfg(unix)]
     {
         if let Ok(mut term) =
@@ -411,7 +417,9 @@ mod tests {
     fn cli_is_well_formed_and_defaults_match_the_deployment_contract() {
         Cli::command().debug_assert();
         let cli = Cli::try_parse_from(["buzz-sandbox-reaper", "reconcile"]).unwrap();
-        let Command::Reconcile(args) = cli.command;
+        let Command::Reconcile(args) = cli.command else {
+            panic!("not reconcile");
+        };
         assert_eq!(
             args.config,
             PathBuf::from("/etc/buzz-sandbox-reaper/config.json")
@@ -427,5 +435,10 @@ mod tests {
         ])
         .is_err());
         assert!(Cli::try_parse_from(["buzz-sandbox-reaper", "api"]).is_err());
+        let serve = ["buzz-sandbox-reaper", "serve", "--relay-url", "wss://relay"];
+        assert!(matches!(
+            Cli::try_parse_from(serve).unwrap().command,
+            Command::Serve(_)
+        ));
     }
 }
