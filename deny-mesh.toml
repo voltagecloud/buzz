@@ -1,0 +1,125 @@
+# Mesh-LLM smoke harness only. Desktop and runtime crates use deny.toml.
+[advisories]
+ignore = [
+    # 0.26.11 contains no roots: it re-exports webpki-roots 1.x. Both lockfiles
+    # resolve that parent to 1.0.10, which removes the distrusted emSign root.
+    # The advisory also flags this compatibility wrapper. The bans below keep
+    # every other affected version forbidden while this false positive remains.
+    { id = "RUSTSEC-2026-0381", reason = "0.26.11 only re-exports the patched 1.0.10 roots; bans enforce patched versions for all other releases" },
+    # instant 0.1.13 — unmaintained crate. Transitive dep: nostr → instant.
+    # Will be resolved when nostr crate updates its dependencies.
+    { id = "RUSTSEC-2024-0384", reason = "transitive dep via nostr; no upstream fix available" },
+    # paste 1.0.15 — unmaintained. Transitive dep: mesh-llm → iroh → netlink-* → paste.
+    # No safe upgrade available; tracked for upstream (iroh/netlink) replacement.
+    { id = "RUSTSEC-2024-0436", reason = "transitive dep via mesh-llm → iroh → netlink; no upstream fix available" },
+    # quick-xml < 0.41: quadratic runtime on duplicate-attribute check (0194) and
+    # unbounded namespace-declaration allocation in NsReader (0195). Both DoS-class,
+    # requiring attacker-controlled XML. Our two locked versions only parse trusted
+    # input: 0.38.4 (rust-s3/aws-creds — responses from our own S3/MinIO endpoint)
+    # and 0.39.4 (mesh-llm → iroh → netdev → plist — local macOS system plists).
+    # Patched release (>= 0.41.0) is unreachable until rust-s3 and plist/netdev bump;
+    # remove these when upstream catches up.
+    { id = "RUSTSEC-2026-0194", reason = "transitive via rust-s3 and mesh-llm→plist; trusted-input XML only; no upstream fix available yet" },
+    { id = "RUSTSEC-2026-0195", reason = "transitive via rust-s3 and mesh-llm→plist; trusted-input XML only; no upstream fix available yet" },
+    # unsafe-libyaml 0.2.11 — unmaintained (repository archived 2024-03-25), not a
+    # vulnerability report. Transitive dep: serde_yaml → unsafe-libyaml. The serde_yaml_ng
+    # fork uses the same crate, so removing it means migrating YAML parsing in
+    # buzz-agent, buzz-persona, buzz-relay, buzz-workflow and desktop.
+    { id = "RUSTSEC-2024-0449", reason = "transitive via serde_yaml; unmaintained, not vulnerable; removal needs a YAML parser migration" },
+    # zip 8.6.0 < 9: extraction keeps setuid/setgid bits (0367), creates
+    # symlinks that escape the destination (0368) and applies permissions through
+    # symlinks (0369). Only path: buzz-mesh-smoke → mesh-llm v0.76.2 →
+    # mesh-llm-host-runtime / mesh-llm-plugin-manager / mesh-llm-system → zip 8.
+    # mesh-llm's zip readers copy entries manually and never call
+    # ZipArchive::extract; recheck if that changes. Remove on the mesh-llm bump
+    # that ships Mesh-LLM/mesh-llm#2471.
+    { id = "RUSTSEC-2026-0367", reason = "zip 8.6.0 via buzz-mesh-smoke → mesh-llm v0.76.2; manual entry copy, never extracts; fix in unreleased mesh-llm#2471" },
+    { id = "RUSTSEC-2026-0368", reason = "zip 8.6.0 via buzz-mesh-smoke → mesh-llm v0.76.2; manual entry copy, never extracts; fix in unreleased mesh-llm#2471" },
+    { id = "RUSTSEC-2026-0369", reason = "zip 8.6.0 via buzz-mesh-smoke → mesh-llm v0.76.2; manual entry copy, never extracts; fix in unreleased mesh-llm#2471" },
+    # zbus 5 D-Bus crates (zvariant, zbus_names, zvariant_derive) — unmaintained,
+    # not vulnerable. Only path: buzz-mesh-smoke → mesh-llm → keyring 4 →
+    # zbus-secret-service-keyring-store / secret-service 5 → zbus 5.
+    # Remove when mesh-llm's keyring stack moves off zbus 5.
+    { id = "RUSTSEC-2026-0370", reason = "zvariant via buzz-mesh-smoke → mesh-llm → keyring 4 → secret-service 5 → zbus 5; unmaintained, not vulnerable" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names via buzz-mesh-smoke → mesh-llm → keyring 4 → secret-service 5 → zbus 5; unmaintained, not vulnerable" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive via buzz-mesh-smoke → mesh-llm → keyring 4 → secret-service 5 → zbus 5; unmaintained, not vulnerable" },
+]
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "OpenSSL",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "MITNFA",
+    "MPL-2.0",
+    "BSL-1.0",
+    "Unlicense",
+    # minicbor's permissive, OSI-approved license. Used for strict App Attest
+    # assertion CBOR parsing and also transitively by appattest.
+    "BlueOak-1.0.0",
+    # bzip2/libbzip2's permissive BSD-like license. New via desktop zip/bzip2
+    # transitive deps; compatible with Apache-2.0 distribution.
+    "bzip2-1.0.6",
+]
+confidence-threshold = 0.8
+
+# mesh-llm workspace crates (pinned git dep) omit a per-crate `license` field in
+# their manifests, so cargo-deny reports them as unlicensed. The mesh-llm repo is
+# licensed "MIT OR Apache-2.0" (workspace Cargo.toml + top-level LICENSE = Apache-2.0);
+# clarify each pulled-in member to that expression. Remove once mesh sets the field
+# upstream (filed).
+[[licenses.clarify]]
+crate = "mesh-llm-config"
+expression = "MIT OR Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "mesh-llm-gpu-bench"
+expression = "MIT OR Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "mesh-llm-host-runtime"
+expression = "MIT OR Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "mesh-llm-plugin"
+expression = "MIT OR Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "mesh-llm-system"
+expression = "MIT OR Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "mesh-mixture-of-agents"
+expression = "MIT OR Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "buzz-desktop"
+expression = "Apache-2.0"
+license-files = []
+
+[licenses.private]
+ignore = true
+
+[bans]
+# RUSTSEC-2026-0381: allow only the 0.26.11 re-export wrapper or patched roots.
+deny = [
+    { name = "webpki-roots", version = "<0.26.11" },
+    { name = "webpki-roots", version = ">0.26.11, <1.0.10" },
+]
+multiple-versions = "warn"
+wildcards = "allow"

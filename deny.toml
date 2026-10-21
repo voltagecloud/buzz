@@ -1,5 +1,10 @@
 [advisories]
 ignore = [
+    # 0.26.11 contains no roots: it re-exports webpki-roots 1.x. Both lockfiles
+    # resolve that parent to 1.0.10, which removes the distrusted emSign root.
+    # The advisory also flags this compatibility wrapper. The bans below keep
+    # every other affected version forbidden while this false positive remains.
+    { id = "RUSTSEC-2026-0381", reason = "0.26.11 only re-exports the patched 1.0.10 roots; bans enforce patched versions for all other releases" },
     # instant 0.1.13 — unmaintained crate. Transitive dep: nostr → instant.
     # Will be resolved when nostr crate updates its dependencies.
     { id = "RUSTSEC-2024-0384", reason = "transitive dep via nostr; no upstream fix available" },
@@ -15,6 +20,18 @@ ignore = [
     # remove these when upstream catches up.
     { id = "RUSTSEC-2026-0194", reason = "transitive via rust-s3 and mesh-llm→plist; trusted-input XML only; no upstream fix available yet" },
     { id = "RUSTSEC-2026-0195", reason = "transitive via rust-s3 and mesh-llm→plist; trusted-input XML only; no upstream fix available yet" },
+    # unsafe-libyaml 0.2.11 — unmaintained (repository archived 2024-03-25), not a
+    # vulnerability report. Transitive dep: serde_yaml → unsafe-libyaml. The serde_yaml_ng
+    # fork uses the same crate, so removing it means migrating YAML parsing in
+    # buzz-agent, buzz-persona, buzz-relay, buzz-workflow and desktop.
+    { id = "RUSTSEC-2024-0449", reason = "transitive via serde_yaml; unmaintained, not vulnerable; removal needs a YAML parser migration" },
+    # zbus 5 D-Bus crates (zvariant, zbus_names, zvariant_derive) — unmaintained,
+    # not vulnerable. Only path: buzz-mesh-smoke → mesh-llm → keyring 4 →
+    # zbus-secret-service-keyring-store / secret-service 5 → zbus 5.
+    # Remove when mesh-llm's keyring stack moves off zbus 5.
+    { id = "RUSTSEC-2026-0370", reason = "zvariant via buzz-mesh-smoke → mesh-llm → keyring 4 → secret-service 5 → zbus 5; unmaintained, not vulnerable" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names via buzz-mesh-smoke → mesh-llm → keyring 4 → secret-service 5 → zbus 5; unmaintained, not vulnerable" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive via buzz-mesh-smoke → mesh-llm → keyring 4 → secret-service 5 → zbus 5; unmaintained, not vulnerable" },
 ]
 
 [licenses]
@@ -88,5 +105,10 @@ license-files = []
 ignore = true
 
 [bans]
+# RUSTSEC-2026-0381: allow only the 0.26.11 re-export wrapper or patched roots.
+deny = [
+    { name = "webpki-roots", version = "<0.26.11" },
+    { name = "webpki-roots", version = ">0.26.11, <1.0.10" },
+]
 multiple-versions = "warn"
 wildcards = "allow"

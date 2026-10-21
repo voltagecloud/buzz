@@ -84,6 +84,28 @@ fn test_validate_zip_accepts_normal_entries() {
 }
 
 #[test]
+fn test_validate_zip_rejects_cp437_path_traversal() {
+    let tmp = make_zip_with_entries(&["node/../é.exe"]);
+    let mut bytes = std::fs::read(tmp.path()).unwrap();
+    let name = "node/../é.exe".as_bytes();
+    let positions: Vec<_> = bytes
+        .windows(name.len())
+        .enumerate()
+        .filter_map(|(index, candidate)| (candidate == name).then_some(index))
+        .collect();
+    assert_eq!(positions.len(), 2, "local and central ZIP entry names");
+    // ZIP falls back to CP437 for non-UTF-8 names. The decoded path must
+    // still pass through the traversal guard.
+    for position in positions {
+        bytes[position + 8] = 0xff;
+    }
+    std::fs::write(tmp.path(), bytes).unwrap();
+    let archive = zip::ZipArchive::new(std::fs::File::open(tmp.path()).unwrap()).unwrap();
+    let error = validate_managed_node_zip_entries(&archive).unwrap_err();
+    assert!(error.contains("path traversal"), "{error}");
+}
+
+#[test]
 fn test_validate_zip_rejects_absolute_path() {
     let tmp = make_zip_with_entries(&["/etc/passwd"]);
     let file = std::fs::File::open(tmp.path()).unwrap();

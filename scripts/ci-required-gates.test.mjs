@@ -23,6 +23,26 @@ const gates = [
   "mobile",
   "security",
 ];
+test("desktop Rust changes select security and its required gate", () => {
+  for (const job of ["security-domain", "security"]) {
+    const body = workflow.match(
+      new RegExp(`^  ${job}:\\n([\\s\\S]*?)(?=^  [\\w-]+:|$(?![\\s\\S]))`, "m"),
+    )[1];
+    const condition = body.match(/^ {4}if: (.+)$/m)[1];
+    for (const desktopRust of [true, false]) {
+      const expression = condition
+        .replace(/always\(\)/g, "true")
+        .replace(/github\.event_name/g, '"pull_request"')
+        .replace(/needs\.changes\.result/g, '"success"')
+        .replace(
+          /needs\.changes\.outputs\.desktop-rust/g,
+          JSON.stringify(String(desktopRust)),
+        )
+        .replace(/needs\.changes\.outputs\.rust/g, '"false"');
+      assert.equal(runInNewContext(expression), desktopRust, job);
+    }
+  }
+});
 for (const gate of gates) {
   const body = workflow.match(
     new RegExp(`^  ${gate}:\\n([\\s\\S]*?)(?=^  [\\w-]+:|$(?![\\s\\S]))`, "m"),
