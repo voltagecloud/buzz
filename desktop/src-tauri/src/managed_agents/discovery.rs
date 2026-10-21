@@ -840,14 +840,13 @@ pub(crate) fn probe_codex_acp_version_with_path(
         command.env("PATH", path);
     }
     crate::util::configure_no_window(&mut command);
-    let mut child = command
+    let deadline = Instant::now() + VERSION_PROBE_TIMEOUT;
+    command
         .stdout(tmp.try_clone().ok()?)
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()?;
+        .stderr(std::process::Stdio::null());
+    let mut child = super::process_spawn::spawn_with_busy_retry(&mut command).ok()?;
 
     // Poll until the deadline rather than blocking on stdout EOF.
-    let deadline = Instant::now() + VERSION_PROBE_TIMEOUT;
     let exit_status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,

@@ -73,3 +73,56 @@ fn codex_adapter_availability_outdated_for_older_1x_binary() {
         assert!(codex_adapter_is_outdated(&bin));
     }
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn probe_codex_acp_version_waits_for_a_transient_executable_writer() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let binary = temp.path().join("codex-acp");
+    std::fs::write(
+        &binary,
+        "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.2'\n",
+    )
+    .expect("write adapter");
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod adapter");
+    let writer = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&binary)
+        .unwrap();
+    assert_eq!(
+        std::process::Command::new(&binary)
+            .spawn()
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::ExecutableFileBusy
+    );
+    let closer = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        drop(writer);
+    });
+    let version = probe_codex_acp_version_with_path(&binary, None);
+    closer.join().unwrap();
+    assert_eq!(version, Some((1, 1, 2)));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn probe_codex_acp_version_rejects_a_persistent_executable_writer() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let binary = temp.path().join("codex-acp");
+    std::fs::write(
+        &binary,
+        "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.2'\n",
+    )
+    .expect("write adapter");
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod adapter");
+    let _writer = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&binary)
+        .unwrap();
+    assert_eq!(probe_codex_acp_version_with_path(&binary, None), None);
+}
