@@ -1,0 +1,22 @@
+[package]
+name = "buzz-sandbox-host"
+description = "Remote workspaces for a Buzz agent host, run through buzz-backend-* providers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+buzz-host = { path = "../host" }
+# Shared with buzz-app's desktop, which drives the same providers.
+buzz-remote-sessions = { path = "../../../../crates/buzz-remote-sessions" }
+futures = "0.3"
+serde_json = "1"
+tokio = { version = "1", features = ["rt"] }
+uuid = "1"
+
+[dev-dependencies]
+buzz-host-rpc = { path = "../host-rpc" }
+buzz-identity = { path = "../identity" }
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }

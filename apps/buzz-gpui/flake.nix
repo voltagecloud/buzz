@@ -40,12 +40,28 @@
         buzzdArgs = {
           pname = "buzzd";
           version = "0.2.0";
+          # The workspace path-depends on ../../crates/buzz-remote-sessions,
+          # so the source is the repository root with only this workspace and
+          # that crate kept; the build runs from apps/buzz-gpui.
           src = pkgs.lib.cleanSourceWith {
-            src = ./.;
+            src = ../..;
             filter = path: type:
-              let base = baseNameOf path; in
-              !(builtins.elem base [ "target" "target-deb" "dist" ".test-relay" ".claude" "docs" ]);
+              let
+                rel = pkgs.lib.removePrefix (toString ../.. + "/") (toString path);
+                base = baseNameOf path;
+                under = dir: rel == dir || pkgs.lib.hasPrefix (dir + "/") rel;
+                above = dir: pkgs.lib.hasPrefix (rel + "/") dir;
+                kept = [ "apps/buzz-gpui" "crates/buzz-remote-sessions" ];
+              in
+              !(builtins.elem base [ "target" "target-deb" "dist" ".test-relay" ".claude" "docs" ])
+              && builtins.any (dir: under dir || above dir) kept;
           };
+          cargoToml = ./Cargo.toml;
+          cargoLock = ./Cargo.lock;
+          postUnpack = ''
+            cd "$sourceRoot/apps/buzz-gpui"
+            sourceRoot=.
+          '';
           cargoExtraArgs = "--locked -p buzzd";
           # Tests need a display, a keyring or a relay; they run in CI-like
           # environments, not in the package build.
