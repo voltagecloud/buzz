@@ -5,6 +5,7 @@
 //! Built only with the `voltage-sandbox` feature.
 
 pub mod config;
+mod recovery;
 mod settings;
 
 use crate::agent_activity::local::WorkOutcome;
@@ -31,7 +32,9 @@ const START: Duration = Duration::from_secs(11 * 60);
 pub fn init(cx: &mut App) {
     if let Err(error) = crate::agents2::register_type(PLUGIN, Arc::new(RemoteWorkspace), cx) {
         tracing::error!(%error, "could not register the remote workspace agent type");
+        return;
     }
+    recovery::init(cx);
 }
 
 struct RemoteWorkspace;
@@ -93,15 +96,17 @@ impl AgentType for RemoteWorkspace {
         let Some(relay) = relay else {
             return Task::ready(Err("The agent is not running in a community".into()));
         };
-        let runtime = crate::runtime::Runtime::handle(cx);
-        let started = runtime.spawn(deliver(delivery, relay));
-        cx.background_spawn(async move {
-            match started.await {
-                Ok(Ok(Some((_, Err(error))))) => Err(error.message),
-                Ok(Ok(_)) => Ok(()),
-                Ok(Err(error)) => Err(error),
-                Err(_) => Err("The start was cancelled".into()),
-            }
+        let name = delivery.agent.name.clone();
+        let started = crate::runtime::Runtime::handle(cx).spawn(deliver(delivery, relay));
+        cx.spawn(async move |cx| {
+            let sent = started
+                .await
+                .map_err(|_| "The start was cancelled".to_string())??;
+            let Some(sent) = sent else {
+                return Ok(());
+            };
+            cx.update(|cx| recovery::started(&sent, &name, cx));
+            sent.1.map_err(|error| error.message)
         })
     }
 
