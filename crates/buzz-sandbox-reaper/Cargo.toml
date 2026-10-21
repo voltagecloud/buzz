@@ -16,6 +16,7 @@ path = "src/main.rs"
 buzz-backend-kubernetes = { path = "../buzz-backend-kubernetes" }
 buzz-sdk = { workspace = true }
 buzz-session-control = { workspace = true }
+buzz-ws-client = { workspace = true }
 nostr = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
@@ -44,6 +45,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 
 [dev-dependencies]
 buzz-backend-kubernetes = { path = "../buzz-backend-kubernetes", features = ["test-utils"] }
+tokio-tungstenite = { workspace = true }
 tower = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 proptest = { workspace = true }
