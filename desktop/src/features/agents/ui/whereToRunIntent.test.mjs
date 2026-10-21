@@ -40,6 +40,20 @@ test("provider selection blocks submit while required config is missing", () => 
   assert.equal(providerConfigComplete(missing), false);
 });
 
+test("provider selection blocks submit while an object field holds invalid JSON", () => {
+  const schema = {
+    properties: { region: { type: "string" }, pod_options: { type: "object" } },
+    required: ["region"],
+  };
+  const draft = (pod_options) =>
+    providerDraft({
+      probedProvider: { ok: true, config_schema: schema },
+      providerConfig: { region: "us", pod_options },
+    });
+  assert.equal(canSubmitWhereToRun(draft("{oops")), false);
+  assert.equal(canSubmitWhereToRun(draft('{"node_selector":{}}')), true);
+});
+
 test("complete provider config allows submit", () => {
   assert.equal(canSubmitWhereToRun(providerDraft()), true);
 });

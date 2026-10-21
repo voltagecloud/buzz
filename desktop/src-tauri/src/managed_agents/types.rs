@@ -12,6 +12,14 @@ pub enum BackendKind {
     },
 }
 
+impl BackendKind {
+    /// Whether launches require a published channel thread instead of app lifecycle events.
+    pub(crate) fn is_thread_sandbox(&self) -> bool {
+        matches!(self, Self::Provider { id, config }
+            if id == "kubernetes" && config.get("sandbox") == Some(&serde_json::Value::Bool(true)))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentDefinition {
     pub id: String,

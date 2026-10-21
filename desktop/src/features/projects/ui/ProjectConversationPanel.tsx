@@ -234,6 +234,7 @@ export function ProjectConversationPanel({
       setReplyTargetId(rootId);
       setExpandedReplyIds((current) => new Set(current).add(parentEventId));
       setScrollTargetId(sentMessage.id);
+      return sentMessage;
     },
     [activeChannel, replyTargetId, rootId, sendMessageMutation.mutateAsync],
   );

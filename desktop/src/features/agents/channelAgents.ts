@@ -1,3 +1,4 @@
+import { usesThreadSandbox } from "./lib/threadSandbox";
 import {
   commandsMatch,
   findReusableGenericAgent,
@@ -203,9 +204,13 @@ export async function attachManagedAgentToChannel(
     // pair — so this ensures the pair the caller is attaching to, never
     // another community's.
     const isRemote = input.agent.backend.type === "provider";
-    const needsStart = isRemote
-      ? input.agent.status !== "deployed"
-      : input.agent.status !== "running" && input.agent.status !== "deployed";
+    // A thread Sandbox needs the accepted mention's scope. Without a
+    // detached queue, attachment only grants membership; the mention starts it.
+    const needsStart = usesThreadSandbox(input.agent)
+      ? Boolean(input.detachedStart)
+      : isRemote
+        ? input.agent.status !== "deployed"
+        : input.agent.status !== "running" && input.agent.status !== "deployed";
     if (needsStart) {
       if (input.detachedStart) {
         input.detachedStart(input.agent);

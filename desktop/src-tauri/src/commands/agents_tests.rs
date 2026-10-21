@@ -881,3 +881,214 @@ fn create_with_effort_in_confined_child(home: &std::path::Path) {
             .starts_with("nsec1"));
     }
 }
+
+// ── Thread Sandbox launch seams ──────────────────────────────────────────────
+
+/// Re-run one test in a child process with a temp HOME and a PATH holding
+/// only `bin`, so provider discovery sees just the fakes a test writes there.
+#[cfg(unix)]
+pub(in crate::commands) fn run_in_confined_child(test: &str, child_var: &str) {
+    let home = tempfile::tempdir().unwrap();
+    let bin = home.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test, "--nocapture"])
+        .env(child_var, home.path())
+        .env("HOME", home.path())
+        .env("XDG_DATA_HOME", home.path())
+        .env("PATH", &bin)
+        .env_remove("BUZZ_PRIVATE_KEY")
+        .env_remove("BUZZ_AUTH_TAG")
+        .env_remove("BUZZ_RELAY_URL")
+        .env_remove("BUZZ_NETWORK_TRACE")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "child failed: {stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A headless app whose agent store, keys, and nest live under `home`.
+#[cfg(unix)]
+pub(in crate::commands) fn confined_mock_app(
+    home: &std::path::Path,
+) -> tauri::App<tauri::test::MockRuntime> {
+    crate::managed_agents::storage::NO_KEYCHAIN_FOR_TEST
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    crate::managed_agents::pin_nest_dir_for_test(home.join("nest"));
+    let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+    context.config_mut().identifier = home.join("app-data").to_str().unwrap().to_owned();
+    let state = crate::app_state::build_app_state();
+    // Unroutable relay: nothing in these tests may reach a network.
+    *state.relay_url_override.lock().unwrap() = Some("ws://127.0.0.1:9".to_string());
+    tauri::test::mock_builder()
+        .manage(state)
+        .build(context)
+        .expect("mock app builds headless")
+}
+
+/// Install `buzz-backend-<id>` in `bin`: it answers `info`, and records each
+/// deploy request in `capture` before acknowledging it.
+#[cfg(unix)]
+fn install_fake_provider(bin: &std::path::Path, id: &str, capture: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let info = r#"{"ok":true,"name":"fake","version":"1","protocol_version":1,"description":"fake","config_schema":{}}"#;
+    let path = bin.join(format!("buzz-backend-{id}"));
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\nIFS= read -r request\ncase \"$request\" in\n  *'\"op\":\"info\"'*) printf '%s\\n' '{info}' ;;\n  *) printf '%s\\n' \"$request\" > '{}'\n     printf '%s\\n' '{{\"ok\":true,\"agent_id\":\"remote-1\"}}' ;;\nesac\n",
+            capture.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[cfg(unix)]
+pub(in crate::commands) fn provider_record(
+    pubkey: &str,
+    id: &str,
+    config: serde_json::Value,
+) -> ManagedAgentRecord {
+    let mut record = bare_agent_record(None, Some("gpt-5"), Some("openai"));
+    record.pubkey = pubkey.to_string();
+    record.private_key_nsec =
+        "nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5".to_string();
+    record.backend = crate::managed_agents::BackendKind::Provider {
+        id: id.to_string(),
+        config,
+    };
+    record
+}
+
+#[cfg(unix)]
+#[test]
+fn thread_sandbox_deploy_binds_scope_from_the_rebuilt_record() {
+    const CHILD: &str = "BUZZ_THREAD_SANDBOX_DEPLOY_TEST_HOME";
+    match std::env::var_os(CHILD) {
+        Some(home) => thread_sandbox_deploy_in_confined_child(std::path::Path::new(&home)),
+        None => run_in_confined_child(
+            "commands::agents::tests::thread_sandbox_deploy_binds_scope_from_the_rebuilt_record",
+            CHILD,
+        ),
+    }
+}
+
+#[cfg(unix)]
+fn thread_sandbox_deploy_in_confined_child(home: &std::path::Path) {
+    use tauri::Manager;
+    let app = confined_mock_app(home);
+    let state = app.state::<AppState>();
+    let owner = workspace_owner_hex(&state).unwrap();
+    let sandbox = || serde_json::json!({"sandbox": true, "namespace": "agents"});
+    save_managed_agents(
+        app.handle(),
+        &[
+            provider_record("thread-agent", "kubernetes", sandbox()),
+            provider_record("other-agent", "other", sandbox()),
+        ],
+    )
+    .unwrap();
+    let scope: provider_deploy::RemoteSessionScope = serde_json::from_value(serde_json::json!({
+        "channelId": "f9ee507e-d03c-4570-baa6-02951c38e1cd",
+        "threadRoot": "a".repeat(64),
+    }))
+    .unwrap();
+    // Callers' pre-lock snapshots are stale on purpose: deploy must rebuild.
+    let stale_payload = serde_json::json!({"launch": {"owner_pubkey": "stale-owner"}});
+    let deploy = |pubkey: &str, scope: Option<&provider_deploy::RemoteSessionScope>| {
+        tauri::async_runtime::block_on(deploy_to_provider(
+            app.handle(),
+            &state,
+            pubkey,
+            "kubernetes",
+            &serde_json::json!({}),
+            stale_payload.clone(),
+            None,
+            None,
+            None,
+            None,
+            scope,
+        ))
+    };
+
+    // No provider binary exists yet, so this error proves the refusal happens
+    // before binary resolution.
+    let refused = deploy("thread-agent", None).unwrap_err();
+    assert!(refused.contains("Mention this agent"), "{refused}");
+
+    let capture = home.join("deploy.json");
+    install_fake_provider(&home.join("bin"), "kubernetes", &capture);
+    deploy("thread-agent", Some(&scope)).unwrap();
+    let request: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&capture).unwrap()).unwrap();
+    assert_eq!(
+        request["provider_config"],
+        serde_json::json!({
+            "namespace": "agents",
+            "sandbox": {
+                "channel_id": "f9ee507e-d03c-4570-baa6-02951c38e1cd",
+                "thread_root": "a".repeat(64),
+            },
+            "identity_policy": {"agent_pubkey": "thread-agent", "owner_pubkey": owner},
+        })
+    );
+    assert_eq!(request["agent"]["launch"]["owner_pubkey"], owner);
+
+    // `sandbox: true` on another provider is ordinary configuration.
+    let other_capture = home.join("other.json");
+    install_fake_provider(&home.join("bin"), "other", &other_capture);
+    deploy("other-agent", None).unwrap();
+    let request: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&other_capture).unwrap()).unwrap();
+    assert_eq!(request["provider_config"], sandbox());
+}
+
+#[cfg(unix)]
+#[test]
+fn create_with_spawn_leaves_thread_sandboxes_for_their_first_mention() {
+    const CHILD: &str = "BUZZ_THREAD_SANDBOX_CREATE_TEST_HOME";
+    match std::env::var_os(CHILD) {
+        Some(home) => thread_sandbox_create_in_confined_child(std::path::Path::new(&home)),
+        None => run_in_confined_child(
+            "commands::agents::tests::create_with_spawn_leaves_thread_sandboxes_for_their_first_mention",
+            CHILD,
+        ),
+    }
+}
+
+#[cfg(unix)]
+fn thread_sandbox_create_in_confined_child(home: &std::path::Path) {
+    use tauri::Manager;
+    let app = confined_mock_app(home);
+    let capture = home.join("deploy.json");
+    install_fake_provider(&home.join("bin"), "kubernetes", &capture);
+    let input: CreateManagedAgentRequest = serde_json::from_value(serde_json::json!({
+        "name": "Thread worker", "relayUrl": "ws://127.0.0.1:9", "acpCommand": null,
+        "agentCommand": null, "idleTimeoutSeconds": null,
+        "maxTurnDurationSeconds": null, "parallelism": null,
+        "systemPrompt": null, "avatarUrl": null, "model": "gpt-5",
+        "provider": "openai", "spawnAfterCreate": true,
+        "backend": {"type": "provider", "id": "kubernetes", "config": {"sandbox": true}},
+    }))
+    .unwrap();
+    let state = app.state::<AppState>();
+    let created = tauri::async_runtime::block_on(create_managed_agent_in(
+        input,
+        app.handle().clone(),
+        &state,
+    ))
+    .expect("create succeeds");
+
+    assert_eq!(created.spawn_error, None);
+    assert!(
+        !capture.exists(),
+        "create must not deploy a thread Sandbox before a mention supplies its thread"
+    );
+    let records = load_managed_agents(app.handle()).unwrap();
+    assert_eq!(records[0].backend_agent_id, None);
+}

@@ -545,7 +545,7 @@ export function ChannelScreen({
       mediaTags?: string[][],
       parentEventId?: string,
     ) => {
-      await sendMessageMutateAsync({
+      return sendMessageMutateAsync({
         content,
         mediaTags,
         mentionPubkeys,

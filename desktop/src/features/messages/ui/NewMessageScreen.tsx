@@ -5,7 +5,7 @@ import {
   useOpenDmMutation,
   useUpsertCachedChannel,
 } from "@/features/channels/hooks";
-import type { Channel } from "@/shared/api/types";
+import type { Channel, RelayEvent } from "@/shared/api/types";
 import { useSendMessageMutation } from "@/features/messages/hooks";
 import { getKeyboardSearchSelection } from "@/features/profile/lib/userCandidateSearch";
 import { SelectedRecipientChip } from "@/features/profile/ui/SelectedRecipientChip";
@@ -257,8 +257,9 @@ export function NewMessageScreen() {
         );
       }
 
+      let sent: RelayEvent;
       try {
-        await sendMessageMutation.mutateAsync({
+        sent = await sendMessageMutation.mutateAsync({
           targetChannel: directMessage,
           content,
           mentionPubkeys,
@@ -278,14 +279,15 @@ export function NewMessageScreen() {
       }
 
       if (!isMountedRef.current) {
-        return;
+        return sent;
       }
 
       await upsertCachedChannel(directMessage);
       if (!isMountedRef.current) {
-        return;
+        return sent;
       }
       await goChannel(directMessage.id, { replace: true });
+      return sent;
     },
     [
       goChannel,

@@ -15,8 +15,6 @@ import {
 } from "lucide-react";
 import { EmojiPicker } from "@/features/custom-emoji/ui/EmojiPicker";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
-import type { UserProfileLookup } from "@/features/profile/lib/identity";
-import type { ChannelType } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import {
   setVideoPlaybackSpeed,
@@ -48,52 +46,15 @@ import {
   saveReviewPlaybackPosition,
   setVideoReviewOpen,
 } from "./videoPlayerState";
-type VideoReviewReaction = {
-  emoji: string;
-  emojiUrl?: string;
-  count: number;
-  reactedByCurrentUser?: boolean;
-  users: Array<{
-    pubkey: string;
-    displayName: string;
-    avatarUrl: string | null;
-  }>;
-};
-export type VideoReviewComment = {
-  id: string;
-  author: string;
-  avatarUrl?: string | null;
-  isAgent?: boolean;
-  body: string;
-  createdAt: number;
-  time: string;
-  /** Parent event id — when it points at another comment, this is a reply. */
-  parentId?: string | null;
-  reactions?: VideoReviewReaction[];
-};
-export type VideoReviewContext = {
-  channelId?: string | null;
-  channelName?: string;
-  channelType?: ChannelType | null;
-  comments: VideoReviewComment[];
-  disabled?: boolean;
-  isSending?: boolean;
-  onSendComment?: (
-    content: string,
-    mentionPubkeys: string[],
-    mediaTags?: string[][],
-    /** Reply to this comment instead of the video message itself. */
-    parentEventId?: string,
-  ) => Promise<void>;
-  onToggleCommentReaction?: (
-    comment: VideoReviewComment,
-    emoji: string,
-    remove: boolean,
-  ) => Promise<void>;
-  profiles?: UserProfileLookup;
-  rootEventId?: string;
-  title?: string;
-};
+import type {
+  VideoReviewComment,
+  VideoReviewContext,
+} from "./VideoPlayer.types";
+export type {
+  VideoReviewComment,
+  VideoReviewContext,
+} from "./VideoPlayer.types";
+
 type VideoPlayerProps = {
   src: string;
   poster?: string;
@@ -1517,7 +1478,7 @@ function VideoReviewDialog({
       setIsPosting(true);
       setErrorMessage(null);
       try {
-        await reviewContext.onSendComment(
+        const published = await reviewContext.onSendComment(
           body,
           options?.mentionPubkeys ?? [],
           options?.mediaTags,
@@ -1526,6 +1487,7 @@ function VideoReviewDialog({
         if (replyTo) {
           setReplyTarget(null);
         }
+        return published;
       } catch (error) {
         setOptimisticComments((current) =>
           current.filter((comment) => comment.id !== optimisticComment.id),
@@ -1548,7 +1510,7 @@ function VideoReviewDialog({
       mentionPubkeys: string[],
       mediaTags?: string[][],
     ) => {
-      await postContent(content, {
+      return postContent(content, {
         mediaTags,
         mentionPubkeys,
         replyTo: replyTargetRef.current?.comment ?? null,

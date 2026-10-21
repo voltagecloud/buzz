@@ -41,6 +41,7 @@ import {
   buildVideoReviewPresentationByMessageId,
   hasRenderedVideoAttachment,
 } from "@/features/messages/lib/videoReviewContext";
+import type { PublishedMessage } from "@/features/messages/lib/remoteAgentSession";
 import { getThreadReference } from "@/features/messages/lib/threading";
 import { handleTimelineMentionCopy } from "@/features/messages/lib/timelineMentionCopy";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
@@ -135,7 +136,7 @@ type InboxDetailPaneProps = {
     mediaTags?: string[][];
     mentionPubkeys: string[];
     parentEventId: string | null;
-  }) => Promise<void>;
+  }) => Promise<PublishedMessage>;
   onToggleReaction?: (
     message: TimelineMessage,
     emoji: string,

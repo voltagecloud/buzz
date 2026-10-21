@@ -824,7 +824,11 @@ async fn create_managed_agent_in<R: tauri::Runtime>(
     profile_sync_error =
         super::agent_models::flush_managed_agent_policy(&app, state, profile_sync_error).await;
 
-    let spawn_error = if input.spawn_after_create && input.backend != BackendKind::Local {
+    // A thread-bound provider starts only after a mention supplies its scope.
+    let spawn_error = if input.spawn_after_create
+        && input.backend != BackendKind::Local
+        && !input.backend.is_thread_sandbox()
+    {
         if let BackendKind::Provider { ref id, ref config } = input.backend {
             let agent_json = {
                 let _g = state
@@ -839,7 +843,7 @@ async fn create_managed_agent_in<R: tauri::Runtime>(
                 build_deploy_payload(&app, state, rec)?
             };
             match deploy_to_provider(
-                &app, state, &pubkey, id, config, agent_json, None, None, None, None,
+                &app, state, &pubkey, id, config, agent_json, None, None, None, None, None,
             )
             .await
             {
@@ -888,6 +892,7 @@ pub async fn start_managed_agent(
     expected_relay_url: Option<String>,
     expected_signer_pubkey: Option<String>,
     replay_floor_unix: Option<u64>,
+    session_scope: Option<provider_deploy::RemoteSessionScope>,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ManagedAgentSummary, String> {
@@ -1014,6 +1019,7 @@ pub async fn start_managed_agent(
                 expected_relay_url.as_deref(),
                 expected_signer_pubkey.as_deref(),
                 replay_floor_unix,
+                session_scope.as_ref(),
             )
             .await?;
 
@@ -1240,4 +1246,4 @@ use profile::{profile_needs_sync, resolve_legacy_avatar};
 mod admission_tests;
 #[cfg(test)]
 #[path = "agents_tests.rs"]
-mod tests;
+pub(super) mod tests;

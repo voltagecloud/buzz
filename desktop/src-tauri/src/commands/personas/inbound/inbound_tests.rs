@@ -991,3 +991,68 @@ fn shared_transport_redaction_preserves_local_override_but_explicit_stock_resets
     apply_inbound_persona(&mut personas, persona_from_event(&clear).unwrap());
     assert_eq!(personas[0].acp_command, None);
 }
+
+#[cfg(unix)]
+#[test]
+fn inbound_access_change_never_redeploys_a_thread_sandbox() {
+    const CHILD: &str = "BUZZ_INBOUND_THREAD_SANDBOX_TEST_HOME";
+    match std::env::var_os(CHILD) {
+        Some(home) => inbound_thread_sandbox_in_confined_child(std::path::Path::new(&home)),
+        None => crate::commands::agents::tests::run_in_confined_child(
+            "commands::personas::inbound::inbound_tests::inbound_access_change_never_redeploys_a_thread_sandbox",
+            CHILD,
+        ),
+    }
+}
+
+#[cfg(unix)]
+fn inbound_thread_sandbox_in_confined_child(home: &std::path::Path) {
+    use crate::commands::agents::tests::{confined_mock_app, provider_record};
+    use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag};
+    if crate::managed_agents::owner_only_access_build() {
+        // Access is pinned to the owner, so no inbound event can change it.
+        return;
+    }
+    let app = confined_mock_app(home);
+    let deployed = |pubkey: &str, config: serde_json::Value| {
+        let mut record = provider_record(pubkey, "kubernetes", config);
+        record.backend_agent_id = Some(format!("{pubkey}-remote"));
+        record
+    };
+    crate::managed_agents::save_managed_agents(
+        app.handle(),
+        &[
+            deployed("thread-agent", serde_json::json!({"sandbox": true})),
+            deployed("plain-agent", serde_json::json!({})),
+        ],
+    )
+    .unwrap();
+    let widen_access = |d_tag: &str| {
+        let content = serde_json::json!({
+            "name": "Remote Agent", "persona_id": null, "system_prompt": null,
+            "model": "gpt-5", "provider": "openai", "persona_source_version": null,
+            "parallelism": 1, "respond_to": "anyone", "respond_to_allowlist": [],
+        });
+        let event = EventBuilder::new(Kind::Custom(30177), content.to_string())
+            .tags(vec![Tag::parse(["d", d_tag]).unwrap()])
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        reconcile_inbound_persona_event_blocking(
+            event.as_json(),
+            "ws://127.0.0.1:9".to_string(),
+            app.handle().clone(),
+        )
+        .unwrap()
+    };
+
+    // Control: the same access change does refresh an ordinary deployment.
+    assert!(matches!(
+        widen_access("plain-agent"),
+        Some(InboundRuntimeRefresh::Provider { .. })
+    ));
+    assert!(widen_access("thread-agent").is_none());
+    let records = crate::managed_agents::load_managed_agents(app.handle()).unwrap();
+    let thread = records.iter().find(|r| r.pubkey == "thread-agent").unwrap();
+    assert_eq!(thread.respond_to, crate::managed_agents::RespondTo::Anyone);
+    assert!(!thread.provider_policy_pending);
+}

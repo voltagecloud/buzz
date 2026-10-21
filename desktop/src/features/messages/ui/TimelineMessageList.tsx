@@ -1,3 +1,4 @@
+import type { PublishedMessageResult } from "@/features/messages/lib/remoteAgentSession";
 import * as React from "react";
 import { VList } from "virtua";
 import type { VListHandle } from "virtua";
@@ -81,7 +82,7 @@ type TimelineMessageListProps = {
     mentionPubkeys: string[],
     mediaTags?: string[][],
     parentEventId?: string,
-  ) => Promise<void>;
+  ) => Promise<PublishedMessageResult>;
   unfollowThreadById?: (rootId: string) => void;
   onToggleReaction?: (
     message: TimelineMessage,

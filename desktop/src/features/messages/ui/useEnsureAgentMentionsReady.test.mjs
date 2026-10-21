@@ -110,6 +110,21 @@ test("a stopped member agent is queued for a post-publish wake, never fired", as
   rendered.unmount();
 });
 
+test("deployed Sandboxes are checked again for each mentioned thread", async () => {
+  const agent = managedAgent({
+    status: "deployed",
+    backend: { type: "provider", id: "kubernetes", config: { sandbox: true } },
+  });
+  const rendered = await renderEnsureReady({
+    getManagedAgentsByPubkey: async () => new Map([[MEMBER_AGENT, agent]]),
+    memberPubkeys: new Set([MEMBER_AGENT]),
+  });
+  const result = await rendered.result.current([MEMBER_AGENT], CHANNEL_ID);
+  assert.equal(result.agentsToWake.length, 1);
+  assert.equal(result.agentsToWake[0].agent, agent);
+  rendered.unmount();
+});
+
 test("only agents that are not up are queued", async () => {
   const runningLocal = managedAgent({ status: "running" });
   const undeployedProvider = managedAgent({
@@ -175,4 +190,62 @@ test("a non-member agent's wake queues through the attach seam instead of firing
     "no start may fire while the send is still preparing",
   );
   rendered.unmount();
+});
+
+test("first mention in a new channel queues an already deployed Sandbox", async () => {
+  const { attachManagedAgentToChannel } = await import(
+    "@/features/agents/channelAgents.ts"
+  );
+  const agent = managedAgent({
+    status: "deployed",
+    backend: { type: "provider", id: "kubernetes", config: { sandbox: true } },
+  });
+  const originalInvoke = dom.window.__TAURI_INTERNALS__.invoke;
+  dom.window.__TAURI_INTERNALS__.invoke = async (command) => {
+    tauriInvocations.push(command);
+    assert.equal(command, "add_channel_members");
+    return { added: [MEMBER_AGENT], errors: [] };
+  };
+  const rendered = await renderEnsureReady({
+    attachAgentToChannel: ({ channelId, ...input }) =>
+      attachManagedAgentToChannel(channelId, input),
+    getManagedAgentsByPubkey: async () => new Map([[MEMBER_AGENT, agent]]),
+    memberPubkeys: new Set(),
+  });
+  try {
+    const result = await rendered.result.current([MEMBER_AGENT], CHANNEL_ID);
+    assert.deepEqual(result.errors, []);
+    assert.deepEqual(tauriInvocations, ["add_channel_members"]);
+    assert.equal(
+      result.agentsToWake.length,
+      1,
+      "the new channel needs its own thread Sandbox",
+    );
+  } finally {
+    rendered.unmount();
+    dom.window.__TAURI_INTERNALS__.invoke = originalInvoke;
+  }
+});
+
+test("attaching a thread Sandbox without a mention queue grants membership without starting", async () => {
+  const { attachManagedAgentToChannel } = await import(
+    "@/features/agents/channelAgents.ts"
+  );
+  const agent = managedAgent({
+    backend: { type: "provider", id: "kubernetes", config: { sandbox: true } },
+  });
+  const originalInvoke = dom.window.__TAURI_INTERNALS__.invoke;
+  dom.window.__TAURI_INTERNALS__.invoke = async (command) => {
+    tauriInvocations.push(command);
+    assert.equal(command, "add_channel_members");
+    return { added: [MEMBER_AGENT], errors: [] };
+  };
+  try {
+    const result = await attachManagedAgentToChannel(CHANNEL_ID, { agent });
+    assert.equal(result.membershipAdded, true);
+    assert.equal(result.started, false);
+    assert.deepEqual(tauriInvocations, ["add_channel_members"]);
+  } finally {
+    dom.window.__TAURI_INTERNALS__.invoke = originalInvoke;
+  }
 });

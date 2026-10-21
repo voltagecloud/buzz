@@ -1,3 +1,4 @@
+import type { PublishedMessageResult } from "@/features/messages/lib/remoteAgentSession";
 import * as React from "react";
 
 import {
@@ -105,7 +106,7 @@ type MessageTimelineProps = {
     mentionPubkeys: string[],
     mediaTags?: string[][],
     parentEventId?: string,
-  ) => Promise<void>;
+  ) => Promise<PublishedMessageResult>;
   unfollowThreadById?: (rootId: string) => void;
   onToggleReaction?: (
     message: TimelineMessage,

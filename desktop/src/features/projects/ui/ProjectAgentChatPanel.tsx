@@ -23,6 +23,7 @@ import {
   type StoredProjectsAgentConversation,
   writeStoredProjectsAgentConversation,
 } from "@/features/projects/lib/projectAgentConversationStorage";
+import { publishedChannelMessage } from "@/features/messages/lib/remoteAgentSession";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
 import { useProfileQuery, useUsersBatchQuery } from "@/features/profile/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
@@ -228,6 +229,11 @@ export function ProjectAgentChatPanel({
           setStoredConversation(stored);
           writeStoredProjectsAgentConversation(storageScope, stored);
         }
+        return publishedChannelMessage(channel.id, {
+          eventId: sent.eventId,
+          parentEventId: conversation?.opener.eventId ?? null,
+          rootEventId: null,
+        });
       } catch (error) {
         toast.error(
           error instanceof Error ? error.message : "Failed to reach the agent",

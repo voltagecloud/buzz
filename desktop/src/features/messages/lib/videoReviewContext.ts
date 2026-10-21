@@ -1,6 +1,7 @@
 import { fromMarkdown } from "mdast-util-from-markdown";
 
 import type { TimelineMessage } from "@/features/messages/types";
+import type { PublishedMessageResult } from "@/features/messages/lib/remoteAgentSession";
 import { isVoiceNoteAttachment } from "@/features/messages/lib/audioAttachment";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ChannelType } from "@/shared/api/types";
@@ -17,7 +18,7 @@ type SendVideoReviewComment = (
   mentionPubkeys: string[],
   mediaTags?: string[][],
   parentEventId?: string,
-) => Promise<void>;
+) => Promise<PublishedMessageResult>;
 
 type ToggleMessageReaction = (
   message: TimelineMessage,
