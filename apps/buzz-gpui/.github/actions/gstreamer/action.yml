@@ -1,0 +1,73 @@
+name: Install GStreamer
+description: >
+  Installs GStreamer and pkg-config for building on macOS or Windows, from
+  the official installers: the universal runtime and devel .pkg on macOS
+  (GStreamer.framework, which scripts/package-macos.sh copies into the
+  app), the MSVC runtime and devel .msi on Windows. On Windows it sets
+  GSTREAMER_ROOT to the directory that holds bin/ and lib/.
+runs:
+  using: composite
+  steps:
+    - name: GStreamer version (macOS)
+      if: runner.os == 'macOS'
+      id: macos-pkgs
+      shell: bash
+      run: |
+        echo "version=1.26.7" >> "$GITHUB_OUTPUT"
+        echo "dir=$RUNNER_TEMP/gstreamer-pkgs" >> "$GITHUB_OUTPUT"
+
+    - name: Cache GStreamer installers (macOS)
+      if: runner.os == 'macOS'
+      uses: actions/cache@v4
+      with:
+        path: ${{ steps.macos-pkgs.outputs.dir }}
+        key: gstreamer-macos-universal-${{ steps.macos-pkgs.outputs.version }}
+
+    - name: GStreamer (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      env:
+        VERSION: ${{ steps.macos-pkgs.outputs.version }}
+        DIR: ${{ steps.macos-pkgs.outputs.dir }}
+      run: |
+        set -euo pipefail
+        base="https://gstreamer.freedesktop.org/data/pkg/osx/$VERSION"
+        mkdir -p "$DIR"
+        for name in "gstreamer-1.0-$VERSION-universal.pkg" "gstreamer-1.0-devel-$VERSION-universal.pkg"; do
+          if [ ! -f "$DIR/$name" ]; then
+            curl -fsSL --retry 3 -o "$DIR/$name" "$base/$name"
+          fi
+          expected="$(curl -fsSL --retry 3 "$base/$name.sha256sum" | cut -d' ' -f1)"
+          echo "$expected  $DIR/$name" | shasum -a 256 -c -
+          sudo installer -pkg "$DIR/$name" -target /
+        done
+        prefix=/Library/Frameworks/GStreamer.framework/Versions/1.0
+        echo "GSTREAMER_PREFIX=$prefix" >> "$GITHUB_ENV"
+        echo "PKG_CONFIG_PATH=$prefix/lib/pkgconfig" >> "$GITHUB_ENV"
+        # pkg-config only; no GStreamer from Homebrew.
+        brew install pkgconf
+
+    - name: GStreamer (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $version = "1.26.7"
+        $base = "https://gstreamer.freedesktop.org/data/pkg/windows/$version/msvc"
+        foreach ($name in "gstreamer-1.0-msvc-x86_64-$version.msi", "gstreamer-1.0-devel-msvc-x86_64-$version.msi") {
+          Invoke-WebRequest "$base/$name" -OutFile "$env:RUNNER_TEMP\$name"
+          $install = Start-Process msiexec -Wait -PassThru -ArgumentList "/i `"$env:RUNNER_TEMP\$name`" /qn ADDLOCAL=ALL INSTALLDIR=C:\gstreamer"
+          if ($install.ExitCode -ne 0) { throw "msiexec $name exited with $($install.ExitCode)" }
+        }
+        $root = (Get-ChildItem C:\gstreamer -Recurse -Filter gstreamer-1.0-0.dll | Select-Object -First 1).Directory.Parent.FullName
+        if (-not $root) { throw "GStreamer did not install under C:\gstreamer" }
+        Write-Host "GStreamer root: $root"
+        "GSTREAMER_ROOT=$root" >> $env:GITHUB_ENV
+        "PKG_CONFIG_PATH=$root\lib\pkgconfig" >> $env:GITHUB_ENV
+        "$root\bin" >> $env:GITHUB_PATH
+        # Strawberry Perl's pkg-config is on the runner's PATH; name ours.
+        $pkgconfig = "$root\bin\pkg-config.exe"
+        if (-not (Test-Path $pkgconfig)) {
+          choco install pkgconfiglite --no-progress -y
+          $pkgconfig = "C:\ProgramData\chocolatey\bin\pkg-config.exe"
+        }
+        "PKG_CONFIG=$pkgconfig" >> $env:GITHUB_ENV

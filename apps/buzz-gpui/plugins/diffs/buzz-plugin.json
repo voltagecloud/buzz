@@ -1,0 +1,6 @@
+{
+  "id": "buzz.diffs",
+  "name": "Diff viewer",
+  "description": "Shows code diff messages as a diff, with an expanded unified or split view.",
+  "command": ["node", "--enable-source-maps", "dist/plugin.mjs"]
+}

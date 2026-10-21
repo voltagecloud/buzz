@@ -1,0 +1,7 @@
+{
+  "id": "com.example.hello",
+  "name": "Hello",
+  "description": "A sample page and link panel, written in plain Python.",
+  "command": ["python3", "plugin.py"],
+  "permissions": ["send-messages"]
+}

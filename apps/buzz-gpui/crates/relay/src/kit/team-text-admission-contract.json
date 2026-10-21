@@ -1,0 +1,428 @@
+[
+  {
+    "name": "smallest live head",
+    "accepted": true,
+    "record": {
+      "version": 1,
+      "community": "https://relay.test",
+      "deleted": false,
+      "value": {
+        "type": "team-text",
+        "id": "crew",
+        "owner": "OWNER",
+        "manifest": {
+          "version": 1,
+          "owner": "OWNER",
+          "revision": "11111111-1111-4111-8111-111111111111",
+          "digest": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "bytes": 3,
+          "chunks": 1
+        }
+      }
+    },
+    "tags": [
+      ["d", "buzz-team-text-v1:https%3A%2F%2Frelay.test:OWNER:crew"],
+      ["t", "buzz-team-text-v1"]
+    ]
+  },
+  {
+    "name": "largest live head",
+    "accepted": true,
+    "record": {
+      "version": 1,
+      "community": "https://relay.test",
+      "deleted": false,
+      "value": {
+        "type": "team-text",
+        "id": "crew",
+        "owner": "OWNER",
+        "manifest": {
+          "version": 1,
+          "owner": "OWNER",
+          "revision": "11111111-1111-4111-8111-111111111111",
+          "digest": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "bytes": 131075,
+          "chunks": 9
+        }
+      }
+    },
+    "tags": [
+      ["d", "buzz-team-text-v1:https%3A%2F%2Frelay.test:OWNER:crew"],
+      ["t", "buzz-team-text-v1"]
+    ]
+  },
+  {
+    "name": "tombstone",
+    "accepted": true,
+    "record": {
+      "version": 1,
+      "community": "https://relay.test",
+      "deleted": true,
+      "value": {
+        "type": "team-text",
+        "id": "crew",
+        "owner": "OWNER",
+        "manifest": null
+      }
+    },
+    "tags": [
+      ["d", "buzz-team-text-v1:https%3A%2F%2Frelay.test:OWNER:crew"],
+      ["t", "buzz-team-text-v1"]
+    ]
+  },
+  {
+    "name": "client id of 128 UTF-8 bytes",
+    "accepted": true,
+    "record": {
+      "version": 1,
+      "community": "https://relay.test",
+      "deleted": false,
+      "value": {
+        "type": "team-text",
+        "id": "crew",
+        "owner": "OWNER",
+        "manifest": {
+          "version": 1,
+          "owner": "OWNER",
+          "revision": "11111111-1111-4111-8111-111111111111",
+          "digest": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "bytes": 3,
+          "chunks": 1
+        }
+      }
+    },
+    "tags": [
+      ["d", "buzz-team-text-v1:https%3A%2F%2Frelay.test:OWNER:crew"],
+      ["t", "buzz-team-text-v1"],
+      [
+        "client-id",
+        "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé"
+      ]
+    ]
+  },
+  {
+    "name": "manifest below the prefix",
+    "accepted": false,
+    "record": {
+      "version": 1,
+      "community": "https://relay.test",
+      "deleted": false,
+      "value": {
+        "type": "team-text",
+        "id": "crew",
+        "owner": "OWNER",
+        "manifest": {
+          "version": 1,
+          "owner": "OWNER",
+          "revision": "11111111-1111-4111-8111-111111111111",
+          "digest": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "bytes": 2,
+          "chunks": 1
+        }
+      }
+    },
+    "tags": [
+      ["d", "buzz-team-text-v1:https%3A%2F%2Frelay.test:OWNER:crew"],
+      ["t", "buzz-team-text-v1"]
+    ]
+  },
+  {
+    "name": "manifest one byte over the cap",
+    "accepted": false,
+    "record": {
+      "version": 1,
+      "community": "https://relay.test",
+      "deleted": false,
+      "value": {
+        "type": "team-text",
+        "id": "crew",
+        "owner": "OWNER",
+        "manifest": {
+          "version": 1,
+          "owner": "OWNER",
+          "revision": "11111111-1111-4111-8111-111111111111",
+          "digest": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "bytes": 131076,
+          "chunks": 9
+        }
+      }
+    },
+    "tags": [
+      ["d", "buzz-team-text-v1:https%3A%2F%2Frelay.test:OWNER:crew"],
+      ["t", "buzz-team-text-v1"]
+    ]
+  },
+  {
+    "name": "extra manifest field",
+    "accepted": false,
+    "record": {
+      "version": 1,
+      "community": "https://relay.test",
+      "deleted": false,
+      "value": {
+        "type": "team-text",
+        "id": "crew",
+        "owner": "OWNER",
+        "manifest": {
+          "version": 1,
+          "owner": "OWNER",
+          "revision": "11111111-1111-4111-8111-111111111111",
+          "digest": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "bytes": 3,
+          "chunks": 1,
+          "extra": 1
+        }
+      }
+    },
+    "tags": [
+      ["d", "buzz-team-text-v1:https%3A%2F%2Frelay.test:OWNER:crew"],
+      ["t", "buzz-team-text-v1"]
+    ]
+  },
+  {
+    "name": "inline text field",
+    "accepted": false,
+    "record": {
+      "version": 1,
+      "community": "https://relay.test",
+      "deleted": false,
+      "value": {
+        "type": "team-text",
+        "id": "crew",
+        "owner": "OWNER",
+        "manifest": {
+          "version": 1,
+          "owner": "OWNER",
+          "revision": "11111111-1111-4111-8111-111111111111",
+          "digest": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "bytes": 3,
+          "chunks": 1
+        },
+        "text": "inline"
+      }
+    },
+    "tags": [
+      ["d", "buzz-team-text-v1:https%3A%2F%2Frelay.test:OWNER:crew"],
+      ["t", "buzz-team-text-v1"]
+    ]
+  },
+  {
+    "name": "manifest owner mismatch",
+    "accepted": false,
+    "record": {
+      "version": 1,
+      "community": "https://relay.test",
+      "deleted": false,
+      "value": {
+        "type": "team-text",
+        "id": "crew",
+        "owner": "OWNER",
+        "manifest": {
+          "version": 1,
+          "owner": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+          "revision": "11111111-1111-4111-8111-111111111111",
+          "digest": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "bytes": 3,
+          "chunks": 1
+        }
+      }
+    },
+    "tags": [
+      ["d", "buzz-team-text-v1:https%3A%2F%2Frelay.test:OWNER:crew"],
+      ["t", "buzz-team-text-v1"]
+    ]
+  },
+  {
+    "name": "tombstone with a manifest",
+    "accepted": false,
+    "record": {
+      "version": 1,
+      "community": "https://relay.test",
+      "deleted": true,
+      "value": {
+        "type": "team-text",
+        "id": "crew",
+        "owner": "OWNER",
+        "manifest": {
+          "version": 1,
+          "owner": "OWNER",
+          "revision": "11111111-1111-4111-8111-111111111111",
+          "digest": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "bytes": 3,
+          "chunks": 1
+        }
+      }
+    },
+    "tags": [
+      ["d", "buzz-team-text-v1:https%3A%2F%2Frelay.test:OWNER:crew"],
+      ["t", "buzz-team-text-v1"]
+    ]
+  },
+  {
+    "name": "client id over 128 UTF-8 bytes",
+    "accepted": false,
+    "record": {
+      "version": 1,
+      "community": "https://relay.test",
+      "deleted": false,
+      "value": {
+        "type": "team-text",
+        "id": "crew",
+        "owner": "OWNER",
+        "manifest": {
+          "version": 1,
+          "owner": "OWNER",
+          "revision": "11111111-1111-4111-8111-111111111111",
+          "digest": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "bytes": 3,
+          "chunks": 1
+        }
+      }
+    },
+    "tags": [
+      ["d", "buzz-team-text-v1:https%3A%2F%2Frelay.test:OWNER:crew"],
+      ["t", "buzz-team-text-v1"],
+      [
+        "client-id",
+        "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé"
+      ]
+    ]
+  },
+  {
+    "name": "client id of 129 ASCII bytes",
+    "accepted": false,
+    "record": {
+      "version": 1,
+      "community": "https://relay.test",
+      "deleted": false,
+      "value": {
+        "type": "team-text",
+        "id": "crew",
+        "owner": "OWNER",
+        "manifest": {
+          "version": 1,
+          "owner": "OWNER",
+          "revision": "11111111-1111-4111-8111-111111111111",
+          "digest": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "bytes": 3,
+          "chunks": 1
+        }
+      }
+    },
+    "tags": [
+      ["d", "buzz-team-text-v1:https%3A%2F%2Frelay.test:OWNER:crew"],
+      ["t", "buzz-team-text-v1"],
+      [
+        "client-id",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      ]
+    ]
+  },
+  {
+    "name": "client id with three fields",
+    "accepted": false,
+    "record": {
+      "version": 1,
+      "community": "https://relay.test",
+      "deleted": false,
+      "value": {
+        "type": "team-text",
+        "id": "crew",
+        "owner": "OWNER",
+        "manifest": {
+          "version": 1,
+          "owner": "OWNER",
+          "revision": "11111111-1111-4111-8111-111111111111",
+          "digest": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "bytes": 3,
+          "chunks": 1
+        }
+      }
+    },
+    "tags": [
+      ["d", "buzz-team-text-v1:https%3A%2F%2Frelay.test:OWNER:crew"],
+      ["t", "buzz-team-text-v1"],
+      ["client-id", "a", "b"]
+    ]
+  },
+  {
+    "name": "team-record tag",
+    "accepted": false,
+    "record": {
+      "version": 1,
+      "community": "https://relay.test",
+      "deleted": false,
+      "value": {
+        "type": "team-text",
+        "id": "crew",
+        "owner": "OWNER",
+        "manifest": {
+          "version": 1,
+          "owner": "OWNER",
+          "revision": "11111111-1111-4111-8111-111111111111",
+          "digest": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "bytes": 3,
+          "chunks": 1
+        }
+      }
+    },
+    "tags": [
+      ["d", "buzz-team-text-v1:https%3A%2F%2Frelay.test:OWNER:crew"],
+      ["t", "buzz-channel-kit-v1"]
+    ]
+  },
+  {
+    "name": "two coordinates",
+    "accepted": false,
+    "record": {
+      "version": 1,
+      "community": "https://relay.test",
+      "deleted": false,
+      "value": {
+        "type": "team-text",
+        "id": "crew",
+        "owner": "OWNER",
+        "manifest": {
+          "version": 1,
+          "owner": "OWNER",
+          "revision": "11111111-1111-4111-8111-111111111111",
+          "digest": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "bytes": 3,
+          "chunks": 1
+        }
+      }
+    },
+    "tags": [
+      ["d", "buzz-team-text-v1:https%3A%2F%2Frelay.test:OWNER:crew"],
+      ["d", "buzz-team-text-v1:https%3A%2F%2Frelay.test:OWNER:crew"],
+      ["t", "buzz-team-text-v1"]
+    ]
+  },
+  {
+    "name": "unknown tag",
+    "accepted": false,
+    "record": {
+      "version": 1,
+      "community": "https://relay.test",
+      "deleted": false,
+      "value": {
+        "type": "team-text",
+        "id": "crew",
+        "owner": "OWNER",
+        "manifest": {
+          "version": 1,
+          "owner": "OWNER",
+          "revision": "11111111-1111-4111-8111-111111111111",
+          "digest": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "bytes": 3,
+          "chunks": 1
+        }
+      }
+    },
+    "tags": [
+      ["d", "buzz-team-text-v1:https%3A%2F%2Frelay.test:OWNER:crew"],
+      ["t", "buzz-team-text-v1"],
+      ["p", "abababababababababababababababababababababababababababababababab"]
+    ]
+  }
+]

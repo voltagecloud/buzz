@@ -1,0 +1,7 @@
+{
+  "id": "buzz.feedback",
+  "name": "Feedback",
+  "description": "Send product feedback to this Buzz deployment's private inbox.",
+  "command": ["node", "--enable-source-maps", "dist/plugin.mjs"],
+  "permissions": ["send-messages"]
+}

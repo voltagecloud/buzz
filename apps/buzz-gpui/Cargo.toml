@@ -1,0 +1,32 @@
+[workspace]
+members = ["crates/*"]
+# Vendored crates are patched in, not developed here.
+exclude = ["third_party"]
+default-members = ["crates/app"]
+resolver = "3"
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+anyhow = "1"
+# buzz-app fork, branch `installed-runtime-tools`: the agent controller can
+# use tools installed on PATH instead of a packaged bundle, and buzz-desktop
+# holds the Tauri-free native services that src-tauri and this port share.
+buzz-agent-controller = { git = "https://github.com/benthecarman/buzz-app", rev = "219fea82f81de49d370cd4cd6930ad4a35eb49c0" }
+buzz-credential-store = { git = "https://github.com/benthecarman/buzz-app", rev = "219fea82f81de49d370cd4cd6930ad4a35eb49c0" }
+buzz-desktop = { git = "https://github.com/benthecarman/buzz-app", rev = "219fea82f81de49d370cd4cd6930ad4a35eb49c0" }
+# The plugin enable switches, saved as buzz-app saves them.
+buzzodz-plugins = { git = "https://github.com/benthecarman/buzz-app", rev = "219fea82f81de49d370cd4cd6930ad4a35eb49c0" }
+# NIP-AB, the protocol Pair mobile speaks. It uses nostr 0.44.
+buzz-pairing = { git = "https://github.com/benthecarman/buzz-app", rev = "219fea82f81de49d370cd4cd6930ad4a35eb49c0" }
+gpui-kit = "=0.7.1"
+
+# GPUI's Linux platform and gpui-kit's base crate with this app's patches;
+# third_party/README.md lists them.
+[patch.crates-io]
+gpui-base = { path = "third_party/gpui-base" }
+gpui-pre-linux = { path = "third_party/gpui-pre-linux" }

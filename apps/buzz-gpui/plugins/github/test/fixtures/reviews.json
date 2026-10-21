@@ -1,0 +1,332 @@
+[
+ {
+  "id": 5418301079,
+  "body": "\n### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `f775fb3a1d`\n    \n\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with 👍.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+  "body_html": "<h3 dir=\"auto\">💡 Codex Review</h3>\n<p dir=\"auto\">Here are some automated review suggestions for this pull request.</p>\n<p dir=\"auto\"><strong>Reviewed commit:</strong> <code class=\"notranslate\">f775fb3a1d</code></p>\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br>\n<p dir=\"auto\"><a href=\"https://chatgpt.com/codex/cloud/settings/general\" rel=\"nofollow\">Your team has set up Codex to review pull requests in this repo</a>. Reviews are triggered when you</p>\n<ul dir=\"auto\">\n<li>Open a pull request for review</li>\n<li>Mark a draft as ready</li>\n<li>Comment \"<a class=\"user-mention notranslate\" data-hovercard-type=\"user\" data-hovercard-url=\"/users/codex/hovercard\" data-octo-click=\"hovercard-link-click\" data-octo-dimensions=\"link_type:self\" href=\"https://github.com/codex\">@codex</a> review\".</li>\n</ul>\n<p dir=\"auto\">If Codex has suggestions, it will comment; otherwise it will react with 👍.</p>\n<p dir=\"auto\">Codex can also answer questions or update the PR. Try commenting \"<a class=\"user-mention notranslate\" data-hovercard-type=\"user\" data-hovercard-url=\"/users/codex/hovercard\" data-octo-click=\"hovercard-link-click\" data-octo-dimensions=\"link_type:self\" href=\"https://github.com/codex\">@codex</a> address that feedback\".</p>\n</details>",
+  "submitted_at": "2026-10-05T17:28:35Z",
+  "state": "COMMENTED",
+  "user": {
+   "login": "chatgpt-codex-connector[bot]",
+   "avatar_url": "https://avatars.githubusercontent.com/in/1144995?v=4"
+  }
+ },
+ {
+  "id": 5418428006,
+  "body": "Changes needed: update the imported code-entry authorization, preserve an uncertain transfer outcome, and replace the public QR screenshot; details inline and below.\n\n- **[P2] Replace the QR image with portable fixture data.** `docs/images/pairing/qr.png`, also embedded in this public PR description, decodes to an internal deployment address. Disposable identity data does not sanitize the encoded destination. Regenerate it with a generic example relay and update the attachment; do not merely remove visible labels. Both attached images were inspected, and their bytes match the pinned files. No claim is made that the pictured session remains live.\n- The existing [hidden-window auto-restart finding](https://github.com/block/buzz-app/pull/595#discussion_r4186847799) also remains valid at this head: native cancellation is immediately eligible for renderer renewal. Keep close-triggered cancellation terminal until the pairing view is deliberately reopened.\n\nStar Lord automated source review via Wes’s account. Head `99c0323b02c04d05716e99b22592f6ba78d5191b`; base `365061c45b726502a6bdc835a24827c6002a83f0`. Source and publication-material inspection only; no tests, app launches, pairing sessions, or security probes. Updated-mobile/native end-to-end behavior remains unverified. This is a non-blocking COMMENT review, not approval. \n",
+  "body_html": "<p dir=\"auto\">Changes needed: update the imported code-entry authorization, preserve an uncertain transfer outcome, and replace the public QR screenshot; details inline and below.</p>\n<ul dir=\"auto\">\n<li><strong>[P2] Replace the QR image with portable fixture data.</strong> <code class=\"notranslate\">docs/images/pairing/qr.png</code>, also embedded in this public PR description, decodes to an internal deployment address. Disposable identity data does not sanitize the encoded destination. Regenerate it with a generic example relay and update the attachment; do not merely remove visible labels. Both attached images were inspected, and their bytes match the pinned files. No claim is made that the pictured session remains live.</li>\n<li>The existing <a href=\"https://github.com/block/buzz-app/pull/595#discussion_r4186847799\" data-hovercard-type=\"pull_request\" data-hovercard-url=\"/block/buzz-app/pull/595/hovercard\">hidden-window auto-restart finding</a> also remains valid at this head: native cancellation is immediately eligible for renderer renewal. Keep close-triggered cancellation terminal until the pairing view is deliberately reopened.</li>\n</ul>\n<p dir=\"auto\">Star Lord automated source review via Wes’s account. Head <code class=\"notranslate\">99c0323b02c04d05716e99b22592f6ba78d5191b</code>; base <code class=\"notranslate\">365061c45b726502a6bdc835a24827c6002a83f0</code>. Source and publication-material inspection only; no tests, app launches, pairing sessions, or security probes. Updated-mobile/native end-to-end behavior remains unverified. This is a non-blocking COMMENT review, not approval.</p>",
+  "submitted_at": "2026-10-05T17:40:43Z",
+  "state": "COMMENTED",
+  "user": {
+   "login": "wesbillman",
+   "avatar_url": "https://avatars.githubusercontent.com/u/51647?u=5913181b8712ee5205ea7df419f1df1f29e8d0b4&v=4"
+  }
+ },
+ {
+  "id": 5418584235,
+  "body": "",
+  "body_html": "",
+  "submitted_at": "2026-10-05T17:55:47Z",
+  "state": "COMMENTED",
+  "user": {
+   "login": "klopez4212",
+   "avatar_url": "https://avatars.githubusercontent.com/u/7863796?u=24df203a304d0fecbb2524d0b99609b91a08f53e&v=4"
+  }
+ },
+ {
+  "id": 5418584575,
+  "body": "",
+  "body_html": "",
+  "submitted_at": "2026-10-05T17:55:49Z",
+  "state": "COMMENTED",
+  "user": {
+   "login": "klopez4212",
+   "avatar_url": "https://avatars.githubusercontent.com/u/7863796?u=24df203a304d0fecbb2524d0b99609b91a08f53e&v=4"
+  }
+ },
+ {
+  "id": 5418609993,
+  "body": "",
+  "body_html": "",
+  "submitted_at": "2026-10-05T17:58:12Z",
+  "state": "COMMENTED",
+  "user": {
+   "login": "kalvinnchau",
+   "avatar_url": "https://avatars.githubusercontent.com/u/3486716?v=4"
+  }
+ },
+ {
+  "id": 5418610357,
+  "body": "",
+  "body_html": "",
+  "submitted_at": "2026-10-05T17:58:14Z",
+  "state": "COMMENTED",
+  "user": {
+   "login": "kalvinnchau",
+   "avatar_url": "https://avatars.githubusercontent.com/u/3486716?v=4"
+  }
+ },
+ {
+  "id": 5418610633,
+  "body": "",
+  "body_html": "",
+  "submitted_at": "2026-10-05T17:58:15Z",
+  "state": "COMMENTED",
+  "user": {
+   "login": "kalvinnchau",
+   "avatar_url": "https://avatars.githubusercontent.com/u/3486716?v=4"
+  }
+ },
+ {
+  "id": 5418610993,
+  "body": "",
+  "body_html": "",
+  "submitted_at": "2026-10-05T17:58:17Z",
+  "state": "COMMENTED",
+  "user": {
+   "login": "kalvinnchau",
+   "avatar_url": "https://avatars.githubusercontent.com/u/3486716?v=4"
+  }
+ },
+ {
+  "id": 5418611291,
+  "body": "",
+  "body_html": "",
+  "submitted_at": "2026-10-05T17:58:19Z",
+  "state": "COMMENTED",
+  "user": {
+   "login": "kalvinnchau",
+   "avatar_url": "https://avatars.githubusercontent.com/u/3486716?v=4"
+  }
+ },
+ {
+  "id": 5418671207,
+  "body": "\n### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `72ec901c16`\n    \n\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with 👍.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+  "body_html": "<h3 dir=\"auto\">💡 Codex Review</h3>\n<p dir=\"auto\">Here are some automated review suggestions for this pull request.</p>\n<p dir=\"auto\"><strong>Reviewed commit:</strong> <code class=\"notranslate\">72ec901c16</code></p>\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br>\n<p dir=\"auto\"><a href=\"https://chatgpt.com/codex/cloud/settings/general\" rel=\"nofollow\">Your team has set up Codex to review pull requests in this repo</a>. Reviews are triggered when you</p>\n<ul dir=\"auto\">\n<li>Open a pull request for review</li>\n<li>Mark a draft as ready</li>\n<li>Comment \"<a class=\"user-mention notranslate\" data-hovercard-type=\"user\" data-hovercard-url=\"/users/codex/hovercard\" data-octo-click=\"hovercard-link-click\" data-octo-dimensions=\"link_type:self\" href=\"https://github.com/codex\">@codex</a> review\".</li>\n</ul>\n<p dir=\"auto\">If Codex has suggestions, it will comment; otherwise it will react with 👍.</p>\n<p dir=\"auto\">Codex can also answer questions or update the PR. Try commenting \"<a class=\"user-mention notranslate\" data-hovercard-type=\"user\" data-hovercard-url=\"/users/codex/hovercard\" data-octo-click=\"hovercard-link-click\" data-octo-dimensions=\"link_type:self\" href=\"https://github.com/codex\">@codex</a> address that feedback\".</p>\n</details>",
+  "submitted_at": "2026-10-05T18:03:41Z",
+  "state": "COMMENTED",
+  "user": {
+   "login": "chatgpt-codex-connector[bot]",
+   "avatar_url": "https://avatars.githubusercontent.com/in/1144995?v=4"
+  }
+ },
+ {
+  "id": 5418774401,
+  "body": "Changes still needed at this head; I revalidated these existing findings rather than opening duplicate inline threads:\n\n- **P2 — Preserve uncertainty after post-send transport failure.** The new `payload_sent` flag only affects `expire`; `Ok(Err(message))` still becomes an ordinary error. Route ambiguous post-publication I/O failures to **Check your phone**, retaining explicit phone import rejection as an error, and cover both outcomes. [Existing discussion](https://github.com/block/buzz-app/pull/595#discussion_r4187164425).\n- **P2 — Keep window-close cancellation terminal.** The macOS hide path still leaves the component mounted, and `cancelled` still triggers automatic renewal. [Existing discussion and repair](https://github.com/block/buzz-app/pull/595#discussion_r4186847799).\n- **P2 — Replace the public QR fixture.** Both PR attachments match the pinned files; the QR image is byte-identical to the previously reviewed image, so the encoded internal deployment destination remains. Regenerate it with a portable fixture relay. [Prior finding](https://github.com/block/buzz-app/pull/595#pullrequestreview-5418428006).\n\nThe independent desktop-code/five-attempt guard and timeout-specific uncertainty path address the corresponding earlier defects in source.\n\nStar Lord’s automated source review via Wes’s account (`wesbillman`). Head: `72ec901c162dbebff3027ec6d1e130772cf3e18c`; base: `c8e7abb0eeeb7c5231a2c767edc28bef86c2a4ef`. No code, tests or app executed. Native/updated-mobile interoperability and success/error/retry focus remain unverified; the one CI snapshot still had browser jobs running.",
+  "body_html": "<p dir=\"auto\">Changes still needed at this head; I revalidated these existing findings rather than opening duplicate inline threads:</p>\n<ul dir=\"auto\">\n<li><strong>P2 — Preserve uncertainty after post-send transport failure.</strong> The new <code class=\"notranslate\">payload_sent</code> flag only affects <code class=\"notranslate\">expire</code>; <code class=\"notranslate\">Ok(Err(message))</code> still becomes an ordinary error. Route ambiguous post-publication I/O failures to <strong>Check your phone</strong>, retaining explicit phone import rejection as an error, and cover both outcomes. <a href=\"https://github.com/block/buzz-app/pull/595#discussion_r4187164425\" data-hovercard-type=\"pull_request\" data-hovercard-url=\"/block/buzz-app/pull/595/hovercard\">Existing discussion</a>.</li>\n<li><strong>P2 — Keep window-close cancellation terminal.</strong> The macOS hide path still leaves the component mounted, and <code class=\"notranslate\">cancelled</code> still triggers automatic renewal. <a href=\"https://github.com/block/buzz-app/pull/595#discussion_r4186847799\" data-hovercard-type=\"pull_request\" data-hovercard-url=\"/block/buzz-app/pull/595/hovercard\">Existing discussion and repair</a>.</li>\n<li><strong>P2 — Replace the public QR fixture.</strong> Both PR attachments match the pinned files; the QR image is byte-identical to the previously reviewed image, so the encoded internal deployment destination remains. Regenerate it with a portable fixture relay. <a href=\"https://github.com/block/buzz-app/pull/595#pullrequestreview-5418428006\" data-hovercard-type=\"pull_request\" data-hovercard-url=\"/block/buzz-app/pull/595/hovercard\">Prior finding</a>.</li>\n</ul>\n<p dir=\"auto\">The independent desktop-code/five-attempt guard and timeout-specific uncertainty path address the corresponding earlier defects in source.</p>\n<p dir=\"auto\">Star Lord’s automated source review via Wes’s account (<code class=\"notranslate\">wesbillman</code>). Head: <code class=\"notranslate\">72ec901c162dbebff3027ec6d1e130772cf3e18c</code>; base: <code class=\"notranslate\">c8e7abb0eeeb7c5231a2c767edc28bef86c2a4ef</code>. No code, tests or app executed. Native/updated-mobile interoperability and success/error/retry focus remain unverified; the one CI snapshot still had browser jobs running.</p>",
+  "submitted_at": "2026-10-05T18:13:37Z",
+  "state": "COMMENTED",
+  "user": {
+   "login": "wesbillman",
+   "avatar_url": "https://avatars.githubusercontent.com/u/51647?u=5913181b8712ee5205ea7df419f1df1f29e8d0b4&v=4"
+  }
+ },
+ {
+  "id": 5418932164,
+  "body": "",
+  "body_html": "",
+  "submitted_at": "2026-10-05T18:29:02Z",
+  "state": "COMMENTED",
+  "user": {
+   "login": "kalvinnchau",
+   "avatar_url": "https://avatars.githubusercontent.com/u/3486716?v=4"
+  }
+ },
+ {
+  "id": 5418932182,
+  "body": "",
+  "body_html": "",
+  "submitted_at": "2026-10-05T18:29:02Z",
+  "state": "COMMENTED",
+  "user": {
+   "login": "kalvinnchau",
+   "avatar_url": "https://avatars.githubusercontent.com/u/3486716?v=4"
+  }
+ },
+ {
+  "id": 5419727793,
+  "body": "",
+  "body_html": "",
+  "submitted_at": "2026-10-05T19:48:09Z",
+  "state": "COMMENTED",
+  "user": {
+   "login": "klopez4212",
+   "avatar_url": "https://avatars.githubusercontent.com/u/7863796?u=24df203a304d0fecbb2524d0b99609b91a08f53e&v=4"
+  }
+ },
+ {
+  "id": 5419727997,
+  "body": "",
+  "body_html": "",
+  "submitted_at": "2026-10-05T19:48:10Z",
+  "state": "COMMENTED",
+  "user": {
+   "login": "klopez4212",
+   "avatar_url": "https://avatars.githubusercontent.com/u/7863796?u=24df203a304d0fecbb2524d0b99609b91a08f53e&v=4"
+  }
+ },
+ {
+  "id": 5419775141,
+  "body": "\n### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `7cc00375e2`\n    \n\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with 👍.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+  "body_html": "<h3 dir=\"auto\">💡 Codex Review</h3>\n<p dir=\"auto\">Here are some automated review suggestions for this pull request.</p>\n<p dir=\"auto\"><strong>Reviewed commit:</strong> <code class=\"notranslate\">7cc00375e2</code></p>\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br>\n<p dir=\"auto\"><a href=\"https://chatgpt.com/codex/cloud/settings/general\" rel=\"nofollow\">Your team has set up Codex to review pull requests in this repo</a>. Reviews are triggered when you</p>\n<ul dir=\"auto\">\n<li>Open a pull request for review</li>\n<li>Mark a draft as ready</li>\n<li>Comment \"<a class=\"user-mention notranslate\" data-hovercard-type=\"user\" data-hovercard-url=\"/users/codex/hovercard\" data-octo-click=\"hovercard-link-click\" data-octo-dimensions=\"link_type:self\" href=\"https://github.com/codex\">@codex</a> review\".</li>\n</ul>\n<p dir=\"auto\">If Codex has suggestions, it will comment; otherwise it will react with 👍.</p>\n<p dir=\"auto\">Codex can also answer questions or update the PR. Try commenting \"<a class=\"user-mention notranslate\" data-hovercard-type=\"user\" data-hovercard-url=\"/users/codex/hovercard\" data-octo-click=\"hovercard-link-click\" data-octo-dimensions=\"link_type:self\" href=\"https://github.com/codex\">@codex</a> address that feedback\".</p>\n</details>",
+  "submitted_at": "2026-10-05T19:52:51Z",
+  "state": "COMMENTED",
+  "user": {
+   "login": "chatgpt-codex-connector[bot]",
+   "avatar_url": "https://avatars.githubusercontent.com/in/1144995?v=4"
+  }
+ },
+ {
+  "id": 5419846439,
+  "body": "Changes still needed in the existing follow-ups; no duplicate inline threads:\n\n- **P2 — [Legacy denial](https://github.com/block/buzz-app/pull/595#discussion_r4186847790):** provide a mismatch action that sends `user_denied` before disposing the session; “Codes match” remains the only action.\n- **P2 — [Import acknowledgement](https://github.com/block/buzz-app/pull/595#discussion_r4187112720):** coordinate the mobile fix so success follows durable import and the generation check. Rechecked `block/buzz@1e67395fd19a8b4de0cecca97cd1b36842fe8b77`: `pairing_provider.dart:750` still sends success before persistence at `:763–764`, allowing false desktop success.\n- **P3 — [Connection timeout](https://github.com/block/buzz-app/pull/595#discussion_r4187112446):** bound connection establishment and surface **Try again**; a stalled connection still becomes expiry and automatically renews.\n\nThe post-publication uncertainty and terminal-cancellation fixes address my previous findings in source. Both inspected attachments match the pinned files, and the QR now encodes the portable example relay.\n\nStar Lord’s automated source review via Wes’s account (`wesbillman`). Head `7cc00375e2bb3fc4bdc15b654bde496c067f2253`; base `c8e7abb0eeeb7c5231a2c767edc28bef86c2a4ef`. No tests or app executed; live pairing, macOS hide/reopen and keyboard-focus transitions remain unverified. The single CI snapshot was pending. Non-blocking COMMENT, not approval.\n",
+  "body_html": "<p dir=\"auto\">Changes still needed in the existing follow-ups; no duplicate inline threads:</p>\n<ul dir=\"auto\">\n<li><strong>P2 — <a href=\"https://github.com/block/buzz-app/pull/595#discussion_r4186847790\" data-hovercard-type=\"pull_request\" data-hovercard-url=\"/block/buzz-app/pull/595/hovercard\">Legacy denial</a>:</strong> provide a mismatch action that sends <code class=\"notranslate\">user_denied</code> before disposing the session; “Codes match” remains the only action.</li>\n<li><strong>P2 — <a href=\"https://github.com/block/buzz-app/pull/595#discussion_r4187112720\" data-hovercard-type=\"pull_request\" data-hovercard-url=\"/block/buzz-app/pull/595/hovercard\">Import acknowledgement</a>:</strong> coordinate the mobile fix so success follows durable import and the generation check. Rechecked <code class=\"notranslate\">block/buzz@1e67395fd19a8b4de0cecca97cd1b36842fe8b77</code>: <code class=\"notranslate\">pairing_provider.dart:750</code> still sends success before persistence at <code class=\"notranslate\">:763–764</code>, allowing false desktop success.</li>\n<li><strong>P3 — <a href=\"https://github.com/block/buzz-app/pull/595#discussion_r4187112446\" data-hovercard-type=\"pull_request\" data-hovercard-url=\"/block/buzz-app/pull/595/hovercard\">Connection timeout</a>:</strong> bound connection establishment and surface <strong>Try again</strong>; a stalled connection still becomes expiry and automatically renews.</li>\n</ul>\n<p dir=\"auto\">The post-publication uncertainty and terminal-cancellation fixes address my previous findings in source. Both inspected attachments match the pinned files, and the QR now encodes the portable example relay.</p>\n<p dir=\"auto\">Star Lord’s automated source review via Wes’s account (<code class=\"notranslate\">wesbillman</code>). Head <code class=\"notranslate\">7cc00375e2bb3fc4bdc15b654bde496c067f2253</code>; base <code class=\"notranslate\">c8e7abb0eeeb7c5231a2c767edc28bef86c2a4ef</code>. No tests or app executed; live pairing, macOS hide/reopen and keyboard-focus transitions remain unverified. The single CI snapshot was pending. Non-blocking COMMENT, not approval.</p>",
+  "submitted_at": "2026-10-05T20:00:34Z",
+  "state": "COMMENTED",
+  "user": {
+   "login": "wesbillman",
+   "avatar_url": "https://avatars.githubusercontent.com/u/51647?u=5913181b8712ee5205ea7df419f1df1f29e8d0b4&v=4"
+  }
+ },
+ {
+  "id": 5432670225,
+  "body": "",
+  "body_html": "",
+  "submitted_at": "2026-10-06T18:05:17Z",
+  "state": "COMMENTED",
+  "user": {
+   "login": "kalvinnchau",
+   "avatar_url": "https://avatars.githubusercontent.com/u/3486716?v=4"
+  }
+ },
+ {
+  "id": 5432670522,
+  "body": "",
+  "body_html": "",
+  "submitted_at": "2026-10-06T18:05:19Z",
+  "state": "COMMENTED",
+  "user": {
+   "login": "kalvinnchau",
+   "avatar_url": "https://avatars.githubusercontent.com/u/3486716?v=4"
+  }
+ },
+ {
+  "id": 5432670811,
+  "body": "",
+  "body_html": "",
+  "submitted_at": "2026-10-06T18:05:21Z",
+  "state": "COMMENTED",
+  "user": {
+   "login": "kalvinnchau",
+   "avatar_url": "https://avatars.githubusercontent.com/u/3486716?v=4"
+  }
+ },
+ {
+  "id": 5432671184,
+  "body": "",
+  "body_html": "",
+  "submitted_at": "2026-10-06T18:05:23Z",
+  "state": "COMMENTED",
+  "user": {
+   "login": "kalvinnchau",
+   "avatar_url": "https://avatars.githubusercontent.com/u/3486716?v=4"
+  }
+ },
+ {
+  "id": 5432671496,
+  "body": "",
+  "body_html": "",
+  "submitted_at": "2026-10-06T18:05:24Z",
+  "state": "COMMENTED",
+  "user": {
+   "login": "kalvinnchau",
+   "avatar_url": "https://avatars.githubusercontent.com/u/3486716?v=4"
+  }
+ },
+ {
+  "id": 5432737162,
+  "body": "One existing change remains; no duplicate inline thread:\n\n- **P2 — [Import acknowledgement](https://github.com/block/buzz-app/pull/595#discussion_r4187112720):** the mobile repair is explicitly deferred, but desktop still says “Phone paired” / “Your account is ready,” and `docs/pairing.md:34–36` implies updating the phone supplies the guarantee. Current [mobile source](https://github.com/block/buzz/blob/c6dd587e2ae3ee7c0abb15a93437edf1ecb52860/mobile/lib/features/pairing/pairing_provider.dart#L749-L780) still acknowledges before persistence; an import failure can therefore follow desktop success. Keeping the mobile repair separate is fine: until it ships, make desktop success/docs describe the transfer and ask users to verify the account on their phone, rather than guarantee durable import.\n\nLegacy denial and bounded connection/setup timeouts now address the other two follow-ups in source.\n\nStar Lord’s automated source review via Wes’s account (`wesbillman`). Head `8a583c54f607d0154357ee35e81c5aa88eb335c1`; base `97155e7cbd1f97ecedfab5ec8f36310f6caf2e89`. Source-only; no tests/app execution. Live updated-mobile pairing and native/keyboard acceptance remain unverified. One CI snapshot: JS/DCO passed; Rust/browser journeys running; Windows skipped. Non-blocking COMMENT, not approval.\n",
+  "body_html": "<p dir=\"auto\">One existing change remains; no duplicate inline thread:</p>\n<ul dir=\"auto\">\n<li><strong>P2 — <a href=\"https://github.com/block/buzz-app/pull/595#discussion_r4187112720\" data-hovercard-type=\"pull_request\" data-hovercard-url=\"/block/buzz-app/pull/595/hovercard\">Import acknowledgement</a>:</strong> the mobile repair is explicitly deferred, but desktop still says “Phone paired” / “Your account is ready,” and <code class=\"notranslate\">docs/pairing.md:34–36</code> implies updating the phone supplies the guarantee. Current <a href=\"https://github.com/block/buzz/blob/c6dd587e2ae3ee7c0abb15a93437edf1ecb52860/mobile/lib/features/pairing/pairing_provider.dart#L749-L780\">mobile source</a> still acknowledges before persistence; an import failure can therefore follow desktop success. Keeping the mobile repair separate is fine: until it ships, make desktop success/docs describe the transfer and ask users to verify the account on their phone, rather than guarantee durable import.</li>\n</ul>\n<p dir=\"auto\">Legacy denial and bounded connection/setup timeouts now address the other two follow-ups in source.</p>\n<p dir=\"auto\">Star Lord’s automated source review via Wes’s account (<code class=\"notranslate\">wesbillman</code>). Head <code class=\"notranslate\">8a583c54f607d0154357ee35e81c5aa88eb335c1</code>; base <code class=\"notranslate\">97155e7cbd1f97ecedfab5ec8f36310f6caf2e89</code>. Source-only; no tests/app execution. Live updated-mobile pairing and native/keyboard acceptance remain unverified. One CI snapshot: JS/DCO passed; Rust/browser journeys running; Windows skipped. Non-blocking COMMENT, not approval.</p>",
+  "submitted_at": "2026-10-06T18:11:28Z",
+  "state": "COMMENTED",
+  "user": {
+   "login": "wesbillman",
+   "avatar_url": "https://avatars.githubusercontent.com/u/51647?u=5913181b8712ee5205ea7df419f1df1f29e8d0b4&v=4"
+  }
+ },
+ {
+  "id": 5432820023,
+  "body": "Carl, an automated reviewer, commenting via Wes’s GitHub account.\n\n**One remaining P2; changes recommended before merge.** Submitted as COMMENT under this repository’s agent-review policy, not approval. Native integration, protocol/security, and renderer review lanes are complete; the actionable finding is inline.\n\nReviewed head `8a583c54f607d0154357ee35e81c5aa88eb335c1` against target `97155e7cbd1f97ecedfab5ec8f36310f6caf2e89` (merge base `d27bed1cb354af03ddb796e17de6c0a8053b9d07`).\n\n- **Validation:** independently reproduced the cancellation ordering using the pinned production client with inert import stubs/fake native state; native outcome loss is source-derived. Verified hosted logs at merge `9391f58118f1ed838349c8759b778de60eabddc5`: 7,984 JS tests, 80 protocol tests + 2 doctests, and the native package’s 295 tests passed (7 ignored). All seven Chromium pairing journeys passed. Browser coverage uses fixture IPC, not real handoff.\n- **Earlier fixes:** independent desktop-code authorization/guess budget, legacy denial, bounded connection/setup, shared visible-QR deadline, terminal cancellation, and post-send transport/timeout uncertainty are present. Both PR images match pinned blobs; locally decoded QR destination is the reserved example relay.\n- **Remaining gates/limits:** repair the inline cancellation defect with native-owner and client/UI regressions, and clear remaining CI. No live phone/Keychain or macOS hide/reopen run by this review. [Author-reported successful live code-entry testing](https://github.com/block/buzz-app/pull/595#issuecomment-6022402244) is useful acceptance evidence, but the separately scoped mobile import-ack repair remains unshipped per the [existing discussion](https://github.com/block/buzz-app/pull/595#discussion_r4198813733); desktop success therefore does not establish durable import on affected phones. The optional security-documentation note is not a request to redesign the agreed phone-entry UX.\n",
+  "body_html": "<p dir=\"auto\">Carl, an automated reviewer, commenting via Wes’s GitHub account.</p>\n<p dir=\"auto\"><strong>One remaining P2; changes recommended before merge.</strong> Submitted as COMMENT under this repository’s agent-review policy, not approval. Native integration, protocol/security, and renderer review lanes are complete; the actionable finding is inline.</p>\n<p dir=\"auto\">Reviewed head <code class=\"notranslate\">8a583c54f607d0154357ee35e81c5aa88eb335c1</code> against target <code class=\"notranslate\">97155e7cbd1f97ecedfab5ec8f36310f6caf2e89</code> (merge base <code class=\"notranslate\">d27bed1cb354af03ddb796e17de6c0a8053b9d07</code>).</p>\n<ul dir=\"auto\">\n<li><strong>Validation:</strong> independently reproduced the cancellation ordering using the pinned production client with inert import stubs/fake native state; native outcome loss is source-derived. Verified hosted logs at merge <code class=\"notranslate\">9391f58118f1ed838349c8759b778de60eabddc5</code>: 7,984 JS tests, 80 protocol tests + 2 doctests, and the native package’s 295 tests passed (7 ignored). All seven Chromium pairing journeys passed. Browser coverage uses fixture IPC, not real handoff.</li>\n<li><strong>Earlier fixes:</strong> independent desktop-code authorization/guess budget, legacy denial, bounded connection/setup, shared visible-QR deadline, terminal cancellation, and post-send transport/timeout uncertainty are present. Both PR images match pinned blobs; locally decoded QR destination is the reserved example relay.</li>\n<li><strong>Remaining gates/limits:</strong> repair the inline cancellation defect with native-owner and client/UI regressions, and clear remaining CI. No live phone/Keychain or macOS hide/reopen run by this review. <a href=\"https://github.com/block/buzz-app/pull/595#issuecomment-6022402244\" data-hovercard-type=\"pull_request\" data-hovercard-url=\"/block/buzz-app/pull/595/hovercard\">Author-reported successful live code-entry testing</a> is useful acceptance evidence, but the separately scoped mobile import-ack repair remains unshipped per the <a href=\"https://github.com/block/buzz-app/pull/595#discussion_r4198813733\" data-hovercard-type=\"pull_request\" data-hovercard-url=\"/block/buzz-app/pull/595/hovercard\">existing discussion</a>; desktop success therefore does not establish durable import on affected phones. The optional security-documentation note is not a request to redesign the agreed phone-entry UX.</li>\n</ul>",
+  "submitted_at": "2026-10-06T18:19:14Z",
+  "state": "COMMENTED",
+  "user": {
+   "login": "wesbillman",
+   "avatar_url": "https://avatars.githubusercontent.com/u/51647?u=5913181b8712ee5205ea7df419f1df1f29e8d0b4&v=4"
+  }
+ },
+ {
+  "id": 5433048379,
+  "body": "",
+  "body_html": "",
+  "submitted_at": "2026-10-06T18:39:41Z",
+  "state": "COMMENTED",
+  "user": {
+   "login": "kalvinnchau",
+   "avatar_url": "https://avatars.githubusercontent.com/u/3486716?v=4"
+  }
+ },
+ {
+  "id": 5433048711,
+  "body": "",
+  "body_html": "",
+  "submitted_at": "2026-10-06T18:39:43Z",
+  "state": "COMMENTED",
+  "user": {
+   "login": "kalvinnchau",
+   "avatar_url": "https://avatars.githubusercontent.com/u/3486716?v=4"
+  }
+ },
+ {
+  "id": 5433232061,
+  "body": "No further changes requested on this follow-up. Native cancellation now preserves and returns the possible-transfer outcome, and the desktop copy/docs ask users to verify sign-in on the phone rather than guarantee durable import; the screen-observer limitation is also documented.\n\nStar Lord’s automated source review via Wes’s account (`wesbillman`): head `0b1f159dbb24adfd12d3f9ca5f7e5a8dd85f6b19`, base `97155e7cbd1f97ecedfab5ec8f36310f6caf2e89`. Source-only—no tests or app execution; hosted CI required passed in one snapshot, Windows was skipped, and live phone/native-window/keyboard-focus behavior remains unverified by this review. This COMMENT is not approval.",
+  "body_html": "<p dir=\"auto\">No further changes requested on this follow-up. Native cancellation now preserves and returns the possible-transfer outcome, and the desktop copy/docs ask users to verify sign-in on the phone rather than guarantee durable import; the screen-observer limitation is also documented.</p>\n<p dir=\"auto\">Star Lord’s automated source review via Wes’s account (<code class=\"notranslate\">wesbillman</code>): head <code class=\"notranslate\">0b1f159dbb24adfd12d3f9ca5f7e5a8dd85f6b19</code>, base <code class=\"notranslate\">97155e7cbd1f97ecedfab5ec8f36310f6caf2e89</code>. Source-only—no tests or app execution; hosted CI required passed in one snapshot, Windows was skipped, and live phone/native-window/keyboard-focus behavior remains unverified by this review. This COMMENT is not approval.</p>",
+  "submitted_at": "2026-10-06T18:56:57Z",
+  "state": "COMMENTED",
+  "user": {
+   "login": "wesbillman",
+   "avatar_url": "https://avatars.githubusercontent.com/u/51647?u=5913181b8712ee5205ea7df419f1df1f29e8d0b4&v=4"
+  }
+ },
+ {
+  "id": 5434998573,
+  "body": "Carl, an automated reviewer, commenting via Wes’s GitHub account.\n\n**One P2 remains; hold approval until the inline relay-lifetime defect is addressed.** All three delegated lanes are complete and reconciled with native lifecycle/integration review. The previous cancellation finding is repaired. The other two inline notes are optional.\n\nReviewed head `156d5d87d9decd9e0544b4495c582c67cf10251b` against base/merge-base `484a793261a070ff27e4683969a40fb6ccf2dbe5`. Pairing source/tests are byte-identical to reviewed `0b1f159d`; incoming integration changes were separately inspected.\n\n[Current-head CI](https://github.com/block/buzz-app/actions/runs/37533458692) is green (21 successful checks, Windows native validation skipped). Eight inert production-client ordering probes passed at `0b1f159d`. The new finding is independently source-verified, not an executed sidecar reproduction; existing browser journeys substitute IPC.\n\nMerge criteria: reconcile the supported relay’s lifetime with QR renewal and cover that boundary, retaining terminal cancellation and post-publication uncertainty. No independent live phone, native hide/reopen, or assistive-technology acceptance was performed. Earlier live code-entry success is author-reported; the separately scoped mobile durable-import fix remains unshipped, so desktop acknowledgement still does not certify durable phone login.",
+  "body_html": "<p dir=\"auto\">Carl, an automated reviewer, commenting via Wes’s GitHub account.</p>\n<p dir=\"auto\"><strong>One P2 remains; hold approval until the inline relay-lifetime defect is addressed.</strong> All three delegated lanes are complete and reconciled with native lifecycle/integration review. The previous cancellation finding is repaired. The other two inline notes are optional.</p>\n<p dir=\"auto\">Reviewed head <code class=\"notranslate\">156d5d87d9decd9e0544b4495c582c67cf10251b</code> against base/merge-base <code class=\"notranslate\">484a793261a070ff27e4683969a40fb6ccf2dbe5</code>. Pairing source/tests are byte-identical to reviewed <code class=\"notranslate\">0b1f159d</code>; incoming integration changes were separately inspected.</p>\n<p dir=\"auto\"><a href=\"https://github.com/block/buzz-app/actions/runs/37533458692\">Current-head CI</a> is green (21 successful checks, Windows native validation skipped). Eight inert production-client ordering probes passed at <code class=\"notranslate\">0b1f159d</code>. The new finding is independently source-verified, not an executed sidecar reproduction; existing browser journeys substitute IPC.</p>\n<p dir=\"auto\">Merge criteria: reconcile the supported relay’s lifetime with QR renewal and cover that boundary, retaining terminal cancellation and post-publication uncertainty. No independent live phone, native hide/reopen, or assistive-technology acceptance was performed. Earlier live code-entry success is author-reported; the separately scoped mobile durable-import fix remains unshipped, so desktop acknowledgement still does not certify durable phone login.</p>",
+  "submitted_at": "2026-10-06T21:56:00Z",
+  "state": "CHANGES_REQUESTED",
+  "user": {
+   "login": "wesbillman",
+   "avatar_url": "https://avatars.githubusercontent.com/u/51647?u=5913181b8712ee5205ea7df419f1df1f29e8d0b4&v=4"
+  }
+ },
+ {
+  "id": 5435062446,
+  "body": "",
+  "body_html": "",
+  "submitted_at": "2026-10-06T22:04:13Z",
+  "state": "APPROVED",
+  "user": {
+   "login": "wesbillman",
+   "avatar_url": "https://avatars.githubusercontent.com/u/51647?u=5913181b8712ee5205ea7df419f1df1f29e8d0b4&v=4"
+  }
+ },
+ {
+  "id": 5435145261,
+  "body": "",
+  "body_html": "",
+  "submitted_at": "2026-10-06T22:15:16Z",
+  "state": "COMMENTED",
+  "user": {
+   "login": "kalvinnchau",
+   "avatar_url": "https://avatars.githubusercontent.com/u/3486716?v=4"
+  }
+ }
+]

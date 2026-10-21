@@ -1,0 +1,9 @@
+{
+  "name": "@buzz/diffs",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@buzz/plugin-sdk": "*",
+    "gitdiff-parser": "0.3.1"
+  }
+}

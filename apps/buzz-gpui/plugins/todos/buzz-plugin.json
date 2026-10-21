@@ -1,0 +1,7 @@
+{
+  "id": "buzz.todos",
+  "name": "Todos",
+  "description": "A channel's todo list, kept in its Canvas.",
+  "command": ["node", "--enable-source-maps", "dist/plugin.mjs"],
+  "permissions": ["send-messages"]
+}

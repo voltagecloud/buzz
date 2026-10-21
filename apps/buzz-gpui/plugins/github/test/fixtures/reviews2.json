@@ -1,0 +1,57 @@
+[
+ {
+  "id": 5435145725,
+  "body": "",
+  "body_html": "",
+  "submitted_at": "2026-10-06T22:15:19Z",
+  "state": "COMMENTED",
+  "user": {
+   "login": "kalvinnchau",
+   "avatar_url": "https://avatars.githubusercontent.com/u/3486716?v=4"
+  }
+ },
+ {
+  "id": 5435146081,
+  "body": "",
+  "body_html": "",
+  "submitted_at": "2026-10-06T22:15:22Z",
+  "state": "COMMENTED",
+  "user": {
+   "login": "kalvinnchau",
+   "avatar_url": "https://avatars.githubusercontent.com/u/3486716?v=4"
+  }
+ },
+ {
+  "id": 5435227012,
+  "body": "Changes needed: refresh the integration lockfile; the current-base merged build fails before compiling the native browser fixture (P2 inline). The pre-connect deadline addresses the prior relay-lifetime finding while preserving uncertain-transfer outcomes; both screenshots match the previously inspected portable fixtures.\n\nStar Lord’s automated source review via Wes’s account. Head `e73ea9148f7ae978c54bd8d3ef48b0f97eb56322`; base `936279f300d97ba2fb7860cb0eaab7bbd2ac91d0`. Source-only: no tests or app execution. Browser journeys were skipped after the fixture failure; Rust was pending and Windows skipped. Live-phone, native-window and keyboard-focus acceptance remain unverified. Non-blocking COMMENT, not approval.",
+  "body_html": "<p dir=\"auto\">Changes needed: refresh the integration lockfile; the current-base merged build fails before compiling the native browser fixture (P2 inline). The pre-connect deadline addresses the prior relay-lifetime finding while preserving uncertain-transfer outcomes; both screenshots match the previously inspected portable fixtures.</p>\n<p dir=\"auto\">Star Lord’s automated source review via Wes’s account. Head <code class=\"notranslate\">e73ea9148f7ae978c54bd8d3ef48b0f97eb56322</code>; base <code class=\"notranslate\">936279f300d97ba2fb7860cb0eaab7bbd2ac91d0</code>. Source-only: no tests or app execution. Browser journeys were skipped after the fixture failure; Rust was pending and Windows skipped. Live-phone, native-window and keyboard-focus acceptance remain unverified. Non-blocking COMMENT, not approval.</p>",
+  "submitted_at": "2026-10-06T22:26:31Z",
+  "state": "COMMENTED",
+  "user": {
+   "login": "wesbillman",
+   "avatar_url": "https://avatars.githubusercontent.com/u/51647?u=5913181b8712ee5205ea7df419f1df1f29e8d0b4&v=4"
+  }
+ },
+ {
+  "id": 5435256184,
+  "body": "",
+  "body_html": "",
+  "submitted_at": "2026-10-06T22:30:41Z",
+  "state": "COMMENTED",
+  "user": {
+   "login": "kalvinnchau",
+   "avatar_url": "https://avatars.githubusercontent.com/u/3486716?v=4"
+  }
+ },
+ {
+  "id": 5435323014,
+  "body": "No further actionable changes requested on this follow-up: the lockfile now disambiguates the plugin manager’s `nostr 0.45.5` dependency, and the [merged-tree locked fixture build](https://github.com/block/buzz-app/actions/runs/37540973486/job/112533618865) succeeds.\n\nStar Lord automated source review via Wes’s account; head `01d9320e3f409dff8a27b4d009df1b2d5388c835`, base `5feaddbfcbc41f93c259610492978eb886c9055c`; COMMENT only, not approval.\n\nNo local tests or app execution; other CI lanes were pending in the inspected snapshot, Windows was skipped, and native/phone pairing and keyboard-focus acceptance remain unverified.\n",
+  "body_html": "<p dir=\"auto\">No further actionable changes requested on this follow-up: the lockfile now disambiguates the plugin manager’s <code class=\"notranslate\">nostr 0.45.5</code> dependency, and the <a href=\"https://github.com/block/buzz-app/actions/runs/37540973486/job/112533618865\">merged-tree locked fixture build</a> succeeds.</p>\n<p dir=\"auto\">Star Lord automated source review via Wes’s account; head <code class=\"notranslate\">01d9320e3f409dff8a27b4d009df1b2d5388c835</code>, base <code class=\"notranslate\">5feaddbfcbc41f93c259610492978eb886c9055c</code>; COMMENT only, not approval.</p>\n<p dir=\"auto\">No local tests or app execution; other CI lanes were pending in the inspected snapshot, Windows was skipped, and native/phone pairing and keyboard-focus acceptance remain unverified.</p>",
+  "submitted_at": "2026-10-06T22:40:13Z",
+  "state": "COMMENTED",
+  "user": {
+   "login": "wesbillman",
+   "avatar_url": "https://avatars.githubusercontent.com/u/51647?u=5913181b8712ee5205ea7df419f1df1f29e8d0b4&v=4"
+  }
+ }
+]

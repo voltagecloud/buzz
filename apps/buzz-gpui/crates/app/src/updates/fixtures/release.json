@@ -1,0 +1,76 @@
+{
+  "url": "https://api.github.com/repos/benthecarman/buzz-gpui/releases/250000001",
+  "html_url": "https://github.com/benthecarman/buzz-gpui/releases/tag/v0.1.1",
+  "id": 250000001,
+  "author": { "login": "github-actions[bot]", "id": 41898282, "type": "Bot" },
+  "tag_name": "v0.1.1",
+  "target_commitish": "master",
+  "name": "v0.1.1",
+  "draft": false,
+  "immutable": false,
+  "prerelease": false,
+  "created_at": "2026-10-11T18:02:11Z",
+  "updated_at": "2026-10-11T18:40:53Z",
+  "published_at": "2026-10-11T18:40:52Z",
+  "assets": [
+    {
+      "url": "https://api.github.com/repos/benthecarman/buzz-gpui/releases/assets/300000001",
+      "id": 300000001,
+      "name": "Buzz-0.1.1-macos-arm64.dmg",
+      "label": "",
+      "content_type": "application/x-apple-diskimage",
+      "state": "uploaded",
+      "size": 31457280,
+      "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000001",
+      "browser_download_url": "https://github.com/benthecarman/buzz-gpui/releases/download/v0.1.1/Buzz-0.1.1-macos-arm64.dmg"
+    },
+    {
+      "url": "https://api.github.com/repos/benthecarman/buzz-gpui/releases/assets/300000002",
+      "id": 300000002,
+      "name": "Buzz-0.1.1-macos-x86_64.dmg",
+      "content_type": "application/x-apple-diskimage",
+      "state": "uploaded",
+      "size": 32505856,
+      "browser_download_url": "https://github.com/benthecarman/buzz-gpui/releases/download/v0.1.1/Buzz-0.1.1-macos-x86_64.dmg"
+    },
+    {
+      "url": "https://api.github.com/repos/benthecarman/buzz-gpui/releases/assets/300000003",
+      "id": 300000003,
+      "name": "Buzz-0.1.1-windows-x86_64.zip",
+      "content_type": "application/zip",
+      "state": "uploaded",
+      "size": 90177536,
+      "browser_download_url": "https://github.com/benthecarman/buzz-gpui/releases/download/v0.1.1/Buzz-0.1.1-windows-x86_64.zip"
+    },
+    {
+      "url": "https://api.github.com/repos/benthecarman/buzz-gpui/releases/assets/300000004",
+      "id": 300000004,
+      "name": "buzz-gpui_0.1.1-1_amd64.deb",
+      "content_type": "application/vnd.debian.binary-package",
+      "state": "uploaded",
+      "size": 24117248,
+      "browser_download_url": "https://github.com/benthecarman/buzz-gpui/releases/download/v0.1.1/buzz-gpui_0.1.1-1_amd64.deb"
+    },
+    {
+      "url": "https://api.github.com/repos/benthecarman/buzz-gpui/releases/assets/300000005",
+      "id": 300000005,
+      "name": "buzz-gpui-dbgsym_0.1.1-1_amd64.ddeb.txt",
+      "content_type": "text/plain",
+      "state": "uploaded",
+      "size": 12,
+      "browser_download_url": "https://github.com/benthecarman/buzz-gpui/releases/download/v0.1.1/buzz-gpui-dbgsym_0.1.1-1_amd64.ddeb.txt"
+    },
+    {
+      "url": "https://api.github.com/repos/benthecarman/buzz-gpui/releases/assets/300000006",
+      "id": 300000006,
+      "name": "SHA256SUMS",
+      "content_type": "text/plain",
+      "state": "uploaded",
+      "size": 380,
+      "browser_download_url": "https://github.com/benthecarman/buzz-gpui/releases/download/v0.1.1/SHA256SUMS"
+    }
+  ],
+  "tarball_url": "https://api.github.com/repos/benthecarman/buzz-gpui/tarball/v0.1.1",
+  "zipball_url": "https://api.github.com/repos/benthecarman/buzz-gpui/zipball/v0.1.1",
+  "body": "## What's Changed\r\n* Add in-app updates by @benthecarman in https://github.com/benthecarman/buzz-gpui/pull/1\r\n* Keep the saved window size until screens are known by @benthecarman in https://github.com/benthecarman/buzz-gpui/pull/2\r\n\r\n**Full Changelog**: https://github.com/benthecarman/buzz-gpui/compare/v0.1.0...v0.1.1"
+}

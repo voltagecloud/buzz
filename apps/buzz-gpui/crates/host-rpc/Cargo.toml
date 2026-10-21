@@ -1,0 +1,21 @@
+[package]
+name = "buzz-host-rpc"
+description = "Protocol, transports and client/server for talking to Buzz agent hosts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+futures = "0.3"
+rmp-serde = "1"
+serde = { version = "1", features = ["derive"] }
+subtle = "2.6"
+thiserror = "2"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+tracing = "0.1"
+bytes = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
