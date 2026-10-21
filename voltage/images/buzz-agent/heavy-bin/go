@@ -1,0 +1,8 @@
+#!/bin/sh
+# Hold a node-local heavy-job slot (buzz-heavy) for go commands that compile.
+real=/usr/bin/go
+case "$1" in
+  build|install|run|test|vet)
+    exec /usr/local/bin/buzz-heavy -- "$real" "$@" ;;
+esac
+exec "$real" "$@"

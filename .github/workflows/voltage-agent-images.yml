@@ -1,0 +1,411 @@
+name: Voltage images
+
+# Voltage fork only: builds the Buzz images that Voltage runs from this
+# checkout and, on main, publishes them to Voltage's ECR with the full commit
+# SHA as the tag. This workflow has its own file, so upstream block/buzz syncs
+# never conflict with it. See voltage/images/README.md.
+#
+# Images:
+#   buzz-agent           voltage/images/buzz-agent/Dockerfile → voltage-buzz-agent-staging
+#   buzz-sandbox-reaper  voltage/images/buzz-sandbox-reaper/Dockerfile → voltage-buzz-sandbox-reaper-staging
+#   buzz-relay           the upstream root Dockerfile (target runtime) → buzz-relay
+#
+# The changes job selects only the images whose inputs changed. Manual runs
+# (workflow_dispatch) build all three.
+#
+# Trust model: this repository and its logs are public. Pull requests run
+# without AWS access. Only the publish and merge jobs request an OIDC token,
+# and they run only on main, the only ref that the github-buzz-ecr-push role
+# trusts. The AWS_ACCOUNT_ID secret keeps the account ID out of the
+# repository and masks it in the logs.
+on:
+  push:
+    branches: [main]
+    paths:
+      - .cargo/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - crates/**
+      - examples/**
+      - scripts/model-capabilities.json
+      - voltage/images/**
+      - Dockerfile
+      - .dockerignore
+      - migrations/**
+      - package.json
+      - pnpm-lock.yaml
+      - pnpm-workspace.yaml
+      - patches/**
+      - web/**
+      - admin-web/**
+      - .github/workflows/voltage-agent-images.yml
+  pull_request:
+    paths:
+      - .cargo/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - crates/**
+      - examples/**
+      - scripts/model-capabilities.json
+      - voltage/images/**
+      - Dockerfile
+      - .dockerignore
+      - migrations/**
+      - package.json
+      - pnpm-lock.yaml
+      - pnpm-workspace.yaml
+      - patches/**
+      - web/**
+      - admin-web/**
+      - .github/workflows/voltage-agent-images.yml
+  # Publishes only when run on main; on other refs it builds and tests.
+  workflow_dispatch: {}
+
+# Pull requests share one group per ref and cancel superseded runs. Each main
+# commit gets its own group: a queued main run that a newer push replaced
+# would leave that commit's changed images unpublished.
+concurrency:
+  group: voltage-images-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    name: Select images
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      any: ${{ steps.select.outputs.any }}
+      build: ${{ steps.select.outputs.build }}
+      merge: ${{ steps.select.outputs.merge }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      # Each filter lists what that image's Dockerfile reads from the context.
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        if: github.event_name != 'workflow_dispatch'
+        with:
+          token: ${{ github.token }}
+          filters: |
+            agent:
+              - '.cargo/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - 'crates/**'
+              - 'examples/**'
+              # buzz-agent embeds this file at compile time.
+              - 'scripts/model-capabilities.json'
+              - 'voltage/images/buzz-agent/**'
+              - '.github/workflows/voltage-agent-images.yml'
+            reaper:
+              - '.cargo/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - 'crates/**'
+              - 'examples/**'
+              - 'voltage/images/buzz-sandbox-reaper/**'
+              - '.github/workflows/voltage-agent-images.yml'
+            relay:
+              - 'Dockerfile'
+              - '.dockerignore'
+              - '.cargo/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - 'crates/**'
+              - 'examples/**'
+              # buzz-db embeds the migrations at compile time.
+              - 'migrations/**'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - 'patches/**'
+              - 'web/**'
+              - 'admin-web/**'
+              - '.github/workflows/voltage-agent-images.yml'
+      - name: Build the image matrices
+        id: select
+        env:
+          ALL: ${{ github.event_name == 'workflow_dispatch' }}
+          AGENT: ${{ steps.filter.outputs.agent }}
+          REAPER: ${{ steps.filter.outputs.reaper }}
+          RELAY: ${{ steps.filter.outputs.relay }}
+        run: |
+          set -euo pipefail
+          selected=()
+          if [ "$ALL" = true ] || [ "$AGENT" = true ]; then selected+=(buzz-agent); fi
+          if [ "$ALL" = true ] || [ "$REAPER" = true ]; then selected+=(buzz-sandbox-reaper); fi
+          if [ "$ALL" = true ] || [ "$RELAY" = true ]; then selected+=(buzz-relay); fi
+          images='{
+            "buzz-agent": {"file": "voltage/images/buzz-agent/Dockerfile", "target": "", "repository": "voltage-buzz-agent-staging"},
+            "buzz-sandbox-reaper": {"file": "voltage/images/buzz-sandbox-reaper/Dockerfile", "target": "", "repository": "voltage-buzz-sandbox-reaper-staging"},
+            "buzz-relay": {"file": "Dockerfile", "target": "runtime", "repository": "buzz-relay"}
+          }'
+          platforms='[{"arch": "amd64", "runner": "ubuntu-latest"}, {"arch": "arm64", "runner": "ubuntu-24.04-arm"}]'
+          build=$(jq -cn --argjson images "$images" --argjson platforms "$platforms" \
+            '{include: [$ARGS.positional[] as $image | $platforms[] | {image: $image} + $images[$image] + .]}' \
+            --args "${selected[@]}")
+          merge=$(jq -cn --argjson images "$images" \
+            '{include: [$ARGS.positional[] as $image | {image: $image, repository: $images[$image].repository}]}' \
+            --args "${selected[@]}")
+          {
+            echo "any=$([ "${#selected[@]}" -gt 0 ] && echo true || echo false)"
+            echo "build=$build"
+            echo "merge=$merge"
+          } >> "$GITHUB_OUTPUT"
+          echo "Selected images: ${selected[*]:-none}"
+
+  lint:
+    name: Lint Dockerfiles
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      # The relay's root Dockerfile is upstream's; it gets only BuildKit checks.
+      - name: Hadolint buzz-agent
+        uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
+        with:
+          dockerfile: voltage/images/buzz-agent/Dockerfile
+          failure-threshold: error
+      - name: Hadolint buzz-sandbox-reaper
+        uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
+        with:
+          dockerfile: voltage/images/buzz-sandbox-reaper/Dockerfile
+          failure-threshold: error
+      - name: BuildKit checks
+        run: |
+          set -euo pipefail
+          for file in voltage/images/buzz-agent/Dockerfile voltage/images/buzz-sandbox-reaper/Dockerfile Dockerfile; do
+            echo "==> $file"
+            docker buildx build --check -f "$file" .
+          done
+
+  # Pull requests, and runs on refs other than main: build and test, no push.
+  build:
+    name: Build ${{ matrix.image }} (${{ matrix.arch }})
+    needs: changes
+    if: ${{ needs.changes.outputs.any == 'true' && !(github.repository == 'voltagecloud/buzz' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main') }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.build) }}
+    env:
+      IMAGE: ${{ matrix.image }}:ci
+      # The relay compiles its artifact identity in, as in docker.yml.
+      RELAY_BUILD_ARGS: |
+        BUZZ_SOURCE_SHA=${{ github.sha }}
+        BUZZ_BUILD_ID=github-actions:${{ github.run_id }}:${{ github.run_attempt }}
+        BUZZ_BUILD_URL=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+        with:
+          # Rust builds exhaust runner memory at BuildKit's default parallelism.
+          buildkitd-config-inline: |
+            [worker.oci]
+              max-parallelism = 2
+      - name: Build
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          file: ${{ matrix.file }}
+          target: ${{ matrix.target }}
+          platforms: linux/${{ matrix.arch }}
+          build-args: ${{ matrix.image == 'buzz-relay' && env.RELAY_BUILD_ARGS || '' }}
+          load: true
+          push: false
+          tags: ${{ env.IMAGE }}
+      - name: Reaper smoke test
+        if: matrix.image == 'buzz-sandbox-reaper'
+        run: |
+          docker run --rm "$IMAGE" --help
+          docker run --rm "$IMAGE" reconcile --help
+      - name: Relay smoke test
+        if: matrix.image == 'buzz-relay'
+        run: bash voltage/images/test-relay-image.sh "$IMAGE"
+      - name: Image contract tests
+        if: matrix.image == 'buzz-agent'
+        run: |
+          bash voltage/images/buzz-agent/test-image.sh "$IMAGE"
+          bash voltage/images/buzz-agent/test-harness.sh "$IMAGE"
+      # Synthetic accounts and local emulators only. test-depot.py needs real
+      # Depot credentials, so it runs only by hand.
+      - name: Packaged tool tests
+        if: matrix.image == 'buzz-agent'
+        working-directory: voltage/images/buzz-agent
+        run: |
+          set -euo pipefail
+          python3 -O test-native-agent.py "$IMAGE"
+          for test in policy setup accounts checkpoint checkpoint-storage restore gate worker cache; do
+            echo "==> test-$test.py"
+            python3 "test-$test.py" "$IMAGE"
+          done
+          python3 -O test-profile.py "$IMAGE"
+
+  # main: build each platform on its native runner and push it by digest.
+  publish:
+    name: Publish ${{ matrix.image }} (${{ matrix.arch }})
+    needs: [changes, lint]
+    if: needs.changes.outputs.any == 'true' && github.repository == 'voltagecloud/buzz' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      id-token: write # OIDC token for the github-buzz-ecr-push role
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.build) }}
+    env:
+      IMAGE: ${{ matrix.image }}:ci
+      RELAY_BUILD_ARGS: |
+        BUZZ_SOURCE_SHA=${{ github.sha }}
+        BUZZ_BUILD_ID=github-actions:${{ github.run_id }}:${{ github.run_attempt }}
+        BUZZ_BUILD_URL=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+        with:
+          buildkitd-config-inline: |
+            [worker.oci]
+              max-parallelism = 2
+      # Build and smoke-test before credentials exist; the push build below
+      # reuses this build's cache.
+      - name: Build
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          file: ${{ matrix.file }}
+          target: ${{ matrix.target }}
+          platforms: linux/${{ matrix.arch }}
+          build-args: ${{ matrix.image == 'buzz-relay' && env.RELAY_BUILD_ARGS || '' }}
+          load: true
+          push: false
+          tags: ${{ env.IMAGE }}
+      - name: Reaper smoke test
+        if: matrix.image == 'buzz-sandbox-reaper'
+        run: docker run --rm "$IMAGE" --help
+      - name: Relay smoke test
+        if: matrix.image == 'buzz-relay'
+        run: bash voltage/images/test-relay-image.sh "$IMAGE"
+      - name: Image contract test
+        if: matrix.image == 'buzz-agent'
+        run: bash voltage/images/buzz-agent/test-image.sh "$IMAGE"
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-buzz-ecr-push
+          aws-region: us-west-2
+      - uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
+      - name: Push by digest
+        id: push
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          file: ${{ matrix.file }}
+          target: ${{ matrix.target }}
+          platforms: linux/${{ matrix.arch }}
+          build-args: ${{ matrix.image == 'buzz-relay' && env.RELAY_BUILD_ARGS || '' }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          outputs: type=image,name=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-west-2.amazonaws.com/${{ matrix.repository }},push-by-digest=true,name-canonical=true,push=true
+      - name: Export digest
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: digest-${{ matrix.image }}-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # main: join the platform images into one manifest list tagged with the
+  # full commit SHA.
+  # A failed platform build fails only its own image's merge.
+  merge:
+    name: Merge ${{ matrix.image }} manifest
+    needs: [changes, publish]
+    if: ${{ !cancelled() && needs.publish.result != 'skipped' && needs.changes.outputs.any == 'true' && github.repository == 'voltagecloud/buzz' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write # OIDC token for the github-buzz-ecr-push role
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.merge) }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: /tmp/digests
+          pattern: digest-${{ matrix.image }}-*
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-buzz-ecr-push
+          aws-region: us-west-2
+      - uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
+      # ECR tags are immutable. A rerun for a commit that already has a tag
+      # reports the existing manifest list instead of failing.
+      - name: Create manifest list
+        working-directory: /tmp/digests
+        env:
+          IMAGE: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-west-2.amazonaws.com/${{ matrix.repository }}
+          NAME: ${{ matrix.image }}
+          REPOSITORY: ${{ matrix.repository }}
+          TAG: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if digest=$(aws ecr describe-images --repository-name "$REPOSITORY" \
+              --image-ids imageTag="$TAG" --query 'imageDetails[0].imageDigest' \
+              --output text 2>/tmp/describe-error); then
+            result="Tag already existed; kept the existing manifest list"
+            echo "::warning::$REPOSITORY:$TAG already exists ($digest); not replaced"
+          else
+            if ! grep -q ImageNotFoundException /tmp/describe-error; then
+              cat /tmp/describe-error >&2
+              exit 1
+            fi
+            shopt -s nullglob
+            sources=()
+            for file in *; do
+              sources+=("$IMAGE@sha256:$file")
+            done
+            if [ "${#sources[@]}" -ne 2 ]; then
+              echo "::error::expected 2 platform digests, found ${#sources[@]}"
+              exit 1
+            fi
+            docker buildx imagetools create -t "$IMAGE:$TAG" "${sources[@]}"
+            digest=$(docker buildx imagetools inspect "$IMAGE:$TAG" --format '{{json .Manifest}}' | jq -r .digest)
+            result="Published"
+          fi
+          {
+            echo "### $NAME"
+            echo "$result."
+            echo '```'
+            echo "$REPOSITORY:$TAG"
+            echo "$REPOSITORY@$digest"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

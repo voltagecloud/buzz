@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "developer": "tee8z",
+  "owner_pubkey": "REPLACE_WITH_VERIFIED_BUZZ_OWNER_HEX",
+  "git": {
+    "name": "REPLACE_WITH_GIT_NAME",
+    "email": "REPLACE_WITH_GIT_EMAIL",
+    "signing_key": "REPLACE_WITH_FULL_PUBLIC_SIGNING_FINGERPRINT"
+  },
+  "github": {
+    "login": "tee8z",
+    "token": "REPLACE_WITH_SCOPED_GITHUB_TOKEN"
+  },
+  "via": {
+    "profile": "REPLACE_WITH_DEVELOPMENT_VIA_TOML",
+    "op_token": "REPLACE_WITH_DEVELOPMENT_VAULT_SERVICE_ACCOUNT_TOKEN"
+  },
+  "depot": {
+    "organization": "REPLACE_WITH_DEPOT_ORGANIZATION",
+    "token": "REPLACE_WITH_DEPOT_USER_OR_ORGANIZATION_TOKEN"
+  },
+  "models": {}
+}
