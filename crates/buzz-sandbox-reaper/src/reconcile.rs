@@ -19,9 +19,10 @@ use std::time::Duration;
 
 use buzz_backend_kubernetes::lifecycle::{
     annotation, classify, sandbox_resource, Container, Observation, PodObservation, State,
-    AGENT_CONTAINER, CHECKPOINT, CHECKPOINTING, CHECKPOINTING_DISABLED, ENDED_AT, ENDED_REASON,
-    GENERATION, INITIAL_POD, LABEL_BINDING_VERSION, LABEL_MANAGED_BY, LIFECYCLE, LIFECYCLE_ENDED,
-    MANAGED_BY, RECOVERED_FROM, RESTORE_CHECKPOINT, SANDBOX_BINDING_VERSION,
+    AGENT_CONTAINER, CHECKPOINT, CHECKPOINTING, CHECKPOINTING_DISABLED, CHECKPOINT_SOURCE,
+    ENDED_AT, ENDED_REASON, GENERATION, INITIAL_POD, LABEL_BINDING_VERSION, LABEL_MANAGED_BY,
+    LIFECYCLE, LIFECYCLE_ENDED, MANAGED_BY, RECOVERED_FROM, RESTORE_CHECKPOINT,
+    SANDBOX_BINDING_VERSION,
 };
 use chrono::{DateTime, SecondsFormat, Utc};
 use futures_util::StreamExt;
@@ -456,8 +457,10 @@ impl<S: CheckpointStore> Reconciler<S> {
     }
 
     /// Checkpoint evidence for a session about to be tombstoned: its own
-    /// receipt, or else the checkpoint a recovered session was restored from,
-    /// so a failed restore or stop never orphans the original work.
+    /// receipt or listed checkpoint, or else the checkpoint a recovered
+    /// session was restored from, so a failed restore or stop never orphans
+    /// the original work. Its own key wins: the image restores before the
+    /// harness starts, so the session's own saves include the restored work.
     async fn evidence(
         &self,
         state: &State,
@@ -492,13 +495,14 @@ impl<S: CheckpointStore> Reconciler<S> {
     /// otherwise from what the watch captured. The session prefix comes from
     /// config and the Sandbox's (validated) generation, never the Pod.
     ///
-    /// When the bound Pod is gone and memory holds no receipt for it, the
-    /// receipt is unknown, not absent: a reaper restart or a watch gap may
-    /// have lost it. The newest object S3 lists in the session prefix then
-    /// stands in for it ([`evidence::latest`]). A failed listing defers the
-    /// session; only an empty listing records `missing`. No grace period is
-    /// needed first: the Pod is gone, so its harness has stopped writing, and
-    /// S3 listings are strongly consistent with completed uploads.
+    /// Without a verified receipt, the newest object S3 lists in the session
+    /// prefix stands in for it ([`evidence::latest`], recorded as `listed`).
+    /// The receipt may be unknown (a reaper restart or a watch gap lost it),
+    /// never written (a node lost without warning), or invalid (a failed final
+    /// save exits non-zero, so only the harness's background turn saves
+    /// remain). A failed listing defers the session; only an empty listing
+    /// records `missing`. No grace period is needed first: the harness has
+    /// exited, and S3 listings are strongly consistent with completed uploads.
     async fn own_evidence(
         &self,
         state: &State,
@@ -527,12 +531,12 @@ impl<S: CheckpointStore> Reconciler<S> {
                 Container::Terminated { message, .. } => message.as_deref(),
                 _ => None,
             },
-            _ => match memory.receipts.get(initial) {
-                Some(message) => Some(message.as_str()),
-                None => return evidence::latest(&self.store, &session_prefix).await,
-            },
+            _ => memory.receipts.get(initial).map(String::as_str),
         };
-        evidence::from_receipt(&self.store, message, &session_prefix).await
+        match evidence::from_receipt(&self.store, message, &session_prefix).await {
+            Evidence::Missing => evidence::latest(&self.store, &session_prefix).await,
+            verified_or_unavailable => verified_or_unavailable,
+        }
     }
 
     #[expect(
@@ -586,20 +590,25 @@ impl<S: CheckpointStore> Reconciler<S> {
                 .await;
                 Ok(())
             }
-            Action::Tombstone { reason, checkpoint } => {
+            Action::Tombstone {
+                reason,
+                checkpoint,
+                source,
+            } => {
                 tracing::info!(
                     namespace,
                     sandbox = name,
                     state = state_label(state),
                     reason = reason.as_str(),
                     checkpoint,
+                    source,
                     dry_run = self.dry_run,
                     "tombstoning session"
                 );
                 if self.dry_run {
                     return Ok(());
                 }
-                let patch = tombstone_patch(sandbox, reason.as_str(), checkpoint, now);
+                let patch = tombstone_patch(sandbox, reason.as_str(), checkpoint, *source, now);
                 match self
                     .sandboxes(namespace)
                     .patch(name, &PatchParams::default(), &Patch::Merge(&patch))
@@ -621,8 +630,11 @@ impl<S: CheckpointStore> Reconciler<S> {
                     "SessionEnded",
                     "Normal",
                     &format!(
-                        "session ended ({}); checkpoint: {checkpoint}",
-                        reason.as_str()
+                        "session ended ({}); checkpoint: {checkpoint}{}",
+                        reason.as_str(),
+                        source
+                            .map(|s| format!(" (source: {s})"))
+                            .unwrap_or_default()
                     ),
                     now,
                 )
@@ -722,11 +734,13 @@ impl<S: CheckpointStore> Reconciler<S> {
 }
 
 /// The one write that ends a session: a JSON merge patch guarded by the
-/// observed resourceVersion. It only ever sets `Suspended`.
+/// observed resourceVersion. It only ever sets `Suspended`. A `None` source
+/// removes any `checkpoint-source` (merge patch `null`).
 pub fn tombstone_patch(
     sandbox: &DynamicObject,
     reason: &str,
     checkpoint: &str,
+    source: Option<&str>,
     now: DateTime<Utc>,
 ) -> serde_json::Value {
     json!({
@@ -737,6 +751,7 @@ pub fn tombstone_patch(
                 (ENDED_REASON): reason,
                 (ENDED_AT): now.to_rfc3339_opts(SecondsFormat::Secs, true),
                 (CHECKPOINT): checkpoint,
+                (CHECKPOINT_SOURCE): source,
             },
         },
         "spec": {"operatingMode": "Suspended"},

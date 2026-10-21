@@ -7,7 +7,8 @@
 //! a session or discard a live one (property-tested below).
 
 use buzz_backend_kubernetes::lifecycle::{
-    EndedReason, Ignored, State, CHECKPOINT_MISSING, CHECKPOINT_UNCONFIGURED,
+    EndedReason, Ignored, State, CHECKPOINT_MISSING, CHECKPOINT_SOURCE_INHERITED,
+    CHECKPOINT_SOURCE_LISTED, CHECKPOINT_SOURCE_RECEIPT, CHECKPOINT_UNCONFIGURED,
     MISSING_CHECKPOINT_HOLD_SECS,
 };
 use chrono::{DateTime, Duration, Utc};
@@ -21,8 +22,9 @@ pub enum Evidence {
     Unconfigured,
     /// No receipt, or the receipt and S3 disagree.
     Missing,
-    /// No receipt was observed, but S3 lists this newest object in the
-    /// session's own prefix. Not attested by the harness, so a Completed
+    /// No verified receipt (none observed, or a failed final save), but S3
+    /// lists this newest object in the session's own prefix. Not attested
+    /// by the harness and possibly an older turn checkpoint, so a Completed
     /// session still holds before recording it.
     Listed(String),
     /// Missing, but the session was recovered from this (still present) key,
@@ -33,12 +35,15 @@ pub enum Evidence {
 }
 
 impl Evidence {
-    /// Tombstone `checkpoint` annotation value; `None` while undecidable.
-    fn annotation(&self) -> Option<String> {
+    /// Tombstone `checkpoint` and `checkpoint-source` annotation values;
+    /// `None` while undecidable. Only a key has a source.
+    fn annotation(&self) -> Option<(String, Option<&'static str>)> {
         match self {
-            Self::Verified(key) | Self::Listed(key) | Self::Inherited(key) => Some(key.clone()),
-            Self::Unconfigured => Some(CHECKPOINT_UNCONFIGURED.into()),
-            Self::Missing => Some(CHECKPOINT_MISSING.into()),
+            Self::Verified(key) => Some((key.clone(), Some(CHECKPOINT_SOURCE_RECEIPT))),
+            Self::Listed(key) => Some((key.clone(), Some(CHECKPOINT_SOURCE_LISTED))),
+            Self::Inherited(key) => Some((key.clone(), Some(CHECKPOINT_SOURCE_INHERITED))),
+            Self::Unconfigured => Some((CHECKPOINT_UNCONFIGURED.into(), None)),
+            Self::Missing => Some((CHECKPOINT_MISSING.into(), None)),
             Self::Unavailable => None,
         }
     }
@@ -57,6 +62,8 @@ pub enum Action {
     Tombstone {
         reason: EndedReason,
         checkpoint: String,
+        /// `checkpoint-source`, set only when `checkpoint` is a key.
+        source: Option<&'static str>,
     },
     /// Delete an Ended tombstone past retention (uid + resourceVersion
     /// preconditions).
@@ -65,7 +72,11 @@ pub enum Action {
 
 fn tombstone(reason: EndedReason, evidence: &Evidence) -> Action {
     match evidence.annotation() {
-        Some(checkpoint) => Action::Tombstone { reason, checkpoint },
+        Some((checkpoint, source)) => Action::Tombstone {
+            reason,
+            checkpoint,
+            source,
+        },
         None => Action::None,
     }
 }
@@ -163,7 +174,8 @@ mod tests {
                 plan(&state, &Evidence::Missing, t(0), t(0)),
                 Action::Tombstone {
                     reason,
-                    checkpoint: CHECKPOINT_MISSING.into()
+                    checkpoint: CHECKPOINT_MISSING.into(),
+                    source: None,
                 },
                 "{state:?}"
             );
@@ -171,7 +183,8 @@ mod tests {
                 plan(&state, &key(), t(0), t(0)),
                 Action::Tombstone {
                     reason,
-                    checkpoint: "dev/g/x.tar.gz".into()
+                    checkpoint: "dev/g/x.tar.gz".into(),
+                    source: Some(CHECKPOINT_SOURCE_RECEIPT),
                 }
             );
             assert_eq!(
@@ -191,14 +204,16 @@ mod tests {
             plan(&completed, &key(), t(1), t(1)),
             Action::Tombstone {
                 reason: EndedReason::Completed,
-                checkpoint: "dev/g/x.tar.gz".into()
+                checkpoint: "dev/g/x.tar.gz".into(),
+                source: Some(CHECKPOINT_SOURCE_RECEIPT),
             }
         );
         assert_eq!(
             plan(&completed, &Evidence::Unconfigured, t(1), t(1)),
             Action::Tombstone {
                 reason: EndedReason::Completed,
-                checkpoint: CHECKPOINT_UNCONFIGURED.into()
+                checkpoint: CHECKPOINT_UNCONFIGURED.into(),
+                source: None,
             }
         );
         assert_eq!(
@@ -231,7 +246,8 @@ mod tests {
                 plan(&completed, &Evidence::Missing, until, t(5)),
                 Action::Tombstone {
                     reason: EndedReason::Completed,
-                    checkpoint: CHECKPOINT_MISSING.into()
+                    checkpoint: CHECKPOINT_MISSING.into(),
+                    source: None,
                 }
             );
         }
@@ -247,9 +263,15 @@ mod tests {
             message: None,
         };
         let until = t(MISSING_CHECKPOINT_HOLD_SECS);
-        for evidence in [
-            Evidence::Inherited("dev/g/x.tar.gz".into()),
-            Evidence::Listed("dev/g/x.tar.gz".into()),
+        for (evidence, source) in [
+            (
+                Evidence::Inherited("dev/g/x.tar.gz".into()),
+                CHECKPOINT_SOURCE_INHERITED,
+            ),
+            (
+                Evidence::Listed("dev/g/x.tar.gz".into()),
+                CHECKPOINT_SOURCE_LISTED,
+            ),
         ] {
             assert_eq!(
                 plan(&completed, &evidence, t(1), t(0)),
@@ -259,14 +281,16 @@ mod tests {
                 plan(&completed, &evidence, until, t(0)),
                 Action::Tombstone {
                     reason: EndedReason::Completed,
-                    checkpoint: "dev/g/x.tar.gz".into()
+                    checkpoint: "dev/g/x.tar.gz".into(),
+                    source: Some(source),
                 }
             );
             assert_eq!(
                 plan(&State::Lost { confirmed: true }, &evidence, t(0), t(0)),
                 Action::Tombstone {
                     reason: EndedReason::Lost,
-                    checkpoint: "dev/g/x.tar.gz".into()
+                    checkpoint: "dev/g/x.tar.gz".into(),
+                    source: Some(source),
                 }
             );
         }
@@ -336,7 +360,8 @@ mod tests {
     proptest! {
         /// Never resurrect, never discard a live session: deletion only for
         /// an expired tombstone, nothing at all for live or ignored sessions,
-        /// and tombstones always carry a decided checkpoint value.
+        /// and tombstones always carry a decided checkpoint value. Only a
+        /// verified receipt is recorded as one, and only a key has a source.
         #[test]
         fn no_plan_resurrects_or_deletes_a_live_session(
             state in any_state(),
@@ -353,9 +378,20 @@ mod tests {
             {
                 prop_assert!(matches!(action, Action::None | Action::Delete | Action::Ignore(_)));
             }
-            if let Action::Tombstone { checkpoint, .. } = &action {
+            if let Action::Tombstone { checkpoint, source, .. } = &action {
                 prop_assert!(!checkpoint.is_empty());
                 prop_assert_ne!(&evidence, &Evidence::Unavailable);
+                prop_assert_eq!(
+                    *source == Some(CHECKPOINT_SOURCE_RECEIPT),
+                    matches!(evidence, Evidence::Verified(_))
+                );
+                prop_assert_eq!(
+                    source.is_some(),
+                    matches!(
+                        evidence,
+                        Evidence::Verified(_) | Evidence::Listed(_) | Evidence::Inherited(_)
+                    )
+                );
             }
             // States decided without evidence really ignore it, so the
             // reconciler may skip the S3 probe for them.
