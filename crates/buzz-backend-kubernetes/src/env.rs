@@ -93,7 +93,13 @@ const RESPOND_TO_ALLOWLIST: &str = "allowlist";
 /// rejects `nobody` on purpose (`managed_agents/types.rs:871-880`), but the
 /// harness starts fine with it. This guard exists to cover non-desktop callers,
 /// so inheriting a desktop-only narrowing would refuse a launch that works.
-const RESPOND_TO_MODES: [&str; 4] = ["owner-only", RESPOND_TO_ALLOWLIST, "anyone", "nobody"];
+const RESPOND_TO_MODES: [&str; 5] = [
+    "owner-only",
+    "owner",
+    RESPOND_TO_ALLOWLIST,
+    "anyone",
+    "nobody",
+];
 
 /// Refuse a respond-to gate the harness will reject at config parse.
 ///
@@ -804,7 +810,7 @@ mod tests {
     /// for. Without this test, refusing `nobody` would pass everything above.
     #[test]
     fn every_mode_the_harness_accepts_is_deployable() {
-        for mode in ["owner-only", "allowlist", "anyone", "nobody"] {
+        for mode in ["owner-only", "owner", "allowlist", "anyone", "nobody"] {
             let agent = payload_json(serde_json::json!({
                 "respond_to": mode,
                 "respond_to_allowlist": [pubkey('a')],

@@ -416,6 +416,28 @@ pub fn config_schema() -> serde_json::Value {
                 "title": "Service account",
                 "description": "Scheduling/RBAC identity only. No API token is mounted."
             },
+            "sandbox": {
+                "oneOf": [
+                    {"const": false},
+                    {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["channel_id", "thread_root"],
+                        "properties": {
+                            "channel_id": {
+                                "type": "string",
+                                "format": "uuid",
+                                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                            },
+                            "thread_root": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+                        }
+                    }
+                ],
+                "x-buzz-ui-type": "boolean",
+                "default": false,
+                "title": "Workspace per thread",
+                "description": "Use Agent Sandbox. Mention the agent in a channel to create or reuse that thread's workspace. Requires an absolute Pod deadline and BUZZ_CHECKPOINT_BUCKET/BUZZ_CHECKPOINT_PREFIX (or BUZZ_SANDBOX_CHECKPOINT=disabled) in the agent environment. Desktop stores a boolean setting and binds the mentioned thread at launch; deploy accepts only {\"channel_id\": \"<UUID>\", \"thread_root\": \"<event ID>\"} and refuses true. false or absent disables Sandbox."
+            },
             "identity_policy": {
                 "type": "object",
                 "description": "Optional approved agent and owner public keys, cryptographically checked before cluster access. Also enables local --check-identity preflight.",
@@ -806,6 +828,7 @@ mod tests {
                 "memory_request",
                 "namespace",
                 "pod_options",
+                "sandbox",
                 "service_account"
             ]
         );

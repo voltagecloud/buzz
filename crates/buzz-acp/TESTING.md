@@ -36,6 +36,20 @@ The image repository's `buzz-agent/test-checkpoint-storage.py` also stops the
 packaged harness during startup while an adapter writes files. It checks that
 recovery preserves the final edit and rejected uploads make shutdown fail.
 
+Run the controller lifecycle test against the isolated local kind cluster:
+
+```sh
+BUZZ_SANDBOX_TEST_KUBECONFIG=/absolute/kind.kubeconfig \
+BUZZ_SANDBOX_TEST_IMAGE=registry.example/uid-guard-fixture@sha256:<digest> \
+  cargo test -p buzz-backend-kubernetes live_controller_reuses_scopes \
+  -- --ignored --nocapture
+```
+
+The test requires context `kind-remote-agent-check`, the Agent Sandbox controller,
+and a loaded fixture image that checks the Pod UID binding before sleeping.
+It verifies concurrent reuse, separate threads, owner and relay refusals, and
+refusal after the original Pod is replaced. It does not enroll real accounts.
+
 Managed agent sessions may already export harness options. Clear them when
 running the package suite: three CLI parsing tests assert the unset defaults,
 and inherited values would change the inputs those tests exercise. Running the

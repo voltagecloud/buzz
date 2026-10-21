@@ -12,6 +12,23 @@ const schema = {
 };
 
 describe("coerceConfigValues", () => {
+  it("keeps deferred thread scope settings boolean before launch binds them", () => {
+    const deferred = {
+      properties: {
+        sandbox: {
+          oneOf: [{ const: false }, { type: "object" }],
+          "x-buzz-ui-type": "boolean",
+          default: false,
+        },
+      },
+    };
+    for (const enabled of [true, false]) {
+      assert.deepEqual(
+        coerceConfigValues({ sandbox: String(enabled) }, deferred),
+        { sandbox: enabled },
+      );
+    }
+  });
   it("omits cleared numeric fields without losing explicit zero", () => {
     assert.deepEqual(
       coerceConfigValues(

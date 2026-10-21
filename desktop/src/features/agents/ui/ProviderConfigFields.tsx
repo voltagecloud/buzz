@@ -13,7 +13,10 @@ export function coerceConfigValues(
   const result: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(config)) {
     const prop = properties[key] as Record<string, unknown> | undefined;
-    const schemaType = prop?.type;
+    // A deferred Sandbox scope is a boolean setting until launch binds the
+    // published thread. Its provider wire schema still requires the object.
+    const schemaType =
+      prop?.["x-buzz-ui-type"] === "boolean" ? "boolean" : prop?.type;
     if (schemaType === "integer" || schemaType === "number") {
       if (value === "") continue;
       const num = Number(value);
