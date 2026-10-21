@@ -30,5 +30,24 @@ commit with `git commit -S -s`.
 If the script reports conflicts, resolve them, `git add` the files, run
 `scripts/sync-buzz-gpui.sh --record <ref>`, and commit.
 
-Keep Voltage changes to upstream files small and grouped, so syncs stay easy
-and changes can be offered back upstream.
+### Offer changes back upstream
+
+Make upstreamable fixes and features in their own commits that change only
+`apps/buzz-gpui` (never `UPSTREAM`). Then build a branch for Ben's repository:
+
+```sh
+scripts/upstream-buzz-gpui.sh --dry-run voltagecloud/buzz-gpui fix/thread-scroll HEAD
+scripts/upstream-buzz-gpui.sh --open voltagecloud/buzz-gpui fix/thread-scroll HEAD
+```
+
+The script strips the `apps/buzz-gpui/` prefix with `git format-patch
+--relative`, applies the commits with `git am -3` onto upstream `master` (or
+`--base <ref>`), and signs them. It pushes the branch to the fork and prints
+the `gh pr create` command, or opens a draft PR with `--open`. It refuses
+commits that touch files outside `apps/buzz-gpui` or the `UPSTREAM` file. When
+Ben merges the PR, the next sync applies his version without conflicts.
+
+Keep Voltage-only wiring, such as code that depends on crates outside
+`apps/buzz-gpui`, out of upstreamable commits. Put it in a separate crate next to
+the workspace, connected through an upstreamable extension point. This keeps
+Voltage changes to upstream files small, so syncs stay easy.
