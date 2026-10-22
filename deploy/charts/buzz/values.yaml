@@ -37,6 +37,17 @@ image:
 # in Postgres. Each replica can use its own ReadWriteOnce volume (or none).
 replicaCount: 1
 
+# Deployment update strategy. The default starts the new pod before stopping
+# the old one. With one replica and a ReadWriteOnce git volume
+# (persistence.git), a new pod scheduled on another node cannot attach the
+# volume while the old pod holds it, so the rollout never finishes: set
+# rollingUpdate.maxSurge: 0 and maxUnavailable: 1, or type: Recreate.
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 1
+    maxUnavailable: 0
+
 # ── Autoscaling ──────────────────────────────────────────────────────────────
 # Requires Metrics Server for CPU. Optional WebSocket scaling additionally
 # requires a custom-metrics adapter exposing its pod-level Prometheus gauge.
