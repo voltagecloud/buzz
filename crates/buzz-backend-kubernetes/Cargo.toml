@@ -29,6 +29,7 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 http = "1"
 http-body-util = "0.1"
+tower = { workspace = true, optional = true }
 
 # Explicit rustls dep with the ring provider — required to install the
 # process-level CryptoProvider at startup. Without it this binary panics on its
@@ -37,6 +38,10 @@ http-body-util = "0.1"
 # both ring and aws-lc-rs features and leaves rustls unable to auto-select a
 # provider. Same dependency and reason as crates/buzz-cli/Cargo.toml.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+
+[features]
+# The in-memory apiserver (`sandbox_fake`), for consumers' tests.
+test-utils = ["dep:tower"]
 
 [dev-dependencies]
 tower = { workspace = true }
