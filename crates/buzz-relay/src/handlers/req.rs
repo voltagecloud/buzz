@@ -7,9 +7,8 @@ use tracing::{debug, warn};
 
 use buzz_core::filter::filters_match;
 use buzz_core::kind::{
-    is_unshared_gated_event, AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_AGENT_TURN_METRIC,
-    KIND_DM_VISIBILITY, KIND_HUDDLE_LIVENESS, P_GATED_KINDS, RESULT_GATED_KINDS,
-    SHARED_GATED_KINDS,
+    is_unshared_gated_event, AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_HUDDLE_LIVENESS,
+    P_GATED_KINDS, RESULT_GATED_KINDS, SHARED_GATED_KINDS,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_db::EventQuery;
@@ -1528,13 +1527,14 @@ pub(crate) fn p_gated_filters_authorized(filters: &[Filter], authed_pubkey_hex: 
         // when `ids` is present. KIND_AGENT_TURN_METRIC events are long-lived
         // and their cleartext envelope (pubkey, agent tag, created_at) leaks
         // turn-activity metadata — knowing an event id is NOT authorization
-        // (NIP-AM §Relay Behavior). Only filters that explicitly name the kind
-        // lose the exemption — a kindless `ids` lookup is unaffected.
+        // (NIP-AM §Relay Behavior). KIND_SANDBOX_SESSION_CONTROL ids are not
+        // secret either: a reply names its request in a clear-text `e` tag.
+        // These are exactly RESULT_GATED_KINDS. Only filters that explicitly
+        // name the kind lose the exemption here; a kindless `ids` lookup is
+        // closed by the result-level gate (`reader_authorized_for_event`).
         let explicitly_no_ids_exemption = filter.kinds.as_ref().is_some_and(|ks| {
-            ks.iter().any(|kind| {
-                let k = kind.as_u16() as u32;
-                k == KIND_DM_VISIBILITY || k == KIND_AGENT_TURN_METRIC
-            })
+            ks.iter()
+                .any(|kind| RESULT_GATED_KINDS.contains(&(kind.as_u16() as u32)))
         });
         if !explicitly_no_ids_exemption && filter.ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
             return true;
@@ -1630,8 +1630,7 @@ pub(crate) fn filter_can_match_shared_gated_kinds(filter: &Filter) -> bool {
 
 /// Returns `true` if the filter CAN match result-gated kinds — meaning it
 /// either has no `kinds` constraint (wildcard) or includes at least one kind
-/// that carries a per-event result-level read gate (currently
-/// `KIND_DM_VISIBILITY` and `KIND_AGENT_TURN_METRIC`).
+/// that carries a per-event result-level read gate (`RESULT_GATED_KINDS`).
 ///
 /// Used by the COUNT handler to force the per-event fallback path instead of
 /// the fast SQL `count_events()`, which cannot enforce the owner-only result
@@ -2870,6 +2869,102 @@ mod tests {
             p_gated_filters_authorized(&[owner_p_and_ids], authed),
             "kind:44200 with matching #p and ids must be allowed"
         );
+    }
+
+    /// Kind 24210 loses the `ids` exemption like 30622 and 44200: a request's
+    /// id is visible in its reply's `e` tag, so knowing it is not authorization.
+    #[test]
+    fn sandbox_session_control_requires_p_tag_even_with_ids() {
+        let p_tag = SingleLetterTag::lowercase(Alphabet::P);
+        let authed = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let id = nostr::EventId::from_hex(&"c".repeat(64)).unwrap();
+        let control = || {
+            Filter::new().kind(nostr::Kind::Custom(
+                buzz_core::kind::KIND_SANDBOX_SESSION_CONTROL as u16,
+            ))
+        };
+        let refused = [
+            ("no #p", control()),
+            ("another #p", control().custom_tags(p_tag, [other])),
+            (
+                "#p naming another too",
+                control().custom_tags(p_tag, [authed, other]),
+            ),
+            ("ids", control().id(id)),
+            (
+                "ids and another #p",
+                control().id(id).custom_tags(p_tag, [other]),
+            ),
+        ];
+        for (case, filter) in refused {
+            assert!(!p_gated_filters_authorized(&[filter], authed), "{case}");
+        }
+        assert!(p_gated_filters_authorized(
+            &[control().custom_tags(p_tag, [authed])],
+            authed
+        ));
+        assert!(p_gated_filters_authorized(
+            &[control().id(id).custom_tags(p_tag, [authed])],
+            authed
+        ));
+    }
+
+    /// The REQ handler closes a non-recipient's 24210 subscription before it
+    /// is registered, so it never receives live events.
+    #[tokio::test]
+    async fn sandbox_session_control_req_is_closed_for_a_non_recipient() {
+        let state = crate::state::tests::test_state().await;
+        let (mut conn, mut send_rx) = lifecycle_conn();
+        let reader = nostr::Keys::generate();
+        conn.auth_state = std::sync::Mutex::new(AuthState::Authenticated(buzz_auth::AuthContext {
+            pubkey: reader.public_key(),
+            scopes: vec![],
+            channel_ids: None,
+            auth_method: buzz_auth::AuthMethod::Nip42,
+            agent_owner_pubkey: None,
+        }));
+        // Resolved from the cache, so the refusal needs no database.
+        state.accessible_channels_cache.insert(
+            (
+                conn.tenant.community(),
+                reader.public_key().to_bytes().to_vec(),
+            ),
+            Vec::new(),
+        );
+        let conn = Arc::new(conn);
+        let p_tag = SingleLetterTag::lowercase(Alphabet::P);
+        let recipient = nostr::Keys::generate().public_key().to_hex();
+        let id = nostr::EventId::from_hex(&"c".repeat(64)).unwrap();
+        let control = || {
+            Filter::new().kind(nostr::Kind::Custom(
+                buzz_core::kind::KIND_SANDBOX_SESSION_CONTROL as u16,
+            ))
+        };
+        for (sub_id, filter) in [
+            ("all", control()),
+            (
+                "recipient",
+                control().custom_tags(p_tag, [recipient.as_str()]),
+            ),
+            ("by-id", control().id(id)),
+        ] {
+            handle_req(
+                sub_id.to_string(),
+                vec![filter],
+                vec![],
+                Arc::clone(&conn),
+                Arc::clone(&state),
+            )
+            .await;
+            assert_eq!(
+                closed_frames(&mut send_rx),
+                vec![format!(
+                    r#"["CLOSED","{sub_id}","restricted: p-gated events require #p matching your pubkey"]"#
+                )]
+            );
+            assert!(!registered(&state, &conn, sub_id), "{sub_id}");
+        }
     }
 
     #[test]

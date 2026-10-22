@@ -316,6 +316,9 @@ run_unit_tests() {
     handlers::event::tests::fanout_access::owner_only_kinds_keep_only_the_owner
     handlers::event::tests::pubsub_fanout::pubsub_owner_only_kinds_reach_only_the_owner
     handlers::event::tests::pubsub_fanout::dispatch_owner_only_kinds_reach_only_the_owner
+    handlers::event::tests::pubsub_fanout::local_session_control_reaches_only_its_recipient
+    handlers::req::tests::sandbox_session_control_requires_p_tag_even_with_ids
+    handlers::req::tests::sandbox_session_control_req_is_closed_for_a_non_recipient
     handlers::req::tests::p1a_huddle_liveness_req_barrier_expiry_blocks_query_and_emission
     state::tests::f3_cancellation_during_check_terminates_socket_without_waiting_for_check
     state::tests::on_not_run_runs_once_on_each_deny_arm_and_never_on_admit

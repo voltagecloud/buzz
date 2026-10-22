@@ -138,8 +138,16 @@ pub const AUTHOR_ONLY_KINDS: &[u32] = &[
 /// path for events whose existence must not be leaked.
 ///
 /// Used by `filter_can_match_result_gated_kinds` to force the per-event
-/// fallback path in COUNT rather than the fast SQL `count_events()`.
-pub const RESULT_GATED_KINDS: &[u32] = &[KIND_DM_VISIBILITY, KIND_AGENT_TURN_METRIC];
+/// fallback path in COUNT rather than the fast SQL `count_events()`, and by
+/// live fan-out, which delivers these kinds only to a `p`-tagged reader.
+pub const RESULT_GATED_KINDS: &[u32] = &[
+    KIND_DM_VISIBILITY,
+    KIND_AGENT_TURN_METRIC,
+    // Sandbox session control events carry agent keys and launch secrets as
+    // ciphertext. Their ids are not secret (a reply names its request in an
+    // `e` tag), so knowing one is not authorization.
+    KIND_SANDBOX_SESSION_CONTROL,
+];
 
 /// Kinds whose stored events have `#p`-bound read access — readable only by
 /// subscribers whose pubkey appears in the event's `#p` tag.
@@ -166,6 +174,9 @@ pub const P_GATED_KINDS: &[u32] = &[
     // readable by any unauthenticated or non-owner party, including via `ids`
     // filters — see NIP-AM §Relay Behavior.
     KIND_AGENT_TURN_METRIC,
+    // Only the `p`-tagged provider or session manager may see that a request
+    // or reply exists.
+    KIND_SANDBOX_SESSION_CONTROL,
 ];
 
 /// NIP-AP: Agent Persona (parameterized replaceable, owner-authored).

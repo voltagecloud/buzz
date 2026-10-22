@@ -1886,15 +1886,22 @@ travels in these events:
 - Logs name only the event id, the operation and an error label; never the
   content or a decrypted payload.
 
-**Residual risk.** The relay does not store these events, but until `24210`
-is in `P_GATED_KINDS` (`crates/buzz-core/src/kind.rs`), any community member
-can subscribe to the kind and see who sent a request to the manager and when.
-That member can also record the ciphertext. NIP-44 has no forward secrecy, so
-a later leak of the manager key exposes every recorded request. Mitigations:
+**Recipient-only delivery.** A relay built from this repository lists
+`24210` in `P_GATED_KINDS` and `RESULT_GATED_KINDS`
+(`crates/buzz-core/src/kind.rs`). It closes any REQ that can match the kind
+unless its `#p` is exactly the reader's own key, even when the REQ names
+event ids, and its live fan-out delivers each event only to the connection
+whose key is in the event's `p` tag. Neither the sender nor any other member
+receives it.
 
-- Add `24210` to `P_GATED_KINDS` upstream, so only the `p`-tagged recipient
-  receives each event. This is required before developers other than admins
-  use the manager.
+**Residual risk.** A relay without that change (for example v0.2.1) lets
+any community member subscribe to the kind and see who sent a request to
+the manager and when. That member can also record the ciphertext. NIP-44
+has no forward secrecy, so a later leak of the manager key exposes every
+recorded request. Mitigations:
+
+- Run a relay with recipient-only delivery. This is required before
+  developers other than admins use the manager.
 - Rotate the manager key. Accepting a previous key during a rotation is a
   follow-up: the relay accepts events only from the authenticated key, so it
   needs a second relay connection.
