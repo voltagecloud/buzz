@@ -2011,6 +2011,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-session-control"
+version = "0.1.0"
+dependencies = [
+ "buzz-core",
+ "buzz-sdk",
+ "nostr 0.44.7",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "zeroize",
+]
+
+[[package]]
 name = "buzz-test-client"
 version = "0.1.0"
 dependencies = [

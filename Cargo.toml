@@ -34,6 +34,7 @@ members = [
     "crates/buzz-backend-kubernetes",
     "crates/buzz-remote-sessions",
     "crates/buzz-sandbox-reaper",
+    "crates/buzz-session-control",
     "crates/buzz-datastore-tracing",
     "examples/countdown-bot",
 ]
@@ -153,6 +154,7 @@ buzz-audit = { path = "crates/buzz-audit" }
 buzz-workflow = { path = "crates/buzz-workflow" }
 buzz-media = { path = "crates/buzz-media" }
 buzz-sdk = { path = "crates/buzz-sdk" }
+buzz-session-control = { path = "crates/buzz-session-control" }
 buzz-ws-client = { path = "crates/buzz-ws-client" }
 buzz-relay-mesh = { path = "crates/buzz-relay-mesh" }
 buzz-datastore-tracing = { path = "crates/buzz-datastore-tracing" }

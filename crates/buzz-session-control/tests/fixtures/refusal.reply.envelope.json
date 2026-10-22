@@ -1,0 +1,6 @@
+{
+  "v": 1,
+  "request_id": "6f1c2d3e-0000-4000-8000-000000000001",
+  "status": "done",
+  "response": {"ok": false, "error": "session ended: stopped", "code": "session_ended"}
+}
