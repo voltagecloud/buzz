@@ -1,4 +1,4 @@
-"""Exercise the packaged user Git configuration with a disposable test signer."""
+"""Exercise the packaged user Git configuration with a disposable agent signing key."""
 import subprocess
 import sys
 
@@ -14,38 +14,33 @@ def run(*args,input=None,env=None):
 
 home=Path('/home/agent')
 with tempfile.TemporaryDirectory() as temp:
-    signer=Path(temp)/'signer'
-    signer.mkdir(mode=0o700)
-    run('gpg','--homedir',str(signer),'--batch','--pinentry-mode','loopback',
-        '--passphrase','','--quick-generate-key','Signing Fixture <fixture@example.invalid>',
-        'ed25519','sign','1d')
-    public=run('gpg','--homedir',str(signer),'--armor','--export')
-    listing=run('gpg','--homedir',str(signer),'--with-colons','--list-keys').decode()
-    fingerprint=next(line.split(':')[9] for line in listing.splitlines() if line.startswith('fpr:'))
+    # A profile Sandbox signs with the developer's agent-only SSH key file.
+    key=Path(temp)/'agent-signing-key'
+    run('ssh-keygen','-q','-t','ed25519','-N','','-C','fixture agents','-f',str(key))
+    key.chmod(0o600)
     env={**os.environ,'BUZZ_GIT_IDENTITY':'user','BUZZ_GIT_NAME':'Signing Fixture',
-         'BUZZ_GIT_EMAIL':'fixture@example.invalid','BUZZ_GIT_SIGNING_KEY':fingerprint}
+         'BUZZ_GIT_EMAIL':'fixture@example.invalid','BUZZ_GIT_SIGNING_KEY':str(key)}
     run('buzz-agent-account','init',env=env)
-    client=home/'.gnupg'
-    run('gpg','--homedir',str(client),'--no-autostart','--import',input=public)
-    extra=run('gpgconf','--homedir',str(signer),'--list-dirs','agent-extra-socket').decode().strip()
-    (client/'S.gpg-agent').symlink_to(extra)
     repo=home/'fixture-repo'
     repo.mkdir()
     run('git','-C',str(repo),'init')
     (repo/'source.txt').write_text('signed fixture\n')
     run('git','-C',str(repo),'add','source.txt')
-    run('git','-C',str(repo),'commit','-m','test: verify remote signer')
-    run('git','-C',str(repo),'verify-commit','HEAD')
-    identity=run('git','-C',str(repo),'log','-1','--format=%an|%ae|%cn|%ce|%GF').decode().strip()
-    assert identity=='Signing Fixture|fixture@example.invalid|Signing Fixture|fixture@example.invalid|'+fingerprint
-    assert not list((client/'private-keys-v1.d').glob('*.key'))
-    (client/'S.gpg-agent').unlink()
-    (repo/'source.txt').write_text('signer disconnected\n')
+    run('git','-C',str(repo),'commit','-m','test: sign with the agent key')
+    signers=Path(temp)/'allowed_signers'
+    signers.write_text('fixture@example.invalid '+key.with_suffix('.pub').read_text())
+    run('git','-C',str(repo),'-c','gpg.ssh.allowedSignersFile='+str(signers),'verify-commit','HEAD')
+    identity=run('git','-C',str(repo),'log','-1','--format=%an|%ae|%cn|%ce').decode().strip()
+    assert identity=='Signing Fixture|fixture@example.invalid|Signing Fixture|fixture@example.invalid'
+    status=json.loads(run('buzz-agent-account','status',env=env))
+    assert status['signing_required'] is True
+    # Without the key, Git refuses to commit rather than commit unsigned.
+    key.unlink()
+    (repo/'source.txt').write_text('key removed\n')
     run('git','-C',str(repo),'add','source.txt')
-    failed=subprocess.run(['git','-C',str(repo),'commit','-m','test: require connected signer'],capture_output=True,timeout=15)
-    assert failed.returncode != 0, 'missing signer produced an unsigned commit'
-    print('PASS: author/committer identity and signature verified through an extra socket; workspace has no private key; signer loss refuses commits')
-    run('gpgconf','--homedir',str(signer),'--kill','gpg-agent')
+    failed=subprocess.run(['git','-C',str(repo),'commit','-m','test: require the signing key'],capture_output=True,timeout=15)
+    assert failed.returncode != 0, 'a missing signing key produced an unsigned commit'
+    print('PASS: author/committer identity and SSH signature verified; a missing key refuses commits')
 '''
 
 result = subprocess.run(['docker', 'run', '--rm', '-i', '--network', 'none',

@@ -13,10 +13,9 @@ use crate::naming::{
 };
 use k8s_openapi::api::core::v1::{
     Capabilities, ConfigMapProjection, Container, DownwardAPIProjection, DownwardAPIVolumeFile,
-    EmptyDirVolumeSource, EnvFromSource, EnvVar, EnvVarSource, KeyToPath, ObjectFieldSelector, Pod,
-    PodSecurityContext, PodSpec, ProjectedVolumeSource, ResourceRequirements, SeccompProfile,
-    Secret, SecretEnvSource, SecurityContext, ServiceAccountTokenProjection, Volume, VolumeMount,
-    VolumeProjection,
+    EmptyDirVolumeSource, EnvFromSource, KeyToPath, ObjectFieldSelector, Pod, PodSecurityContext,
+    PodSpec, ProjectedVolumeSource, ResourceRequirements, SeccompProfile, Secret, SecretEnvSource,
+    SecurityContext, ServiceAccountTokenProjection, Volume, VolumeMount, VolumeProjection,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -182,20 +181,6 @@ pub fn build_pod(
             }),
             ..Default::default()
         }]),
-        // Explicit env wins over envFrom, so a Secret cannot spoof the UID.
-        env: cfg.pod_options.setup_pending.then(|| {
-            vec![EnvVar {
-                name: "BUZZ_SETUP_POD_UID".into(),
-                value_from: Some(EnvVarSource {
-                    field_ref: Some(ObjectFieldSelector {
-                        api_version: Some("v1".into()),
-                        field_path: "metadata.uid".into(),
-                    }),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }]
-        }),
         resources: Some(ResourceRequirements {
             requests: Some(requests),
             limits: Some(limits),
@@ -424,34 +409,6 @@ mod tests {
     }
 
     #[test]
-    fn setup_uid_is_opt_in_and_comes_from_the_api_not_the_secret() {
-        let mut cfg = provider_config();
-        let fp = intent_template(&cfg, ["A".into()]).fingerprint();
-        assert!(spec(&build_pod(&identity(), &cfg, "g", &fp)).containers[0]
-            .env
-            .is_none());
-        cfg.pod_options.setup_pending = true;
-        let changed = intent_template(&cfg, ["A".into()]).fingerprint();
-        assert_ne!(fp, changed);
-        let pod = build_pod(&identity(), &cfg, "g", &changed);
-        let env = spec(&pod).containers[0].env.as_ref().unwrap();
-        assert_eq!(env.len(), 1);
-        assert_eq!(env[0].name, "BUZZ_SETUP_POD_UID");
-        assert!(env[0].value.is_none());
-        assert_eq!(
-            env[0]
-                .value_from
-                .as_ref()
-                .unwrap()
-                .field_ref
-                .as_ref()
-                .unwrap()
-                .field_path,
-            "metadata.uid"
-        );
-    }
-
-    #[test]
     fn subagent_token_is_opt_in_short_lived_and_off_the_default_path() {
         let mut cfg = provider_config();
         let fp = intent_template(&cfg, ["A".into()]).fingerprint();
@@ -498,7 +455,6 @@ mod tests {
             serde_json::json!({"ephemeral_storage_request": "3Gi"}),
             serde_json::json!({"ephemeral_storage_limit": "4Gi"}),
             serde_json::json!({"active_deadline_seconds": 28800}),
-            serde_json::json!({"setup_pending": true}),
             serde_json::json!({"enable_subagents": true}),
             serde_json::json!({"priority_class_name": "agent-session"}),
         ] {

@@ -27,9 +27,4 @@ fi
 
 # buzz-acp owns ephemeral Git setup for both native and MCP shells.
 # The image init forwards termination to this direct harness child.
-if [[ -n "${BUZZ_SETUP_MODE+x}" ]]; then
-    # Reject harness arguments during the fixed, single-use Codex setup flow.
-    [[ "$#" -eq 0 ]] || exit 1
-    exec /usr/local/bin/buzz-agent-setup gate
-fi
 exec /usr/local/bin/buzz-agent-cache buzz-acp "$@"

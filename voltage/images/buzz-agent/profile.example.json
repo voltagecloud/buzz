@@ -5,7 +5,7 @@
   "git": {
     "name": "REPLACE_WITH_GIT_NAME",
     "email": "REPLACE_WITH_GIT_EMAIL",
-    "signing_key": "REPLACE_WITH_FULL_PUBLIC_SIGNING_FINGERPRINT"
+    "ssh_signing_key": "REPLACE_WITH_AGENT_SSH_SIGNING_PRIVATE_KEY (ssh-keygen -t ed25519; register the .pub on GitHub as a signing key)"
   },
   "github": {
     "login": "tee8z",

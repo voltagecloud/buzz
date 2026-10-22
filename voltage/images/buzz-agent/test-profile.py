@@ -7,7 +7,7 @@ import uuid
 OWNER = 'a' * 64
 PROFILE = {
     'version': 1, 'developer': 'alice', 'owner_pubkey': OWNER,
-    'git': {'name': 'Alice Fixture', 'email': 'alice@example.invalid', 'signing_key': 'A' * 40},
+    'git': {'name': 'Alice Fixture', 'email': 'alice@example.invalid', 'ssh_signing_key': '-----BEGIN OPENSSH PRIVATE KEY-----\nc3ludGhldGljLWZpeHR1cmUta2V5\n-----END OPENSSH PRIVATE KEY-----\n'},
     'github': {'login': 'alice', 'token': 'synthetic-profile-github'},
     'via': {'profile': '[providers.fixture]\ntype="fixture"\n[services.fixture]\nprovider="fixture"\n'
                        '[services.depot]\nprovider="fixture"\n'
@@ -35,47 +35,13 @@ for attempt in range(30):
     if ready.returncode == 0: break
     time.sleep(0.2)
 else: raise RuntimeError('Secrets Manager fixture did not start')
-value = json.loads(run('aws', 'secretsmanager', 'create-secret', '--name',
-                      'voltage/staging/agents/alice/profile'))
+# The Sandbox manager enrolls profiles (its tests cover refusals); seed one as it stores it.
 path = Path('/tmp/profile.json')
 path.write_text(json.dumps(profile))
 path.chmod(0o600)
-tools = Path('/tmp/account-tools')
-tools.mkdir()
-for name, body in {'gh':'printf "alice\\n"', 'op':'printf "{}\\n"'}.items():
-    tool = tools/name
-    tool.write_text('#!/bin/sh\n'+body+'\n')
-    tool.chmod(0o700)
-env = {**os.environ, 'PATH':str(tools)+':'+os.environ['PATH']}
-receipt = json.loads(run('buzz-agent-profile', 'enroll', '--arn', value['ARN'], '--file', str(path), env=env))
-require(receipt['developer'] == 'alice', 'wrong enrollment receipt')
-before = run('aws', 'secretsmanager', 'get-secret-value', '--secret-id', value['ARN'])
-# An enrollment error must not change the current profile.
-(tools/'gh').write_text('#!/bin/sh\nprintf "someone-else\\n"\n')
-failed = subprocess.run(['buzz-agent-profile', 'enroll', '--arn', value['ARN'], '--file', str(path)],
-                        env=env, capture_output=True, text=True, timeout=60)
-require(failed.returncode != 0 and 'synthetic-profile-' not in failed.stdout+failed.stderr, 'wrong actor was enrolled or leaked')
-after = run('aws', 'secretsmanager', 'get-secret-value', '--secret-id', value['ARN'])
-require(json.loads(before)['VersionId'] == json.loads(after)['VersionId'], 'failed enrollment changed the profile')
-# Claude Code would prefer the API key, so a profile cannot carry both Claude credentials.
-(tools/'gh').write_text('#!/bin/sh\nprintf "alice\\n"\n')
-both = dict(profile, models={'anthropic_api_key':'synthetic-profile-anthropic', 'claude_oauth_token':'synthetic-profile-claude-oauth'})
-path.write_text(json.dumps(both))
-failed = subprocess.run(['buzz-agent-profile', 'enroll', '--arn', value['ARN'], '--file', str(path)],
-                        env=env, capture_output=True, text=True, timeout=60)
-require(failed.returncode != 0 and 'synthetic-profile-' not in failed.stdout+failed.stderr, 'mixed Claude credentials were enrolled or leaked')
-after = run('aws', 'secretsmanager', 'get-secret-value', '--secret-id', value['ARN'])
-require(json.loads(before)['VersionId'] == json.loads(after)['VersionId'], 'refused enrollment changed the profile')
-# Codex would read the access token first, so a profile cannot carry both Codex credentials.
-for models in ({'openai_api_key':'synthetic-profile-openai', 'codex_access_token':'at-synthetic-profile-codex'},
-               {'codex_access_token':'synthetic-profile-codex'}):
-    path.write_text(json.dumps(dict(profile, models=models)))
-    failed = subprocess.run(['buzz-agent-profile', 'enroll', '--arn', value['ARN'], '--file', str(path)],
-                            env=env, capture_output=True, text=True, timeout=60)
-    require(failed.returncode != 0 and 'synthetic-profile-' not in failed.stdout+failed.stderr, 'invalid Codex credentials were enrolled or leaked')
-after = run('aws', 'secretsmanager', 'get-secret-value', '--secret-id', value['ARN'])
-require(json.loads(before)['VersionId'] == json.loads(after)['VersionId'], 'refused enrollment changed the profile')
-print(json.dumps({'arn':value['ARN'], 'version':receipt['version_id']}))
+value = json.loads(run('aws', 'secretsmanager', 'create-secret', '--name',
+                      'voltage/staging/agents/alice/profile', '--secret-string', 'file://'+str(path)))
+print(json.dumps({'arn':value['ARN'], 'version':value['VersionId']}))
 '''
 
 BOOT = COMMON + r'''
@@ -88,52 +54,17 @@ tools.mkdir()
     + ('exit 1\n' if mode == 'no-depot' else '')
     + 'case "$3" in */organization) printf fixture-org;; */credential) printf synthetic-profile-depot;; *) exit 1;; esac\n')
 (tools/'op').chmod(0o700)
-# The Codex setup gate requires the image's exact PATH, so its modes keep it.
-if mode not in ('manual-gate', 'gate-api-key'):
-    env['PATH'] = str(tools)+':'+env['PATH']
-def rotate(models, via_profile=None):
+env['PATH'] = str(tools)+':'+env['PATH']
+def rotate(models, git=None):
     stored = json.loads(run('aws', 'secretsmanager', 'get-secret-value', '--secret-id', env['BUZZ_DEVELOPER_PROFILE_ARN']))
     profile = json.loads(stored['SecretString'])
     profile['models'] = models
-    if via_profile is not None:
-        profile['via']['profile'] = via_profile
+    if git is not None:
+        profile['git'] = git
     path = Path('/tmp/rotated-profile.json')
     path.write_text(json.dumps(profile))
     path.chmod(0o600)
     return json.loads(run('aws', 'secretsmanager', 'put-secret-value', '--secret-id', stored['ARN'], '--secret-string', 'file://'+str(path)))
-if mode in ('manual-gate', 'gate-api-key'):
-    # A subscription token may share the profile with the Codex gate; billed API keys may not.
-    # Without the fake op on PATH, a depot service would make the bootstrap call the image's op.
-    no_depot = '[providers.fixture]\ntype="fixture"\n[services.fixture]\nprovider="fixture"\n'
-    updated = (rotate({'claude_oauth_token':'synthetic-profile-claude-oauth'}, no_depot)
-               if mode == 'manual-gate' else None)
-    env.update(BUZZ_SETUP_MODE='codex-device-v1', BUZZ_SETUP_AGENT_PUBKEY='c'*64,
-        BUZZ_SETUP_POD_UID='11111111-2222-3333-4444-555555555555', BUZZ_SETUP_IMAGE_DIGEST='sha256:'+'d'*64,
-        BUZZ_SETUP_NONCE='e'*32, BUZZ_SETUP_DEADLINE=str(int(time.time())+120),
-        BUZZ_MANAGED_AGENT_START_NONCE='f'*32, BUZZ_ACP_AGENT_COMMAND='codex-acp',
-        BUZZ_ACP_MCP_COMMAND='buzz-dev-mcp', BUZZ_ACP_PERMISSION_MODE='agent-full-access',
-        CODEX_HOME='/home/agent/.codex', CODEX_CONFIG='{"cli_auth_credentials_store":"file"}', NO_BROWSER='1')
-    process = subprocess.Popen(['sprig-entrypoint'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    try:
-        if mode == 'gate-api-key':
-            require(process.wait(timeout=60) != 0, 'account gate accepted profile API keys')
-            require(not Path('/home/agent/.agent-setup').exists(), 'refused profile reached the account gate')
-            print('PASS: refused gate-api-key')
-            raise SystemExit(0)
-        for attempt in range(100):
-            if Path('/home/agent/.agent-setup/pending.json').exists(): break
-            require(process.poll() is None, 'profile did not reach the account gate')
-            time.sleep(0.1)
-        else: raise RuntimeError('profile did not reach the account gate')
-        receipt = json.loads(Path('/home/agent/.config/buzz-agent/profile.json').read_text())
-        require(receipt['version_id'] == updated['VersionId'], 'new session did not load the rotated profile')
-        require(not Path('/home/agent/.codex/auth.json').exists(), 'account mode silently became API-key mode')
-    finally:
-        if process.poll() is None: process.terminate()
-        output, error = process.communicate(timeout=10)
-        require('synthetic-profile-' not in output+error, 'account gate leaked a credential')
-    print('PASS: rotated shared profile with a Claude subscription token reaches manual account-login gate')
-    raise SystemExit(0)
 expected = {'OPENAI_API_KEY':'synthetic-profile-openai', 'ANTHROPIC_API_KEY':'synthetic-profile-anthropic',
             'CLAUDE_CODE_OAUTH_TOKEN':None, 'OPENROUTER_API_KEY':None, 'BUZZ_AGENT_PROVIDER':None,
             'SCCACHE_WEBDAV_PASSWORD':'synthetic-profile-depot', 'BUZZ_GIT_IDENTITY':'user'}
@@ -154,6 +85,11 @@ if mode == 'no-depot':
     rotate({'openai_api_key':'synthetic-profile-openai', 'anthropic_api_key':'synthetic-profile-anthropic'})
     expected.update(SCCACHE_WEBDAV_PASSWORD=None)
 if mode == 'inherited-codex': env['CODEX_ACCESS_TOKEN'] = 'at-synthetic-unselected-account'
+# A stored profile the manager would not enroll is refused at startup too.
+if mode == 'mixed-codex':
+    rotate({'openai_api_key':'synthetic-profile-openai', 'codex_access_token':'at-synthetic-profile-codex'})
+if mode == 'gpg-fingerprint':
+    rotate({}, {'name': 'Alice Fixture', 'email': 'alice@example.invalid', 'signing_key': 'A' * 40})
 if mode == 'inherited-openrouter': env['OPENROUTER_API_KEY'] = 'synthetic-unselected-account'
 if mode == 'wrong-owner': env['BUZZ_ACP_AGENT_OWNER'] = 'b'*64
 if mode == 'wrong-developer': env['BUZZ_DEVELOPER_ID'] = 'bob'
@@ -233,10 +169,10 @@ def main():
                                 input=SEED, text=True, capture_output=True, timeout=180)
         if result.returncode: raise RuntimeError('Enrollment fixture failed: '+result.stderr[-2000:])
         receipt = json.loads(result.stdout)
-        print('PASS: one developer enrollment; wrong GitHub actor cannot replace it', flush=True)
+        print('PASS: seeded one enrolled developer profile', flush=True)
         modes = ['valid']*5 + ['wrong-owner', 'wrong-developer', 'mixed-model', 'inherited-claude',
-                               'inherited-codex', 'inherited-openrouter', 'symlink', 'missing', 'gate-api-key', 'claude-oauth',
-                               'subscriptions', 'no-depot', 'manual-gate']
+                               'inherited-codex', 'inherited-openrouter', 'symlink', 'missing', 'claude-oauth',
+                               'subscriptions', 'no-depot', 'mixed-codex', 'gpg-fingerprint']
         for mode in modes:
             result = subprocess.run([*base, '-e', 'BUZZ_DEVELOPER_PROFILE_ARN='+receipt['arn'],
                 '-e', 'BUZZ_DEVELOPER_ID=alice', '-e', 'BUZZ_ACP_AGENT_OWNER='+OWNER,

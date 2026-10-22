@@ -103,9 +103,6 @@ pub struct PodOptions {
     /// Positive absolute Pod lifetime, including startup.
     pub active_deadline_seconds: Option<i64>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    /// Expose the server-assigned Pod UID to a bounded owner setup gate.
-    pub setup_pending: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     /// Mount a short-lived ServiceAccount token so an orchestrating agent can
     /// claim sub-agent Sandboxes (§Sub-agents). Off by default.
     pub enable_subagents: bool,
@@ -453,7 +450,6 @@ pub fn config_schema() -> serde_json::Value {
                     "ephemeral_storage_request": {"type": "string", "minLength": 1},
                     "ephemeral_storage_limit": {"type": "string", "minLength": 1},
                     "active_deadline_seconds": {"type": "integer", "minimum": 1},
-                    "setup_pending": {"type": "boolean", "default": false},
                     "enable_subagents": {"type": "boolean", "default": false},
                     "priority_class_name": {"type": "string", "minLength": 1}
                 }

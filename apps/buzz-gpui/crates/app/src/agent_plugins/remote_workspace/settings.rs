@@ -1,9 +1,9 @@
-//! What the agent launches with: the provider, the harness, its model and
-//! instructions, and the environment. The Kubernetes provider's config is
-//! edited as JSON; the relay provider's is its relay and manager key, and
-//! beside them the form that enrolls a developer profile with the manager.
+//! What the agent launches with: the harness, its model, effort and fast
+//! mode, its instructions, and the environment, beside the form that
+//! enrolls a developer profile with the Sandbox manager. Every agent asks the
+//! manager over its community's relay, with the build's manager key.
 
-use super::config::{Config, KUBERNETES, PROVIDERS, RELAY, RUNTIMES};
+use super::config::{Config, EFFORTS, MANAGER_PUBKEY, RUNTIMES};
 use super::enroll_form::{self, EnrollForm};
 use crate::agent_plugins::tabs::{
     Picking, choice, field, instructions_field, instructions_state, options, saved_config,
@@ -13,25 +13,26 @@ use buzz_ui::{ActiveTheme, Button, Surface, TextArea, TextField, TypeStyled, tok
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Picker {
-    Provider,
     Runtime,
+    Effort,
+    Fast,
 }
+
+/// The Fast mode choices.
+const FAST: &[(&str, &str)] = &[("off", "Off"), ("on", "On")];
 
 pub struct SettingsTab {
     view: AgentView,
     /// The saved settings the draft started from.
     saved: Config,
-    provider: String,
     runtime: String,
     model: Entity<InputState>,
-    /// The Kubernetes provider's config.
-    provider_config: Entity<TextareaState>,
-    relay_url: Entity<InputState>,
-    manager_pubkey: Entity<InputState>,
+    effort: String,
+    fast: bool,
     env: Entity<TextareaState>,
     instructions: Entity<TextareaState>,
     enroll: EnrollForm,
@@ -57,65 +58,20 @@ fn textarea(value: &str, window: &mut Window, cx: &mut App) -> Entity<TextareaSt
 /// The tab's fields, as text.
 #[derive(Clone, Copy, Default)]
 pub struct Draft<'a> {
-    pub provider: &'a str,
     pub runtime: &'a str,
     pub model: &'a str,
-    /// The Kubernetes provider's config, as JSON.
-    pub provider_config: &'a str,
+    pub effort: &'a str,
+    pub fast: bool,
+    /// The agent's community, and the manager key: neither is edited here.
     pub relay_url: &'a str,
     pub manager_pubkey: &'a str,
     pub env: &'a str,
     pub instructions: &'a str,
 }
 
-/// The saved Kubernetes config, for its JSON field; a thread Sandbox
-/// for agents on another provider.
-fn kubernetes_config(saved: &Config) -> Value {
-    if saved.provider == KUBERNETES {
-        saved.provider_config.clone()
-    } else {
-        json!({ "sandbox": true })
-    }
-}
-
-/// The saved relay and manager key, for their fields. The relay is the
-/// agent's community, `community`, until one is saved.
-pub fn relay_fields(saved: &Config, community: &str) -> (String, String) {
-    let text = |name: &str| {
-        (saved.provider == RELAY)
-            .then(|| saved.provider_config.get(name)?.as_str())
-            .flatten()
-            .map(str::to_owned)
-    };
-    (
-        text("relay_url").unwrap_or_else(|| community.to_owned()),
-        text("manager_pubkey").unwrap_or_default(),
-    )
-}
-
-/// The developer ID a Kubernetes config's namespace names, for the
-/// enroll form.
-fn developer_of(saved: &Config) -> &str {
-    saved
-        .provider_config
-        .get("namespace")
-        .and_then(Value::as_str)
-        .and_then(|namespace| namespace.strip_prefix("buzz-agent-staging-"))
-        .unwrap_or_default()
-}
-
 /// The draft as a config: the fields parsed, and the whole checked.
 pub fn parse(saved: &Config, draft: Draft) -> Result<Config, String> {
-    let provider_config = if draft.provider == RELAY {
-        Config::relay(draft.relay_url, draft.manager_pubkey)
-    } else {
-        let config: Value = serde_json::from_str(draft.provider_config)
-            .map_err(|error| format!("The provider config is not valid JSON: {error}"))?;
-        if !config.is_object() {
-            return Err("The provider config must be a JSON object.".into());
-        }
-        config
-    };
+    let provider_config = Config::relay(draft.relay_url, draft.manager_pubkey);
     let env: Value = serde_json::from_str(draft.env)
         .map_err(|error| format!("The environment is not valid JSON: {error}"))?;
     let all_text = env
@@ -125,9 +81,10 @@ pub fn parse(saved: &Config, draft: Draft) -> Result<Config, String> {
         return Err("The environment must be a JSON object of text values.".into());
     }
     let mut value = saved.value();
-    value["provider"] = draft.provider.into();
     value["runtime"] = draft.runtime.into();
     value["model"] = draft.model.trim().into();
+    value["effort"] = draft.effort.into();
+    value["fast"] = draft.fast.into();
     value["provider_config"] = provider_config;
     value["env"] = env;
     value["instructions"] = draft.instructions.into();
@@ -144,33 +101,18 @@ impl SettingsTab {
                 .placeholder("The harness's default")
                 .default_value(saved.model.clone())
         });
-        let provider_config = textarea(&pretty(&kubernetes_config(&saved)), window, cx);
-        let (relay, manager) = relay_fields(&saved, &view.agent.relay);
-        let relay_url = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("wss://")
-                .default_value(relay)
-        });
-        let manager_pubkey = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("64 hex characters")
-                .default_value(manager)
-        });
         let env = textarea(&pretty(&saved.env), window, cx);
         let instructions = instructions_state(&saved.instructions, window, cx);
-        let enroll = EnrollForm::new(developer_of(&saved), window, cx);
+        let enroll = EnrollForm::new(window, cx);
         let mut subscriptions = Vec::new();
-        for input in [&model, &relay_url, &manager_pubkey]
-            .into_iter()
-            .chain(enroll.inputs())
-        {
+        for input in std::iter::once(&model).chain(enroll.inputs()) {
             subscriptions.push(cx.subscribe(input, |_, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
                     cx.notify();
                 }
             }));
         }
-        for area in [&provider_config, &env, &instructions] {
+        for area in [&env, &instructions] {
             subscriptions.push(cx.subscribe(area, |_, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
                     cx.notify();
@@ -188,13 +130,11 @@ impl SettingsTab {
         }
         Self {
             view,
-            provider: saved.provider.clone(),
             runtime: saved.runtime.clone(),
+            effort: saved.effort.clone(),
+            fast: saved.fast,
             saved,
             model,
-            provider_config,
-            relay_url,
-            manager_pubkey,
             env,
             instructions,
             enroll,
@@ -209,19 +149,15 @@ impl SettingsTab {
         self.model.update(cx, |state, cx| {
             state.set_value(saved.model.clone(), window, cx)
         });
-        let (relay, manager) = relay_fields(&saved, &self.view.agent.relay);
-        for (input, text) in [(&self.relay_url, relay), (&self.manager_pubkey, manager)] {
-            input.update(cx, |state, cx| state.set_value(text, window, cx));
-        }
         for (area, text) in [
-            (&self.provider_config, pretty(&kubernetes_config(&saved))),
             (&self.env, pretty(&saved.env)),
             (&self.instructions, saved.instructions.clone()),
         ] {
             area.update(cx, |state, cx| state.set_value(text, window, cx));
         }
-        self.provider = saved.provider.clone();
         self.runtime = saved.runtime.clone();
+        self.effort = saved.effort.clone();
+        self.fast = saved.fast;
         self.saved = saved;
         cx.notify();
     }
@@ -230,12 +166,12 @@ impl SettingsTab {
         parse(
             &self.saved,
             Draft {
-                provider: &self.provider,
                 runtime: &self.runtime,
                 model: &self.model.read(cx).value(),
-                provider_config: &self.provider_config.read(cx).value(),
-                relay_url: &self.relay_url.read(cx).value(),
-                manager_pubkey: &self.manager_pubkey.read(cx).value(),
+                effort: &self.effort,
+                fast: self.fast,
+                relay_url: &self.view.agent.relay,
+                manager_pubkey: MANAGER_PUBKEY,
                 env: &self.env.read(cx).value(),
                 instructions: &self.instructions.read(cx).value(),
             },
@@ -268,30 +204,20 @@ impl SettingsTab {
 }
 
 impl SettingsTab {
-    /// Sends the enroll form to the manager in the relay fields, as the
-    /// signed-in owner. Its tokens are cleared at once, sent or not.
+    /// Sends the enroll form to the Sandbox manager on the agent's
+    /// community, as the signed-in owner. Its tokens are cleared at once,
+    /// sent or not.
     fn enroll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let relay = self.relay_url.read(cx).value().trim().to_owned();
-        let manager = self.manager_pubkey.read(cx).value().trim().to_owned();
+        let relay = self.view.agent.relay.clone();
         let owner = enroll_form::owner(cx);
-        let pubkey = owner
-            .as_ref()
-            .map(|owner| owner.pubkey_hex())
-            .unwrap_or_default();
-        let profile = self.enroll.submit(&pubkey, window, cx);
-        let relay_config = Config {
-            provider: RELAY.into(),
-            provider_config: Config::relay(&relay, &manager),
-            ..Config::default()
-        };
+        let values = self.enroll.submit(window, cx);
         let started = (|| {
             let owner = owner.ok_or("Sign in to enroll a profile.")?;
-            relay_config.validate()?;
             let session = enroll_form::session(&relay, cx)
                 .ok_or("Join the community at the relay to enroll through it.")?;
-            Ok::<_, String>((owner, session, profile?))
+            Ok::<_, String>((owner, session, values))
         })();
-        let (owner, session, profile) = match started {
+        let (owner, session, values) = match started {
             Ok(started) => started,
             Err(error) => {
                 self.enroll.status = Some(Err(error));
@@ -301,15 +227,25 @@ impl SettingsTab {
         };
         self.enroll.sending = true;
         self.enroll.status = None;
-        let sent = crate::runtime::Runtime::handle(cx)
-            .spawn(super::enroll::enroll(session, owner, manager, profile));
+        self.enroll.registration = None;
+        let sent = crate::runtime::Runtime::handle(cx).spawn(super::enroll::run(
+            session,
+            owner,
+            MANAGER_PUBKEY.to_owned(),
+            values,
+        ));
         cx.spawn(async move |this, cx| {
             let outcome = sent
                 .await
                 .unwrap_or_else(|_| Err("The enrollment was cancelled.".into()));
             let _ = this.update(cx, |this, cx| {
                 this.enroll.sending = false;
-                this.enroll.status = Some(outcome);
+                let (status, registration) = match outcome {
+                    Ok((outcome, registration)) => (Ok(outcome), registration),
+                    Err(error) => (Err(error), None),
+                };
+                this.enroll.status = Some(status);
+                this.enroll.registration = registration;
                 cx.notify();
             });
         })
@@ -327,8 +263,9 @@ impl Picking for SettingsTab {
 
     fn pick(&mut self, picker: Picker, value: String, _: &mut Context<Self>) {
         match picker {
-            Picker::Provider => self.provider = value,
             Picker::Runtime => self.runtime = value,
+            Picker::Effort => self.effort = value,
+            Picker::Fast => self.fast = value == "on",
         }
     }
 }
@@ -343,29 +280,16 @@ impl Render for SettingsTab {
             .iter()
             .map(|runtime| (runtime.id.to_string(), runtime.label.to_string()))
             .collect();
+        let model_help = RUNTIMES
+            .iter()
+            .find(|runtime| runtime.id == self.runtime)
+            .map(|runtime| runtime.model_help)
+            .unwrap_or_default();
         div()
             .flex()
             .flex_col()
             .gap(space::S4)
             .children(self.view.type_control(changed, window, cx))
-            .child(field(
-                "Runs on",
-                choice(
-                    self.open,
-                    Picker::Provider,
-                    "remote-workspace-provider",
-                    &self.provider,
-                    options(PROVIDERS),
-                    saving,
-                    window,
-                    cx,
-                ),
-                Some(
-                    "The Sandbox manager starts Sandboxes for you, without cluster access on this device."
-                        .into(),
-                ),
-                &c,
-            ))
             .child(
                 div()
                     .flex()
@@ -391,42 +315,46 @@ impl Render for SettingsTab {
                         TextField::new(&self.model)
                             .surface(Surface::Floating)
                             .disabled(saving),
-                        None,
+                        Some(model_help.into()),
                         &c,
                     ))),
             )
-            .when(self.provider != RELAY, |this| {
-                this.child(field(
-                    "Provider config",
-                    TextArea::new(&self.provider_config)
-                        .rows(10)
-                        .surface(Surface::Floating)
-                        .disabled(saving),
-                    Some(
-                        "buzz-backend-kubernetes settings, such as context, namespace and image. Always a Sandbox per thread; no secrets."
-                            .into(),
-                    ),
-                    &c,
-                ))
-            })
-            .when(self.provider == RELAY, |this| {
-                this.child(field(
-                    "Relay",
-                    TextField::new(&self.relay_url)
-                        .surface(Surface::Floating)
-                        .disabled(saving),
-                    Some("Where the Sandbox manager listens; the agent's community by default.".into()),
-                    &c,
-                ))
-                .child(field(
-                    "Manager key",
-                    TextField::new(&self.manager_pubkey)
-                        .surface(Surface::Floating)
-                        .disabled(saving),
-                    Some("The Sandbox manager's public key, in hex.".into()),
-                    &c,
-                ))
-            })
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(space::S4)
+                    .child(div().flex_1().min_w(rems(14.)).child(field(
+                        "Effort",
+                        choice(
+                            self.open,
+                            Picker::Effort,
+                            "remote-workspace-effort",
+                            &self.effort,
+                            options(EFFORTS),
+                            saving,
+                            window,
+                            cx,
+                        ),
+                        Some("How hard the model thinks, on models that offer it.".into()),
+                        &c,
+                    )))
+                    .child(div().flex_1().min_w(rems(14.)).child(field(
+                        "Fast mode",
+                        choice(
+                            self.open,
+                            Picker::Fast,
+                            "remote-workspace-fast",
+                            if self.fast { "on" } else { "off" },
+                            options(FAST),
+                            saving,
+                            window,
+                            cx,
+                        ),
+                        Some("Faster output on models that offer it, at higher usage.".into()),
+                        &c,
+                    ))),
+            )
             .child(field(
                 "Environment",
                 TextArea::new(&self.env)
@@ -434,7 +362,7 @@ impl Render for SettingsTab {
                     .surface(Surface::Floating)
                     .disabled(saving),
                 Some(
-                    "A JSON object, such as BUZZ_CHECKPOINT_BUCKET and BUZZ_CHECKPOINT_PREFIX. Saved on this device as plain text."
+                    "Usually empty: extra environment for the Sandbox, as a JSON object. Saved on this device as plain text, so never put secrets here."
                         .into(),
                 ),
                 &c,
@@ -445,7 +373,7 @@ impl Render for SettingsTab {
                 "Sent as the harness's system prompt when a thread's Sandbox starts.",
                 &c,
             ))
-            .when(self.provider == RELAY, |this| {
+            .map(|this| {
                 let sending = self.enroll.sending;
                 let owner = enroll_form::owner(cx).map(|owner| owner.pubkey_hex());
                 this.child(self.enroll.render(owner.as_deref(), sending, &c))

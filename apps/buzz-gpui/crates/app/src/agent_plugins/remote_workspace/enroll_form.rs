@@ -2,12 +2,15 @@
 //! manager stores, sent as the signed-in owner. Its tokens are masked,
 //! cleared once sent, and never saved.
 
-use super::enroll::{self, Field, Outcome, Values};
+use super::enroll::{Field, Outcome, Values};
+use super::signing::Registration;
 use crate::agent_plugins::tabs::field;
 use crate::community::{AppState, IdentityState};
 use buzz_identity::Identity;
 use buzz_relay_client::{RelayOrigin, Session};
-use buzz_ui::{Colors, Surface, TextArea, TextField, TypeStyled, tokens::space};
+use buzz_ui::{
+    Button, ButtonSize, Colors, Surface, TextArea, TextField, TypeStyled, tokens::space,
+};
 use gpui_kit::component::input::{InputState, TextareaState};
 use gpui_kit::*;
 use std::sync::Arc;
@@ -19,11 +22,14 @@ pub struct EnrollForm {
     pub sending: bool,
     /// How the last enrollment ended.
     pub status: Option<Result<Outcome, String>>,
+    /// How the last enrollment's signing key reached GitHub.
+    pub registration: Option<Registration>,
 }
 
 impl EnrollForm {
-    /// `developer` prefills the developer ID.
-    pub fn new(developer: &str, window: &mut Window, cx: &mut App) -> Self {
+    /// The Git email starts as this device's `git config --global user.email`.
+    pub fn new(window: &mut Window, cx: &mut App) -> Self {
+        let email = local_git_email();
         let inputs = Field::ALL
             .into_iter()
             .filter(|field| *field != Field::ViaProfile)
@@ -31,8 +37,12 @@ impl EnrollForm {
                 let state = cx.new(|cx| {
                     let state = InputState::new(window, cx).masked(field.secret());
                     match field {
-                        Field::Developer => state.default_value(developer.to_owned()),
-                        Field::AnthropicApiKey | Field::ClaudeOauthToken | Field::OpenaiApiKey => {
+                        Field::GitEmail => state
+                            .placeholder("A verified email on your GitHub account")
+                            .default_value(email.clone()),
+                        Field::CodexAccessToken => state.placeholder("Optional · at-…"),
+                        Field::ClaudeOauthToken => state.placeholder("Optional · sk-ant-oat01-…"),
+                        Field::OpenaiApiKey | Field::AnthropicApiKey | Field::OpenrouterApiKey => {
                             state.placeholder("Optional")
                         }
                         _ => state,
@@ -47,6 +57,7 @@ impl EnrollForm {
             via,
             sending: false,
             status: None,
+            registration: None,
         }
     }
 
@@ -74,18 +85,12 @@ impl EnrollForm {
             .update(cx, |state, cx| state.set_value(text, window, cx));
     }
 
-    /// Takes the profile for `owner` out of the form, leaving its tokens
-    /// cleared whether or not it is valid.
-    pub fn submit(
-        &self,
-        owner: &str,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Result<serde_json::Value, String> {
+    /// Takes the form's values to send, leaving its tokens cleared.
+    pub fn submit(&self, window: &mut Window, cx: &mut App) -> Values {
         let mut values = self.values(cx);
         let sent = values.submit();
         self.write(&values, window, cx);
-        enroll::profile(&sent, owner)
+        sent
     }
 
     pub fn render(&self, owner: Option<&str>, disabled: bool, c: &Colors) -> Div {
@@ -131,8 +136,10 @@ impl EnrollForm {
             .gap(space::S4)
             .child(div().text_label_sm().child("Enroll profile"))
             .child(div().text_body_sm().text_color(c.text_subtle).child(
-                "The Sandbox manager stores this profile for your Sandboxes. Sent encrypted \
-                     to the manager and signed as you; tokens are never saved here.",
+                "Once per developer: every one of your Remote workspace agents uses it. Enrolling \
+                     creates a signing key for your agents' commits; the GitHub CLI (gh) adds it \
+                     to your GitHub account, or the app shows you how. Sent encrypted to the \
+                     Sandbox manager and signed as you; tokens are never saved here.",
             ))
             .child(field(
                 "Buzz owner",
@@ -142,9 +149,7 @@ impl EnrollForm {
                 None,
                 c,
             ))
-            .child(row(&[Field::Developer]))
-            .child(row(&[Field::GitName, Field::GitEmail, Field::SigningKey]))
-            .child(row(&[Field::GithubLogin, Field::GithubToken]))
+            .child(row(&[Field::GithubToken, Field::GitEmail]))
             .child(field(
                 Field::ViaProfile.label(),
                 TextArea::new(&self.via)
@@ -163,7 +168,63 @@ impl EnrollForm {
                 Field::OpenrouterApiKey,
             ]))
             .children(status)
+            .children(
+                self.registration
+                    .as_ref()
+                    .map(|registration| registration_notice(registration, c)),
+            )
     }
+}
+
+/// Where the agents' signing key went: added with `gh`, or the steps for the
+/// developer to add it, so their agents' commits show as Verified.
+fn registration_notice(registration: &Registration, c: &Colors) -> Div {
+    match registration {
+        Registration::Added => div().text_body_sm().text_color(c.text_success).child(
+            "Added your agents' signing key to your GitHub account (Settings → SSH and GPG keys).",
+        ),
+        Registration::Manual { public, reason } => {
+            let copied = public.clone();
+            div()
+                .flex()
+                .flex_col()
+                .gap(space::S2)
+                .child(div().text_label_sm().child("Add your agents' signing key to GitHub"))
+                .child(div().text_body_sm().text_color(c.text_subtle).child(format!(
+                    "Until you add it, your agents' commits are signed but show as Unverified. \
+                     The app could not add it for you: {reason}."
+                )))
+                .child(div().text_body_sm().child(
+                    "1. On GitHub, open Settings → SSH and GPG keys and press New SSH key. \
+                     2. Set Key type to Signing Key. 3. Paste the key below and press Add SSH key.",
+                ))
+                .child(div().text_body_sm().font_family("monospace").child(public.clone()))
+                .child(
+                    div().flex().child(
+                        Button::new("remote-workspace-copy-signing-key", "Copy key")
+                            .size(ButtonSize::Sm)
+                            .outline()
+                            .on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
+                            }),
+                    ),
+                )
+        }
+    }
+}
+
+/// `git config --global user.email` on this device, or empty.
+fn local_git_email() -> String {
+    std::process::Command::new("git")
+        .args(["config", "--global", "user.email"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|email| email.trim().to_owned())
+        .unwrap_or_default()
 }
 
 /// The signed-in owner.

@@ -106,38 +106,6 @@ fn options_parse_accepts_only_a_canonical_thread_scope() {
     }
 }
 
-fn identity() -> naming::AgentIdentity {
-    naming::AgentIdentity::from_nsec(&nostr::Keys::generate().secret_key().to_bech32().unwrap())
-        .unwrap()
-}
-
-#[test]
-fn account_setup_refuses_any_other_mode_runtime_or_permission() {
-    let cfg = crate::config::parse(&json!({"namespace":"agents",
-        "image":format!("example.com/agent@sha256:{}", "a".repeat(64))}))
-    .unwrap();
-    for (key, value) in [
-        ("BUZZ_SETUP_MODE", "codex-device-v2"),
-        ("BUZZ_ACP_AGENT_COMMAND", "claude-agent-acp"),
-        ("BUZZ_ACP_PERMISSION_MODE", "default"),
-    ] {
-        let mut cfg = cfg.clone();
-        let mut env = fixture_env();
-        env.insert(key.into(), value.into());
-        let before = env.clone();
-        assert!(configure_setup(&mut cfg, &identity(), &mut env)
-            .unwrap_err()
-            .contains("codex-device-v1"));
-        assert_eq!(env, before, "a refused setup must not change the launch");
-        assert!(!cfg.pod_options.setup_pending);
-    }
-    let mut cfg = cfg.clone();
-    let mut env = fixture_env();
-    configure_setup(&mut cfg, &identity(), &mut env).unwrap();
-    assert!(cfg.pod_options.setup_pending);
-    assert!(!env.contains_key("BUZZ_SETUP_POD_UID"));
-}
-
 #[test]
 fn session_env_requires_checkpoint_storage_unless_disabled() {
     let scope = Options {
@@ -187,17 +155,11 @@ fn fixture_env() -> BTreeMap<String, String> {
         ("BUZZ_RELAY_URL".into(), "wss://fixture.invalid".into()),
         ("BUZZ_CHECKPOINT_BUCKET".into(), "fixture-bucket".into()),
         ("BUZZ_CHECKPOINT_PREFIX".into(), "fixture/".into()),
-        ("BUZZ_SETUP_MODE".into(), "codex-device-v1".into()),
         ("BUZZ_ACP_AGENT_COMMAND".into(), "codex-acp".into()),
         (
             "BUZZ_ACP_PERMISSION_MODE".into(),
             "agent-full-access".into(),
         ),
-        (
-            "BUZZ_SETUP_AGENT_PUBKEY".into(),
-            "stale-caller-value".into(),
-        ),
-        ("BUZZ_SETUP_POD_UID".into(), "stale-caller-value".into()),
     ])
 }
 
@@ -277,13 +239,7 @@ async fn live_controller_reuses_scopes_and_refuses_lost_workspaces() {
     let before = secrets.list(&ListParams::default()).await.unwrap();
     assert_eq!(before.items.len(), 1);
     let data = before.items[0].data.as_ref().unwrap();
-    assert_eq!(
-        data["BUZZ_SETUP_AGENT_PUBKEY"].0,
-        identity.pubkey_hex().as_bytes()
-    );
-    assert_eq!(data["BUZZ_SETUP_NONCE"].0.len(), 32);
     assert_eq!(data["BUZZ_MANAGED_AGENT_START_NONCE"].0.len(), 32);
-    assert!(!data.contains_key("BUZZ_SETUP_POD_UID"));
     assert_eq!(
         deploy(
             client.clone(),
@@ -301,7 +257,7 @@ async fn live_controller_reuses_scopes_and_refuses_lost_workspaces() {
     assert_eq!(after.items.len(), 1);
     assert_eq!(
         after.items[0].data, before.items[0].data,
-        "retry must preserve setup binding and deadline"
+        "a retry must reuse the launch Secret"
     );
     assert!(deploy(
         client.clone(),

@@ -30,9 +30,10 @@ use tokio::time::timeout;
 use uuid::Uuid;
 
 use crate::acp::{
-    extract_model_config_options, extract_model_state, extract_thought_level_config_id,
-    model_in_catalog, resolve_model_switch_method, AcpClient, AcpError, EnvVar, McpServer,
-    ModelSwitchMethod, StopReason, SystemPromptTransport, BUZZ_PI_ACP_NAME,
+    extract_fast_mode_config_id, extract_model_config_options, extract_model_state,
+    extract_thought_level_config_id, model_in_catalog, parse_fast_mode,
+    resolve_model_switch_method, AcpClient, AcpError, EnvVar, McpServer, ModelSwitchMethod,
+    StopReason, SystemPromptTransport, BUZZ_PI_ACP_NAME,
 };
 use crate::config::{compose_scoped_session_title, DedupMode, PermissionMode};
 use crate::observer;
@@ -1792,6 +1793,9 @@ async fn create_session_and_apply_model(
     // the cached configOptions tell the truth about the running session.
     let effort_snapshot = post_switch_snapshot.as_ref().unwrap_or(&resp.raw);
     let effort_outcome = apply_startup_effort(agent, effort_snapshot, &resp.session_id).await?;
+    // Fast mode, from BUZZ_ACP_FAST_MODE, the same way: per session, on the
+    // running model's option, and skipped when the model has none.
+    let fast_outcome = apply_startup_fast_mode(agent, effort_snapshot, &resp.session_id).await?;
 
     // Emit session config for desktop consumption (config bridge tier 1b).
     // Emitted AFTER desired_model resolution so the desktop caches the
@@ -1810,8 +1814,10 @@ async fn create_session_and_apply_model(
             .get("configOptions")
             .cloned()
             .unwrap_or(serde_json::Value::Null);
-        if let Some(StartupEffortOutcome::Applied { config_id, value }) = &effort_outcome {
-            patch_config_option_current_value(&mut opts, config_id, value);
+        for outcome in [&effort_outcome, &fast_outcome] {
+            if let Some(StartupEffortOutcome::Applied { config_id, value }) = outcome {
+                patch_config_option_current_value(&mut opts, config_id, value);
+            }
         }
         opts
     };
@@ -2122,6 +2128,71 @@ async fn apply_startup_effort(
             tracing::error!(
                 target: "pool::effort",
                 "startup effort {value} via configId={config_id} timed out ({MODEL_SWITCH_TIMEOUT:?}) — treating as fatal"
+            );
+            Err(AcpError::Timeout(MODEL_SWITCH_TIMEOUT))
+        }
+    }
+}
+
+/// Apply `BUZZ_ACP_FAST_MODE` via `session/set_config_option`, if it is set and
+/// the running model advertises a fast-mode option. Errors are classified as
+/// [`apply_startup_effort`] classifies them: transport-class errors propagate,
+/// and a rejection leaves the session on the adapter's default speed.
+async fn apply_startup_fast_mode(
+    agent: &mut OwnedAgent,
+    session_new_result: &serde_json::Value,
+    session_id: &str,
+) -> Result<Option<StartupEffortOutcome>, AcpError> {
+    let Some(value) = parse_fast_mode(std::env::var("BUZZ_ACP_FAST_MODE").ok().as_deref()) else {
+        return Ok(None);
+    };
+    let Some(config_id) = extract_fast_mode_config_id(session_new_result) else {
+        tracing::info!(
+            target: "pool::fast",
+            "fast mode {value} configured but the model advertises no fast-mode option — leaving agent default"
+        );
+        return Ok(None);
+    };
+    let result = tokio::time::timeout(MODEL_SWITCH_TIMEOUT, async {
+        agent
+            .acp
+            .session_set_config_option(session_id, &config_id, value)
+            .await
+    })
+    .await;
+    match result {
+        Ok(Ok(_)) => {
+            tracing::info!(
+                target: "pool::fast",
+                "applied fast mode {value} via configId={config_id} on session {session_id}"
+            );
+            Ok(Some(StartupEffortOutcome::Applied {
+                config_id,
+                value: value.to_string(),
+            }))
+        }
+        Ok(Err(e @ AcpError::Io(_)))
+        | Ok(Err(e @ AcpError::WriteTimeout(_)))
+        | Ok(Err(e @ AcpError::Timeout(_)))
+        | Ok(Err(e @ AcpError::Protocol(_)))
+        | Ok(Err(e @ AcpError::AgentExited)) => {
+            tracing::error!(
+                target: "pool::fast",
+                "fatal error applying fast mode {value} via configId={config_id}: {e}"
+            );
+            Err(e)
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(
+                target: "pool::fast",
+                "adapter rejected fast mode {value} via configId={config_id}: {e} — proceeding with agent default"
+            );
+            Ok(Some(StartupEffortOutcome::Rejected))
+        }
+        Err(_) => {
+            tracing::error!(
+                target: "pool::fast",
+                "fast mode {value} via configId={config_id} timed out ({MODEL_SWITCH_TIMEOUT:?}) — treating as fatal"
             );
             Err(AcpError::Timeout(MODEL_SWITCH_TIMEOUT))
         }

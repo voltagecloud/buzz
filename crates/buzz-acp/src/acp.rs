@@ -2291,6 +2291,32 @@ pub fn extract_thought_level_config_id(result: &serde_json::Value) -> Option<Str
     None
 }
 
+/// The ids adapters give their fast-mode option: claude-agent-acp's `fast` and
+/// codex-acp's `fast-mode`. Both take `"on"` or `"off"`.
+const FAST_MODE_CONFIG_IDS: &[&str] = &["fast", "fast-mode"];
+
+/// The fast-mode option a `session/new` response advertises, if any: absent
+/// when the model does not support fast mode.
+pub fn extract_fast_mode_config_id(result: &serde_json::Value) -> Option<String> {
+    result["configOptions"].as_array()?.iter().find_map(|opt| {
+        let id = opt
+            .get("configId")
+            .or_else(|| opt.get("id"))
+            .and_then(|v| v.as_str())?;
+        FAST_MODE_CONFIG_IDS.contains(&id).then(|| id.to_string())
+    })
+}
+
+/// `BUZZ_ACP_FAST_MODE`, as the value to set: `on` or `off`, or `None` when
+/// it is unset or not a recognized switch.
+pub fn parse_fast_mode(raw: Option<&str>) -> Option<&'static str> {
+    match raw?.trim().to_ascii_lowercase().as_str() {
+        "on" | "true" | "1" => Some("on"),
+        "off" | "false" | "0" => Some("off"),
+        _ => None,
+    }
+}
+
 /// Match a desired model ID against a fresh `session/new` response.
 ///
 /// Returns the correct ACP method to call, or `None` if no match.
@@ -2951,6 +2977,38 @@ mod tests {
     fn extract_model_state_none_when_absent() {
         let result = serde_json::json!({ "sessionId": "sess-1" });
         assert!(super::extract_model_state(&result).is_none());
+    }
+
+    #[test]
+    fn fast_mode_is_found_under_either_adapters_id() {
+        for id in ["fast", "fast-mode"] {
+            let result = serde_json::json!({"configOptions": [
+                {"id": "model", "category": "model"},
+                {"id": id, "category": "model_config", "type": "select"},
+            ]});
+            assert_eq!(extract_fast_mode_config_id(&result).as_deref(), Some(id));
+        }
+        let none =
+            serde_json::json!({"configOptions": [{"id": "effort", "category": "thought_level"}]});
+        assert_eq!(extract_fast_mode_config_id(&none), None);
+        assert_eq!(extract_fast_mode_config_id(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn fast_mode_switch_values() {
+        for (raw, want) in [
+            (Some("on"), Some("on")),
+            (Some(" TRUE "), Some("on")),
+            (Some("1"), Some("on")),
+            (Some("off"), Some("off")),
+            (Some("false"), Some("off")),
+            (Some("0"), Some("off")),
+            (Some("fast"), None),
+            (Some(""), None),
+            (None, None),
+        ] {
+            assert_eq!(parse_fast_mode(raw), want, "{raw:?}");
+        }
     }
 
     #[test]

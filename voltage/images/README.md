@@ -1,6 +1,7 @@
 # Voltage images
 
 This directory holds the container images that Voltage builds from this fork for Buzz remote agents.
+To set up and use remote agents, see [Run Buzz agents in staging Sandboxes](../remote-agents.md).
 It is Voltage-only, so upstream block/buzz syncs do not conflict with it.
 The agent images moved here from voltagecloud/images at `f944157`.
 The same workflow also builds the Buzz relay image from the upstream root `Dockerfile`; see [The relay image](#the-relay-image).

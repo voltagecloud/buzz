@@ -2030,8 +2030,10 @@ credentials (IRSA), and replies `done` with `{"ok":true,"version_id":"<id>"}`.
 A failed write is `profile_store_failed`. Replies, logs and refusal
 messages never contain a profile value; the serialized profile is zeroized
 after the write. Neither the check nor the write uses the filesystem.
-Unlike `profile.py enroll`, the manager does not check the 1Password token
-(`op whoami`); the image still refuses a profile it cannot load.
+The manager does not check the 1Password token (`op whoami`); the image
+still refuses a profile it cannot load. A profile with an empty `developer`
+gets the signing owner's developer ID before validation, so the client need
+not know it.
 
 **The relay provider.** `buzz-backend-relay` (`crates/buzz-backend-relay`)
 speaks the provider protocol on stdin and stdout like

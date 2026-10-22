@@ -4,6 +4,7 @@
 //! `done` reply. Tokens are never saved or logged, and leave the form once
 //! it is sent.
 
+use super::signing::{self, GitHubIdentity};
 use buzz_identity::Identity;
 use buzz_relay_client::Session;
 use buzz_relay_client::socket::{MAX_PUBLICATION_FRAME, SubscriptionEvent};
@@ -22,12 +23,8 @@ pub const TIMEOUT: Duration = Duration::from_secs(60);
 /// A form field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Field {
-    Developer,
-    GitName,
-    GitEmail,
-    SigningKey,
-    GithubLogin,
     GithubToken,
+    GitEmail,
     ViaProfile,
     OpToken,
     CodexAccessToken,
@@ -38,13 +35,9 @@ pub enum Field {
 }
 
 impl Field {
-    pub const ALL: [Field; 13] = [
-        Field::Developer,
-        Field::GitName,
-        Field::GitEmail,
-        Field::SigningKey,
-        Field::GithubLogin,
+    pub const ALL: [Field; 9] = [
         Field::GithubToken,
+        Field::GitEmail,
         Field::ViaProfile,
         Field::OpToken,
         Field::CodexAccessToken,
@@ -70,12 +63,8 @@ impl Field {
 
     pub fn label(self) -> &'static str {
         match self {
-            Field::Developer => "Developer ID",
-            Field::GitName => "Git name",
-            Field::GitEmail => "Git email",
-            Field::SigningKey => "Signing key fingerprint",
-            Field::GithubLogin => "GitHub login",
             Field::GithubToken => "GitHub token",
+            Field::GitEmail => "Git email",
             Field::ViaProfile => "via profile",
             Field::OpToken => "1Password service account token",
             Field::CodexAccessToken => "Codex access token",
@@ -129,7 +118,15 @@ impl Values {
 }
 
 /// The profile `profile.py` validates, for the owner `owner`, or why not.
-pub fn profile(values: &Values, owner: &str) -> Result<Value, String> {
+/// `github` is the token's account, which names the Git author, and
+/// `signing_key` the agent-only key commits are signed with. The developer
+/// ID is left for the Sandbox manager, which knows it from the owner key.
+pub fn profile(
+    values: &Values,
+    owner: &str,
+    github: &GitHubIdentity,
+    signing_key: &str,
+) -> Result<Value, String> {
     let text = |field| values.get(field).trim();
     let models: Map<String, Value> = Field::ALL
         .into_iter()
@@ -139,14 +136,14 @@ pub fn profile(values: &Values, owner: &str) -> Result<Value, String> {
         .collect();
     let profile = json!({
         "version": 1,
-        "developer": text(Field::Developer),
+        "developer": "",
         "owner_pubkey": owner,
         "git": {
-            "name": text(Field::GitName),
+            "name": github.name,
             "email": text(Field::GitEmail),
-            "signing_key": text(Field::SigningKey),
+            "ssh_signing_key": signing_key,
         },
-        "github": {"login": text(Field::GithubLogin), "token": text(Field::GithubToken)},
+        "github": {"login": github.login, "token": text(Field::GithubToken)},
         "via": {"profile": values.get(Field::ViaProfile), "op_token": text(Field::OpToken)},
         "models": models,
     });
@@ -180,11 +177,13 @@ pub fn validate(profile: &Value) -> Result<(), String> {
         profile["version"] == json!(1),
         "Unsupported profile version",
     )?;
+    // Empty until the manager fills in the signing owner's developer ID.
     require(
-        matches(
-            &profile["developer"],
-            "[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?",
-        ),
+        profile["developer"] == json!("")
+            || matches(
+                &profile["developer"],
+                "[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?",
+            ),
         "Invalid developer ID",
     )?;
     require(
@@ -192,16 +191,19 @@ pub fn validate(profile: &Value) -> Result<(), String> {
         "Invalid Buzz owner",
     )?;
     let git = &profile["git"];
-    fields(git, &["name", "email", "signing_key"])?;
-    for value in git.as_object().into_iter().flat_map(|git| git.values()) {
+    fields(git, &["name", "email", "ssh_signing_key"])?;
+    for value in [&git["name"], &git["email"]] {
         let ok = value.as_str().is_some_and(|text| {
             (1..=256).contains(&text.chars().count()) && !text.chars().any(|c| (c as u32) < 32)
         });
         require(ok, "Invalid Git identity")?;
     }
     require(
-        matches(&git["signing_key"], "[0-9A-Fa-f]{40,64}"),
-        "Use a full OpenPGP signing fingerprint",
+        matches(
+            &git["ssh_signing_key"],
+            "-----BEGIN OPENSSH PRIVATE KEY-----\\n[A-Za-z0-9+/=\\n]{1,4000}-----END OPENSSH PRIVATE KEY-----\\n?",
+        ),
+        "Invalid SSH signing key",
     )?;
     let github = &profile["github"];
     fields(github, &["login", "token"])?;
@@ -390,6 +392,36 @@ pub async fn done<T>(
 /// Signs the `enroll` request for `profile` to `manager` as `identity`,
 /// sends it on `session`'s live socket, and waits up to [`TIMEOUT`] for
 /// its `done` reply.
+/// Enrolls the form's `values` as `identity`: reads the GitHub token's
+/// account, creates the agent-only signing key, and sends the profile. Once
+/// the manager stores it, the key's public half goes to that account with the
+/// local `gh`, or back to the developer to add; the token needs no account
+/// permission either way.
+pub async fn run(
+    session: Arc<Session>,
+    identity: Arc<Identity>,
+    manager: String,
+    values: Values,
+) -> Result<(Outcome, Option<signing::Registration>), String> {
+    let token = values.get(Field::GithubToken).trim().to_owned();
+    if token.is_empty() {
+        return Err("Enter a GitHub token.".into());
+    }
+    let github = signing::identity(&token).await?;
+    let key = signing::generate(&format!("buzz agents {}", github.login)).await?;
+    let profile = profile(&values, &identity.pubkey_hex(), &github, &key.private)?;
+    let outcome = enroll(session, identity, manager, profile).await?;
+    if !matches!(outcome, Outcome::Enrolled { .. }) {
+        return Ok((outcome, None));
+    }
+    let title = format!(
+        "Buzz agents ({})",
+        chrono::Utc::now().format("%Y-%m-%d %H:%M UTC")
+    );
+    let registration = signing::register(&github.login, &title, &key.public).await;
+    Ok((outcome, Some(registration)))
+}
+
 pub async fn enroll(
     session: Arc<Session>,
     identity: Arc<Identity>,

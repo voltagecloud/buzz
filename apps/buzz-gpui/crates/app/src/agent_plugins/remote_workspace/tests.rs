@@ -1,5 +1,5 @@
 use super::config::Config;
-use super::settings::{Draft, parse, relay_fields};
+use super::settings::{Draft, parse};
 use super::*;
 use crate::agents2::attention::{Channels, EventData, EventWatch, TimerWatch};
 use crate::agents2::runtime::{AgentAttention, AgentHandle, CancelSource, Working, always_current};
@@ -93,7 +93,7 @@ async fn host() -> (HostLink, Arc<Mutex<Vec<SandboxRequest>>>) {
 
 fn config() -> serde_json::Value {
     json!({
-        "provider_config": {"context": "voltage-staging", "namespace": "agents"},
+        "provider_config": {"relay_url": RELAY, "manager_pubkey": MANAGER},
         "env": {"BUZZ_CHECKPOINT_PREFIX": "tee8z/"},
         "model": "opus",
     })
@@ -172,7 +172,8 @@ async fn a_mention_starts_its_threads_session() {
     let config: serde_json::Value =
         serde_json::from_str(&session.spec.provider_config_json).unwrap();
     assert_eq!(config["sandbox"], true, "always a thread Sandbox");
-    assert_eq!(config["namespace"], "agents");
+    assert_eq!(config["relay_url"], RELAY);
+    assert_eq!(config["manager_pubkey"], MANAGER);
     assert_eq!(session.spec.env["BUZZ_CHECKPOINT_PREFIX"], "tee8z/");
     assert_eq!(session.spec.launch.command, "claude-agent-acp");
     assert_eq!(session.spec.launch.policy_env["ANTHROPIC_MODEL"], "opus");
@@ -225,43 +226,21 @@ async fn watches_timers_and_strangers_start_nothing() {
 }
 
 #[test]
-fn settings_refuse_a_bad_provider_config() {
+fn settings_refuse_a_bad_environment() {
     let saved = Config::read(&config());
-    let parsed = |provider_config: &str, env: &str| {
+    let parsed = |env: &str| {
         let draft = Draft {
-            provider: "kubernetes",
             runtime: "codex",
-            provider_config,
             env,
-            ..Default::default()
+            ..relay_draft(RELAY, MANAGER)
         };
         parse(&saved, draft)
     };
-    let config = parsed(r#"{"namespace": "agents", "sandbox": false}"#, "{}").unwrap();
+    let config = parsed(r#"{"BUZZ_CHECKPOINT_PREFIX": "tee8z/"}"#).unwrap();
     assert_eq!(config.provider_config["sandbox"], true);
     assert_eq!(config.runtime, "codex");
-    // A staging Sandbox config, with its toleration's `key`.
-    let staging = json!({
-        "context": "voltage-staging", "namespace": "buzz-agent-staging-tee8z",
-        "image": "498537461460.dkr.ecr.us-west-2.amazonaws.com/voltage-buzz-agent-staging@sha256:c5466fa2ecdf51e0095448995ff5484daf438c1bf818930e7ad4f385b2b49cec",
-        "cpu_request": "500m", "service_account": "agent-workspace", "sandbox": true,
-        "pod_options": {"active_deadline_seconds": 43200, "tolerations": [
-            {"effect": "NoSchedule", "key": "workload", "operator": "Equal", "value": "remote-agents"},
-        ]},
-    });
-    let env = r#"{"BUZZ_CHECKPOINT_BUCKET": "bucket", "BUZZ_CHECKPOINT_PREFIX": "tee8z/"}"#;
-    assert!(parsed(&staging.to_string(), env).is_ok());
-    for (provider_config, env) in [
-        (r#"{"api_token": "x"}"#, "{}"),
-        ("[]", "{}"),
-        ("{", "{}"),
-        ("{}", r#"{"BAD-NAME": "x"}"#),
-        ("{}", r#"{"COUNT": 1}"#),
-    ] {
-        assert!(
-            parsed(provider_config, env).is_err(),
-            "{provider_config} {env}"
-        );
+    for env in ["{", "[]", r#"{"BAD-NAME": "x"}"#, r#"{"COUNT": 1}"#] {
+        assert!(parsed(env).is_err(), "{env}");
     }
 }
 
@@ -270,7 +249,6 @@ const MANAGER: &str = "5be7aa6bbcf1e8a4b4b4bd0b2a2a0e0c3fa4a4b7f5a1d1cb6d1d2e7f9
 /// A relay draft for `relay` and `manager`.
 fn relay_draft<'a>(relay: &'a str, manager: &'a str) -> Draft<'a> {
     Draft {
-        provider: "relay",
         runtime: "claude",
         relay_url: relay,
         manager_pubkey: manager,
@@ -288,12 +266,6 @@ fn settings_take_the_relay_provider_by_its_relay_and_manager_only() {
         config.provider_config,
         json!({"relay_url": RELAY, "manager_pubkey": MANAGER, "sandbox": true})
     );
-    // The Kubernetes JSON is not read for the relay provider.
-    let draft = Draft {
-        provider_config: "{",
-        ..relay_draft(RELAY, MANAGER)
-    };
-    assert!(parse(&saved, draft).is_ok());
     let (upper, long) = (MANAGER.to_uppercase(), format!("{MANAGER}0"));
     for (relay, manager) in [
         ("https://relay.example", MANAGER),
@@ -331,30 +303,37 @@ fn validation_follows_each_providers_schema() {
         config[key] = value;
         assert!(relay(config).validate().is_err(), "{key}");
     }
-    // Kubernetes keeps its own config; the relay's fields are no help there.
-    let kubernetes = Config::read(&json!({"provider": "kubernetes", "provider_config": base}));
-    assert!(kubernetes.validate().is_ok());
-    let other = Config::read(&json!({"provider": "docker", "provider_config": {}}));
-    assert!(other.validate().is_err());
-    let ids: Vec<_> = super::config::PROVIDERS.iter().map(|(id, _)| *id).collect();
-    assert_eq!(ids, buzz_remote_sessions::THREAD_PROVIDERS);
 }
 
+/// Settings asks the agent's community and the build's manager, whatever
+/// the saved config names, and saves effort and fast mode.
 #[test]
-fn the_relay_field_starts_as_the_agents_community() {
-    let kubernetes = Config::read(&config());
+fn settings_use_the_community_and_the_builds_manager() {
+    let saved = Config::read(&config());
+    let draft = Draft {
+        effort: "xhigh",
+        fast: true,
+        ..relay_draft("wss://community.example", super::config::MANAGER_PUBKEY)
+    };
+    let config = parse(&saved, draft).unwrap();
     assert_eq!(
-        relay_fields(&kubernetes, "wss://community.example"),
-        ("wss://community.example".into(), String::new())
+        config.provider_config,
+        json!({
+            "relay_url": "wss://community.example",
+            "manager_pubkey": super::config::MANAGER_PUBKEY,
+            "sandbox": true,
+        })
     );
-    let saved = Config::read(&json!({
-        "provider": "relay",
-        "provider_config": {"relay_url": RELAY, "manager_pubkey": MANAGER},
-    }));
-    assert_eq!(
-        relay_fields(&saved, "wss://community.example"),
-        (RELAY.into(), MANAGER.into())
-    );
+    assert_eq!((config.effort.as_str(), config.fast), ("xhigh", true));
+    let spec = config.spec("Ada", None);
+    assert_eq!(spec.launch.policy_env["BUZZ_ACP_EFFORT_LEVEL"], "xhigh");
+    assert_eq!(spec.launch.policy_env["BUZZ_ACP_FAST_MODE"], "on");
+    // Defaults leave both to the harness; an unknown effort reads as the default.
+    let plain = Config::read(&json!({"effort": "turbo", "fast": "yes"}));
+    assert_eq!((plain.effort.as_str(), plain.fast), ("", false));
+    let spec = plain.spec("Ada", None);
+    assert!(!spec.launch.policy_env.contains_key("BUZZ_ACP_EFFORT_LEVEL"));
+    assert!(!spec.launch.policy_env.contains_key("BUZZ_ACP_FAST_MODE"));
 }
 
 #[tokio::test]
@@ -413,12 +392,11 @@ fn the_launch_follows_the_desktops_policy() {
         vec!["BUZZ_CHECKPOINT_PREFIX"]
     );
 
-    config.runtime = "goose".into();
-    let goose = config.spec("Ada", None);
-    assert_eq!(goose.launch.args, vec!["acp"]);
-    assert_eq!(goose.launch.policy_env["GOOSE_MODE"], "auto");
-    assert_eq!(goose.launch.policy_env["BUZZ_ACP_MODEL"], "opus");
-    assert!(goose.env.contains_key("ANTHROPIC_MODEL"));
+    config.runtime = "codex".into();
+    let codex = config.spec("Ada", None);
+    assert_eq!(codex.launch.command, "codex-acp");
+    assert_eq!(codex.launch.policy_env["BUZZ_ACP_MODEL"], "opus");
+    assert!(codex.env.contains_key("ANTHROPIC_MODEL"));
 
     // The Buzz agent reads its startup model, such as an OpenRouter model ID, itself.
     config.runtime = "buzz-agent".into();
@@ -450,4 +428,17 @@ fn instructions_carry_across_a_type_change() {
             .instructions,
         None
     );
+}
+
+/// Every agent runs through the Sandbox manager: a new one starts there, and
+/// a config naming another provider is read as the relay's.
+#[test]
+fn agents_run_through_the_sandbox_manager() {
+    let defaults = Config::read(&RemoteWorkspace.defaults().config);
+    assert_eq!(defaults.provider, "relay");
+    let other = Config::read(
+        &json!({"provider": "kubernetes", "provider_config": {"namespace": "agents"}}),
+    );
+    assert_eq!(other.provider, "relay");
+    assert!(other.validate().is_err(), "the relay takes no namespace");
 }

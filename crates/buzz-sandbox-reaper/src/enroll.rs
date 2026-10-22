@@ -28,21 +28,28 @@ const MAX_GITHUB_BODY: usize = 256 * 1024;
 
 /// Enrollment steps 2 to 4, in order: the profile names the signing owner
 /// and that owner's developer, and passes `profile.py`'s validation.
+/// A profile without a developer ID gets the signing owner's, so a
+/// developer never needs to know the Terraform key they are listed under.
 /// Returns the profile to store, or the refusal.
 pub fn admit_profile(
     payload: &Value,
     owner: &PublicKey,
     developer: &Developer,
 ) -> Result<Value, (ErrorCode, &'static str)> {
-    let profile = payload
+    let mut profile = payload
         .as_object()
         .filter(|payload| payload.len() == 1)
         .and_then(|payload| payload.get("profile"))
         .filter(|profile| profile.is_object())
+        .cloned()
         .ok_or((
             ErrorCode::InvalidProfile,
             "the enroll payload must be {\"profile\": <object>}",
         ))?;
+    let named = profile.get("developer").and_then(Value::as_str);
+    if named.is_none_or(str::is_empty) {
+        profile["developer"] = Value::String(developer.id.clone());
+    }
     if profile.get("owner_pubkey").and_then(Value::as_str) != Some(owner.to_hex().as_str()) {
         return Err((
             ErrorCode::ProfileOwnerMismatch,
@@ -55,9 +62,9 @@ pub fn admit_profile(
             "the profile's developer is not the signing owner's developer ID",
         ));
     }
-    profile::validate(profile)
+    profile::validate(&profile)
         .map_err(|profile::Invalid(message)| (ErrorCode::InvalidProfile, message))?;
-    Ok(profile.clone())
+    Ok(profile)
 }
 
 /// Why a profile write failed: a stable label, safe to log and to show.

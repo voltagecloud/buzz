@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Enroll one developer profile and load it into that developer's Sandboxes."""
+"""Load the developer profile the Sandbox manager enrolled into that developer's Sandboxes."""
 import argparse
 import json
 import os
@@ -8,7 +8,6 @@ import re
 import stat
 import subprocess
 import sys
-import tempfile
 import tomllib
 
 MAX_BYTES = 65536
@@ -16,13 +15,13 @@ DIRECTORY = Path('/home/agent/.config/buzz-agent')
 FIELDS = {'version', 'developer', 'owner_pubkey', 'git', 'github', 'via', 'models'}
 MODEL_FIELDS = {'openai_api_key', 'codex_access_token', 'anthropic_api_key', 'claude_oauth_token',
                 'openrouter_api_key'}
-# The Codex device-login gate refuses these: billed API keys and a Codex access token.
-API_KEY_FIELDS = {'openai_api_key', 'codex_access_token', 'anthropic_api_key', 'openrouter_api_key'}
 # Inherited values would override or mix with the profile's selected accounts.
 INHERITED_MODEL_VARIABLES = ('OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_ACCESS_TOKEN', 'ANTHROPIC_API_KEY',
                              'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'OPENROUTER_API_KEY')
 # The shared Depot cache credential: the via profile's `depot` service, read from the vault.
 DEPOT_SERVICE = 'depot'
+# The developer's agent-only commit signing key, registered on their GitHub account at enrollment.
+SSH_SIGNING_KEY = re.compile(r'-----BEGIN OPENSSH PRIVATE KEY-----\n[A-Za-z0-9+/=\n]{1,4000}-----END OPENSSH PRIVATE KEY-----\n?')
 
 
 def require(condition, message):
@@ -46,11 +45,12 @@ def validate(profile):
             and re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?', profile['developer']), 'Invalid developer ID')
     require(isinstance(profile['owner_pubkey'], str)
             and re.fullmatch(r'[0-9a-f]{64}', profile['owner_pubkey']), 'Invalid Buzz owner')
-    fields(profile['git'], {'name', 'email', 'signing_key'})
-    for value in profile['git'].values():
+    fields(profile['git'], {'name', 'email', 'ssh_signing_key'})
+    for value in (profile['git']['name'], profile['git']['email']):
         require(isinstance(value, str) and 0 < len(value) <= 256
                 and not any(ord(c) < 32 for c in value), 'Invalid Git identity')
-    require(re.fullmatch(r'[0-9A-Fa-f]{40,64}', profile['git']['signing_key']), 'Use a full OpenPGP signing fingerprint')
+    require(isinstance(profile['git']['ssh_signing_key'], str)
+            and SSH_SIGNING_KEY.fullmatch(profile['git']['ssh_signing_key']), 'Invalid SSH signing key')
     fields(profile['github'], {'login', 'token'})
     require(isinstance(profile['github']['login'], str)
             and re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9-]{0,38}', profile['github']['login']), 'Invalid GitHub login')
@@ -75,17 +75,6 @@ def validate(profile):
     require(len(json.dumps(profile).encode()) <= MAX_BYTES, 'Profile exceeds Secrets Manager size limit')
 
 
-def private_file(path):
-    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    with os.fdopen(descriptor) as stream:
-        info = os.fstat(stream.fileno())
-        require(stat.S_ISREG(info.st_mode) and not info.st_mode & 0o077
-                and info.st_uid == os.getuid(), 'Profile input must be an owner-only regular file')
-        value = stream.read(MAX_BYTES + 1)
-    require(len(value.encode()) <= MAX_BYTES, 'Profile input is too large')
-    return value
-
-
 def secret_region(arn, developer):
     match = re.fullmatch(r'arn:aws:secretsmanager:([a-z0-9-]+):[0-9]{12}:secret:voltage/staging/agents/'
                          + re.escape(developer) + r'/profile-[a-zA-Z0-9]{6}', arn)
@@ -103,27 +92,6 @@ def aws(arn, developer, operation, *args):
     return json.loads(command('aws', '--region', secret_region(arn, developer),
                               '--no-cli-pager', 'secretsmanager', operation,
                               '--secret-id', arn, '--output', 'json', *args))
-
-
-def enroll(args):
-    profile = json.loads(private_file(args.file))
-    validate(profile)
-    secret_region(args.arn, profile['developer'])
-    # Check the actual GitHub actor before any upload. The token is never an argument.
-    env = {**os.environ, 'GH_TOKEN': profile['github']['token'], 'GH_HOST': 'github.com'}
-    login = command('gh', 'api', '--hostname', 'github.com', 'user', '--jq', '.login', env=env).strip()
-    require(login.casefold() == profile['github']['login'].casefold(), 'GitHub credential belongs to a different developer')
-    env = {k: v for k, v in os.environ.items() if not k.startswith('OP_')}
-    env['OP_SERVICE_ACCOUNT_TOKEN'] = profile['via']['op_token']
-    command('op', 'whoami', '--format=json', env=env)
-    # AWS reads the private file directly. Secret bytes never enter argv or stdout.
-    # Rewrite validated data to avoid a caller modifying the source between validation and upload.
-    with tempfile.TemporaryDirectory(prefix='buzz-profile-') as directory:
-        path = Path(directory) / 'profile.json'
-        path.write_text(json.dumps(profile))
-        path.chmod(0o600)
-        result = aws(args.arn, profile['developer'], 'put-secret-value', '--secret-string', 'file://' + str(path))
-    print(json.dumps({'developer': profile['developer'], 'version_id': result['VersionId']}))
 
 
 def write_file(path, value):
@@ -179,18 +147,18 @@ def bootstrap():
     require(profile['developer'] == developer
             and profile['owner_pubkey'] == os.environ.get('BUZZ_ACP_AGENT_OWNER'), 'Developer profile owner does not match the verified launch owner')
     require(result['ARN'] == arn, 'Secret response does not match the requested profile')
-    setup_mode = bool(os.environ.get('BUZZ_SETUP_MODE'))
-    require(not setup_mode or not API_KEY_FIELDS & set(profile['models']),
-            'Interactive account login cannot be combined with model API keys or a Codex access token')
     env = os.environ.copy()
     for key in INHERITED_MODEL_VARIABLES:
         require(not env.get(key), 'Model credentials must come from the selected developer profile')
+    # Commits are signed with the agent-only SSH key; the key file stays out of checkpoints.
+    signing_key = DIRECTORY / 'ssh-signing-key'
     env.update(BUZZ_GIT_IDENTITY='user', BUZZ_GIT_NAME=profile['git']['name'],
-               BUZZ_GIT_EMAIL=profile['git']['email'], BUZZ_GIT_SIGNING_KEY=profile['git']['signing_key'],
+               BUZZ_GIT_EMAIL=profile['git']['email'], BUZZ_GIT_SIGNING_KEY=str(signing_key),
                GIT_AUTHOR_NAME=profile['git']['name'], GIT_AUTHOR_EMAIL=profile['git']['email'],
                GIT_COMMITTER_NAME=profile['git']['name'], GIT_COMMITTER_EMAIL=profile['git']['email'])
     files = {'github-token': profile['github']['token'], 'op-token': profile['via']['op_token'],
              'via.toml': profile['via']['profile'],
+             'ssh-signing-key': profile['git']['ssh_signing_key'].rstrip('\n') + '\n',
              'profile.json': json.dumps({'developer': developer, 'version_id': result['VersionId']})}
     cache = depot(profile)
     if cache:
@@ -213,8 +181,7 @@ def bootstrap():
         # BUZZ_AGENT_PROVIDER still wins.
         env['OPENROUTER_API_KEY'] = profile['models']['openrouter_api_key']
         env.setdefault('BUZZ_AGENT_PROVIDER', 'openrouter')
-    # The Codex setup session cannot use the Claude token, and its gate refuses CLAUDE_* variables.
-    if 'claude_oauth_token' in profile['models'] and not setup_mode:
+    if 'claude_oauth_token' in profile['models']:
         env['CLAUDE_CODE_OAUTH_TOKEN'] = profile['models']['claude_oauth_token']
     command('/usr/local/bin/buzz-agent-account', 'init', env=env)
     return env
@@ -251,16 +218,11 @@ def install_subagent_guide(env):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     actions = parser.add_subparsers(dest='action', required=True)
-    enroll_parser = actions.add_parser('enroll', help='Validate and publish a private profile once per developer')
-    enroll_parser.add_argument('--arn', required=True)
-    enroll_parser.add_argument('--file', required=True, type=Path)
     run_parser = actions.add_parser('run', help='Load the verified owner profile, then start the harness')
     run_parser.add_argument('arguments', nargs=argparse.REMAINDER)
     actions.add_parser('work', help='Load the verified owner profile, then run one headless worker task')
     args = parser.parse_args()
-    if args.action == 'enroll':
-        enroll(args)
-    elif args.action == 'work':
+    if args.action == 'work':
         env = bootstrap()
         worker = ['/usr/local/bin/buzz-agent-cache', '/usr/local/bin/buzz-agent-worker']
         os.execvpe(worker[0], worker, env)
@@ -269,11 +231,7 @@ def main():
         restore_checkpoint()
         install_subagent_guide(env)
         arguments = args.arguments[1:] if args.arguments[:1] == ['--'] else args.arguments
-        if env.get('BUZZ_SETUP_MODE'):
-            require(not arguments, 'Interactive setup does not accept harness arguments')
-            harness = ['/usr/local/bin/buzz-agent-setup', 'gate']
-        else:
-            harness = ['/usr/local/bin/buzz-agent-cache', '/usr/local/bin/buzz-acp', *arguments]
+        harness = ['/usr/local/bin/buzz-agent-cache', '/usr/local/bin/buzz-acp', *arguments]
         os.execvpe(harness[0], harness, env)
 
 

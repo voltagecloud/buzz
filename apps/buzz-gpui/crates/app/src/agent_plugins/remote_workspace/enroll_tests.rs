@@ -10,18 +10,27 @@ const TOKENS: [&str; 4] = [
     "sk-fixtureOpenaiKey",
 ];
 
+/// An agent signing key in the shape `ssh-keygen -t ed25519` writes.
+const KEY: &str = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQ==\n-----END OPENSSH PRIVATE KEY-----\n";
+
+/// The GitHub token's account.
+fn github() -> GitHubIdentity {
+    GitHubIdentity {
+        login: "tee8z".into(),
+        name: "Tee Eight".into(),
+    }
+}
+
+/// `profile` for the fixture account and key.
+fn built(values: &Values, owner: &str) -> Result<Value, String> {
+    profile(values, owner, &github(), KEY)
+}
+
 /// A filled form, with the Anthropic and OpenAI keys.
 fn values() -> Values {
     let mut values = Values::default();
     for (field, text) in [
-        (Field::Developer, "tee8z"),
-        (Field::GitName, "Tee Eight"),
         (Field::GitEmail, "tee@example.com"),
-        (
-            Field::SigningKey,
-            "0123456789ABCDEF0123456789ABCDEF01234567",
-        ),
-        (Field::GithubLogin, "tee8z"),
         (Field::GithubToken, " ghp_fixtureGithubToken "),
         (
             Field::ViaProfile,
@@ -38,17 +47,18 @@ fn values() -> Values {
 
 #[test]
 fn the_form_builds_a_profile_matching_profile_py() {
-    let built = profile(&values(), OWNER).unwrap();
+    let profile = built(&values(), OWNER).unwrap();
     assert_eq!(
-        built,
+        profile,
         json!({
             "version": 1,
-            "developer": "tee8z",
+            // The manager fills in the signing owner's developer ID.
+            "developer": "",
             "owner_pubkey": OWNER,
             "git": {
                 "name": "Tee Eight",
                 "email": "tee@example.com",
-                "signing_key": "0123456789ABCDEF0123456789ABCDEF01234567",
+                "ssh_signing_key": KEY,
             },
             "github": {"login": "tee8z", "token": "ghp_fixtureGithubToken"},
             "via": {
@@ -64,14 +74,14 @@ fn the_form_builds_a_profile_matching_profile_py() {
     let mut no_models = values();
     no_models.set(Field::AnthropicApiKey, String::new());
     no_models.set(Field::OpenaiApiKey, "  ".into());
-    assert_eq!(profile(&no_models, OWNER).unwrap()["models"], json!({}));
+    assert_eq!(built(&no_models, OWNER).unwrap()["models"], json!({}));
     // Both subscriptions, for Codex and Claude Code in parallel.
     let mut subscriptions = no_models;
     subscriptions.set(Field::CodexAccessToken, "at-fixtureCodexToken".into());
     subscriptions.set(Field::ClaudeOauthToken, "sk-ant-oat01-fixture".into());
     subscriptions.set(Field::OpenrouterApiKey, "sk-or-fixture".into());
     assert_eq!(
-        profile(&subscriptions, OWNER).unwrap()["models"],
+        built(&subscriptions, OWNER).unwrap()["models"],
         json!({
             "codex_access_token": "at-fixtureCodexToken",
             "claude_oauth_token": "sk-ant-oat01-fixture",
@@ -85,19 +95,11 @@ fn the_profile_is_refused_as_profile_py_refuses_it() {
     let refused = |field: Field, text: &str| {
         let mut values = values();
         values.set(field, text.into());
-        profile(&values, OWNER).unwrap_err()
+        built(&values, OWNER).unwrap_err()
     };
     for (field, text, message) in [
-        (Field::Developer, "Tee8z", "Invalid developer ID"),
-        (Field::Developer, "tee8z-", "Invalid developer ID"),
-        (Field::GitName, "", "Invalid Git identity"),
+        (Field::GitEmail, "", "Invalid Git identity"),
         (Field::GitEmail, "tee\n@example.com", "Invalid Git identity"),
-        (
-            Field::SigningKey,
-            "ABCDEF01",
-            "Use a full OpenPGP signing fingerprint",
-        ),
-        (Field::GithubLogin, "-tee8z", "Invalid GitHub login"),
         (Field::GithubToken, "", "Invalid credential"),
         (Field::GithubToken, "ghp_a b", "Invalid credential"),
         (Field::ViaProfile, "[services", "Invalid via profile"),
@@ -124,22 +126,49 @@ fn the_profile_is_refused_as_profile_py_refuses_it() {
     ] {
         assert_eq!(refused(field, text), message, "{field:?}");
     }
-    assert_eq!(profile(&values(), "AA").unwrap_err(), "Invalid Buzz owner");
+    assert_eq!(built(&values(), "AA").unwrap_err(), "Invalid Buzz owner");
+    // What the form does not ask for is checked as the manager will check it.
+    let with = |pointer: &str, value: Value| {
+        let mut profile = built(&values(), OWNER).unwrap();
+        *profile.pointer_mut(pointer).unwrap() = value;
+        validate(&profile)
+    };
+    assert!(with("/developer", json!("tee8z")).is_ok());
+    for (pointer, value, message) in [
+        ("/developer", json!("Tee8z"), "Invalid developer ID"),
+        ("/developer", json!("tee8z-"), "Invalid developer ID"),
+        ("/git/name", json!(""), "Invalid Git identity"),
+        ("/github/login", json!("-tee8z"), "Invalid GitHub login"),
+        (
+            "/git/ssh_signing_key",
+            json!("ABCDEF0123456789ABCDEF0123456789ABCDEF01"),
+            "Invalid SSH signing key",
+        ),
+        (
+            "/git/ssh_signing_key",
+            json!(
+                "-----BEGIN OPENSSH PRIVATE KEY-----\nab cd\n-----END OPENSSH PRIVATE KEY-----\n"
+            ),
+            "Invalid SSH signing key",
+        ),
+    ] {
+        assert_eq!(with(pointer, value).unwrap_err(), message, "{pointer}");
+    }
     // An OpenAI API key pasted as the Codex access token.
     let mut pasted = values();
     pasted.set(Field::OpenaiApiKey, String::new());
     pasted.set(Field::CodexAccessToken, "sk-proj-fixture".into());
     assert_eq!(
-        profile(&pasted, OWNER).unwrap_err(),
+        built(&pasted, OWNER).unwrap_err(),
         "Use a Codex access token (at-...)"
     );
-    let mut extra = profile(&values(), OWNER).unwrap();
+    let mut extra = built(&values(), OWNER).unwrap();
     extra["models"]["gemini_api_key"] = json!("x");
     assert_eq!(
         validate(&extra).unwrap_err(),
         "Unsupported model credential type"
     );
-    extra = profile(&values(), OWNER).unwrap();
+    extra = built(&values(), OWNER).unwrap();
     extra["extra"] = json!(true);
     assert_eq!(
         validate(&extra).unwrap_err(),
@@ -151,9 +180,9 @@ fn the_profile_is_refused_as_profile_py_refuses_it() {
 fn the_signed_enroll_event_holds_no_token_or_profile_field() {
     let owner = Identity::ephemeral();
     let manager = Identity::ephemeral().public_key();
-    let built = profile(&values(), &owner.pubkey_hex()).unwrap();
+    let profile = built(&values(), &owner.pubkey_hex()).unwrap();
     let event = owner
-        .enroll_request(&manager, "enroll-1", built, 1_700_000_000)
+        .enroll_request(&manager, "enroll-1", profile, 1_700_000_000)
         .unwrap();
     assert_eq!(event.kind.as_u16(), KIND);
     let text = event.as_json();
@@ -242,5 +271,42 @@ fn sending_clears_the_tokens_and_keeps_the_rest() {
         }
         assert_eq!(sent.get(field), values().get(field), "{field:?}");
     }
-    assert!(profile(&sent, OWNER).is_ok());
+    assert!(built(&sent, OWNER).is_ok());
+}
+
+#[test]
+fn the_git_author_comes_from_the_github_account() {
+    let named = signing::parse_identity(br#"{"login": "tee8z", "name": " Tee Eight "}"#).unwrap();
+    assert_eq!(named, github());
+    // An account without a name commits under its login.
+    for body in [
+        &br#"{"login": "tee8z", "name": null}"#[..],
+        br#"{"login": "tee8z", "name": ""}"#,
+        br#"{"login": "tee8z", "name": "a\nb"}"#,
+    ] {
+        assert_eq!(signing::parse_identity(body).unwrap().name, "tee8z");
+    }
+    assert!(signing::parse_identity(br#"{"name": "Tee"}"#).is_err());
+    assert!(signing::parse_identity(b"not json").is_err());
+}
+
+#[test]
+fn a_gh_failure_says_what_to_do() {
+    for (stderr, hint) in [
+        (
+            "HTTP 404: This API operation needs the \"admin:ssh_signing_key\" scope.",
+            "gh auth refresh -h github.com -s admin:ssh_signing_key",
+        ),
+        (
+            "To get started with GitHub CLI, please run:  gh auth login",
+            "gh auth login",
+        ),
+        (
+            "HTTP 422: key is already in use",
+            "already on a GitHub account",
+        ),
+        ("HTTP 500", "could not add"),
+    ] {
+        assert!(signing::gh_failure(stderr).contains(hint), "{stderr}");
+    }
 }

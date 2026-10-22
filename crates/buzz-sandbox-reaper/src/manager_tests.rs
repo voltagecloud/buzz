@@ -301,6 +301,13 @@ async fn enroll_is_refused_unless_the_profile_is_the_signing_owners() {
     let mine = || profile("dev", &owner());
     let mut invalid = mine();
     invalid["github"]["login"] = json!("-not-a-login");
+    let mut without_developer = mine();
+    without_developer
+        .as_object_mut()
+        .unwrap()
+        .remove("developer");
+    let mut empty_developer = mine();
+    empty_developer["developer"] = json!("");
     let cases = [
         (
             enroll(agent(), Some(tag(&owner(), &agent(), "")), mine()),
@@ -328,6 +335,14 @@ async fn enroll_is_refused_unless_the_profile_is_the_signing_owners() {
     ];
     for (sent, expected) in cases {
         assert_eq!(admit(&manager, &sent), expected);
+    }
+    // Without a developer ID, the signing owner's is filled in. Each runs on a
+    // fresh manager: the same request ID would be refused as a replay.
+    for profile in [without_developer, empty_developer] {
+        assert_eq!(
+            admit(&self::manager(), &enroll(owner(), None, profile)),
+            "start"
+        );
     }
     // The refusal is the image's message, which names no value.
     let mut incomplete = mine();
