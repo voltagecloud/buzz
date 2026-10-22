@@ -17,6 +17,13 @@ thiserror = "2"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 zeroize = "1.9"
+# The owner's kind 24210 enroll request to the Sandbox manager, signed
+# here so the key stays in this crate. It uses nostr 0.44.
+buzz-session-control = { path = "../../../../crates/buzz-session-control", optional = true }
+nostr-wire = { package = "nostr", version = "0.44", optional = true }
+
+[features]
+session-control = ["dep:buzz-session-control", "dep:nostr-wire"]
 
 [dev-dependencies]
 secp256k1 = { version = "0.31", features = ["std"] }
