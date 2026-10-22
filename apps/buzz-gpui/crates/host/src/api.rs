@@ -16,6 +16,8 @@ use std::collections::BTreeMap;
 
 mod app_agent;
 pub use app_agent::*;
+mod sandbox;
+pub use sandbox::*;
 
 pub use crate::terminal::{TerminalContext, TerminalOutput};
 
@@ -34,6 +36,9 @@ pub enum Request {
     // Agents2 custody
     /// An Agents2 agent's key, held by this host: see [`AppAgentRequest`].
     AppAgent(AppAgentRequest),
+    /// An agent's remote workspace: see [`SandboxRequest`]. Hosts from
+    /// before this answer that they do not support it.
+    Sandbox(SandboxRequest),
     // claude code
     /// Starts process `process`, one that agent type `owner` declares (see
     /// `processes.rs`), with `args` after its declared arguments. `handle`
@@ -111,6 +116,7 @@ pub enum Response {
     Done,
     // Agents2 custody
     AppAgent(AppAgentResponse),
+    Sandbox(SandboxResponse),
     // claude code
     /// A process request succeeded.
     ProcessDone,

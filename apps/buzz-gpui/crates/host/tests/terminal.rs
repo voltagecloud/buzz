@@ -33,6 +33,7 @@ fn host(state: &tempfile::TempDir) -> Arc<AgentHost> {
         state_dir: state.path().join("state"),
         credentials: Arc::new(FileCredentials::new(state.path().join("keys")).unwrap()),
         legacy_dir: None,
+        sandbox: None,
     })
     .unwrap()
 }
