@@ -88,18 +88,25 @@ tools.mkdir()
     + ('exit 1\n' if mode == 'no-depot' else '')
     + 'case "$3" in */organization) printf fixture-org;; */credential) printf synthetic-profile-depot;; *) exit 1;; esac\n')
 (tools/'op').chmod(0o700)
-env['PATH'] = str(tools)+':'+env['PATH']
-def rotate(models):
+# The Codex setup gate requires the image's exact PATH, so its modes keep it.
+if mode not in ('manual-gate', 'gate-api-key'):
+    env['PATH'] = str(tools)+':'+env['PATH']
+def rotate(models, via_profile=None):
     stored = json.loads(run('aws', 'secretsmanager', 'get-secret-value', '--secret-id', env['BUZZ_DEVELOPER_PROFILE_ARN']))
     profile = json.loads(stored['SecretString'])
     profile['models'] = models
+    if via_profile is not None:
+        profile['via']['profile'] = via_profile
     path = Path('/tmp/rotated-profile.json')
     path.write_text(json.dumps(profile))
     path.chmod(0o600)
     return json.loads(run('aws', 'secretsmanager', 'put-secret-value', '--secret-id', stored['ARN'], '--secret-string', 'file://'+str(path)))
 if mode in ('manual-gate', 'gate-api-key'):
     # A subscription token may share the profile with the Codex gate; billed API keys may not.
-    updated = rotate({'claude_oauth_token':'synthetic-profile-claude-oauth'}) if mode == 'manual-gate' else None
+    # Without the fake op on PATH, a depot service would make the bootstrap call the image's op.
+    no_depot = '[providers.fixture]\ntype="fixture"\n[services.fixture]\nprovider="fixture"\n'
+    updated = (rotate({'claude_oauth_token':'synthetic-profile-claude-oauth'}, no_depot)
+               if mode == 'manual-gate' else None)
     env.update(BUZZ_SETUP_MODE='codex-device-v1', BUZZ_SETUP_AGENT_PUBKEY='c'*64,
         BUZZ_SETUP_POD_UID='11111111-2222-3333-4444-555555555555', BUZZ_SETUP_IMAGE_DIGEST='sha256:'+'d'*64,
         BUZZ_SETUP_NONCE='e'*32, BUZZ_SETUP_DEADLINE=str(int(time.time())+120),
