@@ -289,3 +289,24 @@ fn the_git_author_comes_from_the_github_account() {
     assert!(signing::parse_identity(br#"{"name": "Tee"}"#).is_err());
     assert!(signing::parse_identity(b"not json").is_err());
 }
+
+#[test]
+fn a_gh_failure_says_what_to_do() {
+    for (stderr, hint) in [
+        (
+            "HTTP 404: This API operation needs the \"admin:ssh_signing_key\" scope.",
+            "gh auth refresh -h github.com -s admin:ssh_signing_key",
+        ),
+        (
+            "To get started with GitHub CLI, please run:  gh auth login",
+            "gh auth login",
+        ),
+        (
+            "HTTP 422: key is already in use",
+            "already on a GitHub account",
+        ),
+        ("HTTP 500", "could not add"),
+    ] {
+        assert!(signing::gh_failure(stderr).contains(hint), "{stderr}");
+    }
+}

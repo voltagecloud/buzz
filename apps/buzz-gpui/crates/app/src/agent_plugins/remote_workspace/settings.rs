@@ -227,6 +227,7 @@ impl SettingsTab {
         };
         self.enroll.sending = true;
         self.enroll.status = None;
+        self.enroll.registration = None;
         let sent = crate::runtime::Runtime::handle(cx).spawn(super::enroll::run(
             session,
             owner,
@@ -239,7 +240,12 @@ impl SettingsTab {
                 .unwrap_or_else(|_| Err("The enrollment was cancelled.".into()));
             let _ = this.update(cx, |this, cx| {
                 this.enroll.sending = false;
-                this.enroll.status = Some(outcome);
+                let (status, registration) = match outcome {
+                    Ok((outcome, registration)) => (Ok(outcome), registration),
+                    Err(error) => (Err(error), None),
+                };
+                this.enroll.status = Some(status);
+                this.enroll.registration = registration;
                 cx.notify();
             });
         })

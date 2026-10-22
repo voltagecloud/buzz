@@ -393,15 +393,16 @@ pub async fn done<T>(
 /// sends it on `session`'s live socket, and waits up to [`TIMEOUT`] for
 /// its `done` reply.
 /// Enrolls the form's `values` as `identity`: reads the GitHub token's
-/// account, creates the agent-only signing key and registers it on that
-/// account, then sends the profile. A key is removed again unless the
-/// manager stored the profile.
+/// account, creates the agent-only signing key, and sends the profile. Once
+/// the manager stores it, the key's public half goes to that account with the
+/// local `gh`, or back to the developer to add; the token needs no account
+/// permission either way.
 pub async fn run(
     session: Arc<Session>,
     identity: Arc<Identity>,
     manager: String,
     values: Values,
-) -> Result<Outcome, String> {
+) -> Result<(Outcome, Option<signing::Registration>), String> {
     let token = values.get(Field::GithubToken).trim().to_owned();
     if token.is_empty() {
         return Err("Enter a GitHub token.".into());
@@ -409,16 +410,16 @@ pub async fn run(
     let github = signing::identity(&token).await?;
     let key = signing::generate(&format!("buzz agents {}", github.login)).await?;
     let profile = profile(&values, &identity.pubkey_hex(), &github, &key.private)?;
+    let outcome = enroll(session, identity, manager, profile).await?;
+    if !matches!(outcome, Outcome::Enrolled { .. }) {
+        return Ok((outcome, None));
+    }
     let title = format!(
         "Buzz agents ({})",
         chrono::Utc::now().format("%Y-%m-%d %H:%M UTC")
     );
-    let id = signing::register(&token, &title, &key.public).await?;
-    let outcome = enroll(session, identity, manager, profile).await;
-    if !matches!(outcome, Ok(Outcome::Enrolled { .. })) {
-        signing::unregister(&token, id).await;
-    }
-    outcome
+    let registration = signing::register(&github.login, &title, &key.public).await;
+    Ok((outcome, Some(registration)))
 }
 
 pub async fn enroll(

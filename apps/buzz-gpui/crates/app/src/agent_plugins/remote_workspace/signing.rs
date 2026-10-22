@@ -1,8 +1,11 @@
 //! The developer's agent-only commit signing key. Enrollment generates an
-//! Ed25519 key with `ssh-keygen`, registers its public half on the
-//! developer's GitHub account as a signing key, and sends the private half in
-//! the profile, so Sandbox commits are signed and verified as theirs without
-//! their own GPG key leaving this device. Nothing here logs a token or a key.
+//! Ed25519 key with `ssh-keygen` and sends the private half in the profile, so
+//! Sandbox commits are signed as the developer without their own GPG key
+//! leaving this device. Once the manager stores the profile, the public half
+//! is added to the developer's GitHub account as a signing key with their
+//! local GitHub CLI (`gh`), or they add it themselves; either way the agents'
+//! GitHub token needs no account permission. Nothing here logs a token or a
+//! private key.
 
 use std::time::Duration;
 use zeroize::Zeroizing;
@@ -116,48 +119,87 @@ pub async fn generate(comment: &str) -> Result<SigningKey, String> {
     .map_err(str::to_string)
 }
 
-/// Registers `public` on the token's account as a signing key, and returns
-/// its id.
-pub async fn register(token: &str, title: &str, public: &str) -> Result<u64, String> {
-    let body = serde_json::json!({ "title": title, "key": public }).to_string();
-    let response = request(reqwest::Method::POST, "/user/ssh_signing_keys", token)?
-        .header("Content-Type", "application/json")
-        .body(body)
-        .send()
-        .await
-        .map_err(|_| "Could not reach GitHub.".to_string())?;
-    let status = response.status();
-    if status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::NOT_FOUND {
-        return Err(
-            "GitHub would not add the signing key. Give the token Account permissions → SSH signing keys: Read and write."
-                .into(),
-        );
-    }
-    if !status.is_success() {
-        return Err(format!(
-            "GitHub would not add the signing key ({}).",
-            status.as_u16()
-        ));
-    }
-    let body = response
-        .bytes()
-        .await
-        .map_err(|_| "Could not read GitHub's reply.".to_string())?;
-    let key: serde_json::Value =
-        serde_json::from_slice(&body).map_err(|_| "Could not read GitHub's reply.".to_string())?;
-    key["id"]
-        .as_u64()
-        .ok_or_else(|| "Could not read GitHub's reply.".to_string())
+/// How the public half reached GitHub.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Registration {
+    /// Added with the local GitHub CLI.
+    Added,
+    /// For the developer to add, and why `gh` could not.
+    Manual {
+        public: String,
+        reason: &'static str,
+    },
 }
 
-/// Removes signing key `id`, best effort: an enrollment that did not finish
-/// leaves no key behind on the account.
-pub async fn unregister(token: &str, id: u64) {
-    if let Ok(request) = request(
-        reqwest::Method::DELETE,
-        &format!("/user/ssh_signing_keys/{id}"),
-        token,
-    ) {
-        let _ = request.send().await;
+/// How long one `gh` call may take.
+const GH_TIMEOUT: Duration = Duration::from_secs(30);
+
+async fn gh(args: &[&str]) -> Result<std::process::Output, &'static str> {
+    let child = tokio::process::Command::new("gh")
+        .args(args)
+        .env("GH_HOST", "github.com")
+        .env("GH_PROMPT_DISABLED", "1")
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    match tokio::time::timeout(GH_TIMEOUT, child).await {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(_)) => Err("the GitHub CLI (gh) is not installed"),
+        Err(_) => Err("the GitHub CLI (gh) did not answer"),
+    }
+}
+
+/// Why a failed `gh` call could not add the key, from its error output.
+pub fn gh_failure(stderr: &str) -> &'static str {
+    if stderr.contains("admin:ssh_signing_key") {
+        "gh needs the admin:ssh_signing_key scope: run gh auth refresh -h github.com -s admin:ssh_signing_key, then enroll again"
+    } else if stderr.contains("gh auth login") || stderr.contains("not logged") {
+        "gh is not signed in: run gh auth login"
+    } else if stderr.contains("key is already in use") {
+        "this key is already on a GitHub account"
+    } else {
+        "gh could not add the key"
+    }
+}
+
+/// Adds `public` to `login`'s GitHub account as a signing key titled
+/// `title`, with the local GitHub CLI signed in as that account.
+pub async fn add_with_gh(login: &str, title: &str, public: &str) -> Result<(), &'static str> {
+    let user = gh(&["api", "user", "--jq", ".login"]).await?;
+    if !user.status.success() {
+        return Err(gh_failure(&String::from_utf8_lossy(&user.stderr)));
+    }
+    let signed_in = String::from_utf8_lossy(&user.stdout);
+    if !signed_in.trim().eq_ignore_ascii_case(login) {
+        return Err("gh is signed in to a different GitHub account than the token");
+    }
+    let title = format!("title={title}");
+    let key = format!("key={public}");
+    let added = gh(&[
+        "api",
+        "--method",
+        "POST",
+        "/user/ssh_signing_keys",
+        "-f",
+        &title,
+        "-f",
+        &key,
+    ])
+    .await?;
+    if added.status.success() {
+        Ok(())
+    } else {
+        Err(gh_failure(&String::from_utf8_lossy(&added.stderr)))
+    }
+}
+
+/// Adds the key with `gh`, or hands it back for the developer to add.
+pub async fn register(login: &str, title: &str, public: &str) -> Registration {
+    match add_with_gh(login, title, public).await {
+        Ok(()) => Registration::Added,
+        Err(reason) => Registration::Manual {
+            public: public.to_owned(),
+            reason,
+        },
     }
 }

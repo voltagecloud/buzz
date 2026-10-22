@@ -3,11 +3,14 @@
 //! cleared once sent, and never saved.
 
 use super::enroll::{Field, Outcome, Values};
+use super::signing::Registration;
 use crate::agent_plugins::tabs::field;
 use crate::community::{AppState, IdentityState};
 use buzz_identity::Identity;
 use buzz_relay_client::{RelayOrigin, Session};
-use buzz_ui::{Colors, Surface, TextArea, TextField, TypeStyled, tokens::space};
+use buzz_ui::{
+    Button, ButtonSize, Colors, Surface, TextArea, TextField, TypeStyled, tokens::space,
+};
 use gpui_kit::component::input::{InputState, TextareaState};
 use gpui_kit::*;
 use std::sync::Arc;
@@ -19,6 +22,8 @@ pub struct EnrollForm {
     pub sending: bool,
     /// How the last enrollment ended.
     pub status: Option<Result<Outcome, String>>,
+    /// How the last enrollment's signing key reached GitHub.
+    pub registration: Option<Registration>,
 }
 
 impl EnrollForm {
@@ -52,6 +57,7 @@ impl EnrollForm {
             via,
             sending: false,
             status: None,
+            registration: None,
         }
     }
 
@@ -131,9 +137,9 @@ impl EnrollForm {
             .child(div().text_label_sm().child("Enroll profile"))
             .child(div().text_body_sm().text_color(c.text_subtle).child(
                 "Once per developer: every one of your Remote workspace agents uses it. Enrolling \
-                     creates a signing key for your agents' commits and adds it to your GitHub \
-                     account. Sent encrypted to the Sandbox manager and signed as you; tokens \
-                     are never saved here.",
+                     creates a signing key for your agents' commits; the GitHub CLI (gh) adds it \
+                     to your GitHub account, or the app shows you how. Sent encrypted to the \
+                     Sandbox manager and signed as you; tokens are never saved here.",
             ))
             .child(field(
                 "Buzz owner",
@@ -162,6 +168,48 @@ impl EnrollForm {
                 Field::OpenrouterApiKey,
             ]))
             .children(status)
+            .children(
+                self.registration
+                    .as_ref()
+                    .map(|registration| registration_notice(registration, c)),
+            )
+    }
+}
+
+/// Where the agents' signing key went: added with `gh`, or the steps for the
+/// developer to add it, so their agents' commits show as Verified.
+fn registration_notice(registration: &Registration, c: &Colors) -> Div {
+    match registration {
+        Registration::Added => div().text_body_sm().text_color(c.text_success).child(
+            "Added your agents' signing key to your GitHub account (Settings → SSH and GPG keys).",
+        ),
+        Registration::Manual { public, reason } => {
+            let copied = public.clone();
+            div()
+                .flex()
+                .flex_col()
+                .gap(space::S2)
+                .child(div().text_label_sm().child("Add your agents' signing key to GitHub"))
+                .child(div().text_body_sm().text_color(c.text_subtle).child(format!(
+                    "Until you add it, your agents' commits are signed but show as Unverified. \
+                     The app could not add it for you: {reason}."
+                )))
+                .child(div().text_body_sm().child(
+                    "1. On GitHub, open Settings → SSH and GPG keys and press New SSH key. \
+                     2. Set Key type to Signing Key. 3. Paste the key below and press Add SSH key.",
+                ))
+                .child(div().text_body_sm().font_family("monospace").child(public.clone()))
+                .child(
+                    div().flex().child(
+                        Button::new("remote-workspace-copy-signing-key", "Copy key")
+                            .size(ButtonSize::Sm)
+                            .outline()
+                            .on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
+                            }),
+                    ),
+                )
+        }
     }
 }
 

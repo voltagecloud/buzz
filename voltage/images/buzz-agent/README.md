@@ -121,7 +121,7 @@ The checkpoint secret scan also refuses Claude subscription tokens.
 ### Commit signing
 
 Every commit and tag is signed with an agent-only SSH key, `git.ssh_signing_key` in the profile: one OpenSSH Ed25519 private key.
-The GPUI enroll form generates it with `ssh-keygen` and registers its public half on the developer's GitHub account as a signing key, so commits show as Verified with the developer's verified Git email.
+The GPUI enroll form generates it with `ssh-keygen`. Once the manager stores the profile, the developer's local GitHub CLI (`gh`) adds the public half to their GitHub account as a signing key; otherwise the form shows the key and the steps to add it. Commits then show as Verified with the developer's verified Git email. The agents' GitHub token needs no account permission.
 The bootstrap writes it to `.config/buzz-agent/ssh-signing-key` (mode `0600`, excluded from checkpoints), and `buzz-agent-account init` configures `gpg.format ssh` with `commit.gpgsign` and `tag.gpgsign`. Without the key, Git refuses to commit.
 The developer's own GPG key never leaves their device. Revoke agent signing by deleting that key under GitHub → Settings → SSH and GPG keys; enrolling again creates a new one.
 
