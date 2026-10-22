@@ -1529,6 +1529,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-backend-relay"
+version = "0.1.0"
+dependencies = [
+ "buzz-backend-kubernetes",
+ "buzz-sdk",
+ "buzz-session-control",
+ "buzz-ws-client",
+ "nostr 0.44.7",
+ "rustls",
+ "serde_json",
+ "tokio",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "buzz-cli"
 version = "0.1.0"
 dependencies = [
@@ -1963,6 +1979,7 @@ dependencies = [
  "aws-sdk-s3",
  "axum",
  "buzz-backend-kubernetes",
+ "buzz-backend-relay",
  "buzz-sdk",
  "buzz-session-control",
  "buzz-ws-client",
