@@ -1,6 +1,9 @@
 suite: deployment strategy
+# deployment.yaml includes secret-chart.yaml (checksum/secret), so both must be
+# in scope; each assert names the template it checks.
 templates:
   - templates/deployment.yaml
+  - templates/secret-chart.yaml
 set:
   relayUrl: wss://buzz.example.com
   ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
@@ -19,6 +22,7 @@ tests:
             rollingUpdate:
               maxSurge: 1
               maxUnavailable: 0
+        template: templates/deployment.yaml
   - it: stops the old pod first for a ReadWriteOnce git volume
     set:
       strategy:
@@ -30,10 +34,12 @@ tests:
       - equal:
           path: spec.strategy.rollingUpdate.maxSurge
           value: 0
+        template: templates/deployment.yaml
       - equal:
           path: spec.strategy.rollingUpdate.maxUnavailable
           value: 1
-  - it: renders Recreate
+        template: templates/deployment.yaml
+  - it: renders Recreate without rollingUpdate
     set:
       strategy:
         type: Recreate
@@ -42,3 +48,4 @@ tests:
           path: spec.strategy
           value:
             type: Recreate
+        template: templates/deployment.yaml
