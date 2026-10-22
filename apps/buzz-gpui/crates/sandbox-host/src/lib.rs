@@ -1,6 +1,7 @@
 //! Remote workspaces for an agent host: thread-bound sessions on a
-//! `buzz-backend-*` provider, such as `buzz-backend-kubernetes`, run through
-//! `buzz-remote-sessions` as the desktop runs them.
+//! `buzz-backend-*` provider, `buzz-backend-kubernetes` or
+//! `buzz-backend-relay`, run through `buzz-remote-sessions` as the desktop
+//! runs them.
 //!
 //! The GUI describes the launch. The host adds what only it holds, the
 //! agent's community, owner, attestation and key, and refuses them from the
@@ -39,6 +40,10 @@ const RESERVED_CONFIG: &[&str] = &[
     "auth_tag",
     "owner_pubkey",
 ];
+
+/// The relay provider's own `relay_url`: where it reaches the Sandbox
+/// manager, not the agent's community.
+const RELAY_PROVIDER: &str = "relay";
 
 /// Runs a host's remote workspaces. One per host, so every connection
 /// shares its per-agent locks.
@@ -294,16 +299,19 @@ fn provider_config(spec: &LaunchSpec) -> Result<Value, String> {
     let config: Value = serde_json::from_str(&spec.provider_config_json)
         .map_err(|_| "The provider config is not valid JSON")?;
     remote::validate_provider_config(&config)?;
+    let reserved = |key: &str| !(spec.provider == RELAY_PROVIDER && key == "relay_url");
     if let Some(key) = RESERVED_CONFIG
         .iter()
-        .find(|key| config.get(**key).is_some())
+        .find(|key| reserved(key) && config.get(**key).is_some())
     {
         return Err(format!(
             "The provider config may not set {key}; the host does"
         ));
     }
     if !remote::is_thread_sandbox(&spec.provider, &config) {
-        return Err("Remote workspaces need the kubernetes provider with sandbox: true".into());
+        return Err(
+            "Remote workspaces need the kubernetes or relay provider with sandbox: true".into(),
+        );
     }
     Ok(config)
 }
@@ -402,10 +410,37 @@ mod tests {
         ] {
             assert!(provider_config(&spec(config.clone())).is_err(), "{config}");
         }
-        let relay = LaunchSpec {
-            provider: "relay".into(),
+        let other = LaunchSpec {
+            provider: "docker".into(),
             ..spec(json!({ "sandbox": true }))
         };
-        assert!(provider_config(&relay).is_err());
+        assert!(provider_config(&other).is_err());
+    }
+
+    #[test]
+    fn only_the_relay_provider_names_its_relay() {
+        let config = json!({
+            "sandbox": true, "relay_url": "wss://relay.example", "manager_pubkey": "c".repeat(64),
+        });
+        let relay = LaunchSpec {
+            provider: "relay".into(),
+            ..spec(config.clone())
+        };
+        assert_eq!(provider_config(&relay).unwrap(), config);
+        assert!(provider_config(&spec(config)).is_err(), "kubernetes");
+        for key in [
+            "identity_policy",
+            "private_key_nsec",
+            "auth_tag",
+            "owner_pubkey",
+        ] {
+            let mut config = json!({ "sandbox": true });
+            config[key] = json!("x");
+            let relay = LaunchSpec {
+                provider: "relay".into(),
+                ..spec(config)
+            };
+            assert!(provider_config(&relay).is_err(), "{key}");
+        }
     }
 }

@@ -1,18 +1,21 @@
-//! What the agent launches with: the harness, its model and instructions,
-//! and the provider config and environment, edited as JSON.
+//! What the agent launches with: the provider, the harness, its model and
+//! instructions, and the environment. The Kubernetes provider's config is
+//! edited as JSON; the relay provider's is its relay and manager key.
 
-use super::config::{Config, RUNTIMES};
+use super::config::{Config, KUBERNETES, PROVIDERS, RELAY, RUNTIMES};
 use crate::agent_plugins::tabs::{
-    Picking, choice, field, instructions_field, instructions_state, saved_config,
+    Picking, choice, field, instructions_field, instructions_state, options, saved_config,
 };
 use crate::agents2::{AgentView, Agents2};
 use buzz_ui::{ActiveTheme, Button, Surface, TextArea, TextField, TypeStyled, tokens::space};
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Picker {
+    Provider,
     Runtime,
 }
 
@@ -20,9 +23,13 @@ pub struct SettingsTab {
     view: AgentView,
     /// The saved settings the draft started from.
     saved: Config,
+    provider: String,
     runtime: String,
     model: Entity<InputState>,
+    /// The Kubernetes provider's config.
     provider_config: Entity<TextareaState>,
+    relay_url: Entity<InputState>,
+    manager_pubkey: Entity<InputState>,
     env: Entity<TextareaState>,
     instructions: Entity<TextareaState>,
     open: Option<Picker>,
@@ -44,21 +51,58 @@ fn textarea(value: &str, window: &mut Window, cx: &mut App) -> Entity<TextareaSt
     state
 }
 
-/// The draft as a config: the JSON fields parsed, and the whole checked.
-pub fn parse(
-    saved: &Config,
-    runtime: &str,
-    model: &str,
-    provider_config: &str,
-    env: &str,
-    instructions: &str,
-) -> Result<Config, String> {
-    let provider_config: Value = serde_json::from_str(provider_config)
-        .map_err(|error| format!("The provider config is not valid JSON: {error}"))?;
-    if !provider_config.is_object() {
-        return Err("The provider config must be a JSON object.".into());
+/// The tab's fields, as text.
+#[derive(Clone, Copy, Default)]
+pub struct Draft<'a> {
+    pub provider: &'a str,
+    pub runtime: &'a str,
+    pub model: &'a str,
+    /// The Kubernetes provider's config, as JSON.
+    pub provider_config: &'a str,
+    pub relay_url: &'a str,
+    pub manager_pubkey: &'a str,
+    pub env: &'a str,
+    pub instructions: &'a str,
+}
+
+/// The saved Kubernetes config, for its JSON field; a thread Sandbox
+/// for agents on another provider.
+fn kubernetes_config(saved: &Config) -> Value {
+    if saved.provider == KUBERNETES {
+        saved.provider_config.clone()
+    } else {
+        json!({ "sandbox": true })
     }
-    let env: Value = serde_json::from_str(env)
+}
+
+/// The saved relay and manager key, for their fields. The relay is the
+/// agent's community, `community`, until one is saved.
+pub fn relay_fields(saved: &Config, community: &str) -> (String, String) {
+    let text = |name: &str| {
+        (saved.provider == RELAY)
+            .then(|| saved.provider_config.get(name)?.as_str())
+            .flatten()
+            .map(str::to_owned)
+    };
+    (
+        text("relay_url").unwrap_or_else(|| community.to_owned()),
+        text("manager_pubkey").unwrap_or_default(),
+    )
+}
+
+/// The draft as a config: the fields parsed, and the whole checked.
+pub fn parse(saved: &Config, draft: Draft) -> Result<Config, String> {
+    let provider_config = if draft.provider == RELAY {
+        Config::relay(draft.relay_url, draft.manager_pubkey)
+    } else {
+        let config: Value = serde_json::from_str(draft.provider_config)
+            .map_err(|error| format!("The provider config is not valid JSON: {error}"))?;
+        if !config.is_object() {
+            return Err("The provider config must be a JSON object.".into());
+        }
+        config
+    };
+    let env: Value = serde_json::from_str(draft.env)
         .map_err(|error| format!("The environment is not valid JSON: {error}"))?;
     let all_text = env
         .as_object()
@@ -66,13 +110,14 @@ pub fn parse(
     if !all_text {
         return Err("The environment must be a JSON object of text values.".into());
     }
-    let mut draft = saved.value();
-    draft["runtime"] = runtime.into();
-    draft["model"] = model.trim().into();
-    draft["provider_config"] = provider_config;
-    draft["env"] = env;
-    draft["instructions"] = instructions.into();
-    let config = Config::read(&draft);
+    let mut value = saved.value();
+    value["provider"] = draft.provider.into();
+    value["runtime"] = draft.runtime.into();
+    value["model"] = draft.model.trim().into();
+    value["provider_config"] = provider_config;
+    value["env"] = env;
+    value["instructions"] = draft.instructions.into();
+    let config = Config::read(&value);
     config.validate()?;
     Ok(config)
 }
@@ -85,14 +130,28 @@ impl SettingsTab {
                 .placeholder("The harness's default")
                 .default_value(saved.model.clone())
         });
-        let provider_config = textarea(&pretty(&saved.provider_config), window, cx);
+        let provider_config = textarea(&pretty(&kubernetes_config(&saved)), window, cx);
+        let (relay, manager) = relay_fields(&saved, &view.agent.relay);
+        let relay_url = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("wss://")
+                .default_value(relay)
+        });
+        let manager_pubkey = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("64 hex characters")
+                .default_value(manager)
+        });
         let env = textarea(&pretty(&saved.env), window, cx);
         let instructions = instructions_state(&saved.instructions, window, cx);
-        let mut subscriptions = vec![cx.subscribe(&model, |_, _, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) {
-                cx.notify();
-            }
-        })];
+        let mut subscriptions = Vec::new();
+        for input in [&model, &relay_url, &manager_pubkey] {
+            subscriptions.push(cx.subscribe(input, |_, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            }));
+        }
         for area in [&provider_config, &env, &instructions] {
             subscriptions.push(cx.subscribe(area, |_, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
@@ -111,10 +170,13 @@ impl SettingsTab {
         }
         Self {
             view,
+            provider: saved.provider.clone(),
             runtime: saved.runtime.clone(),
             saved,
             model,
             provider_config,
+            relay_url,
+            manager_pubkey,
             env,
             instructions,
             open: None,
@@ -128,13 +190,18 @@ impl SettingsTab {
         self.model.update(cx, |state, cx| {
             state.set_value(saved.model.clone(), window, cx)
         });
+        let (relay, manager) = relay_fields(&saved, &self.view.agent.relay);
+        for (input, text) in [(&self.relay_url, relay), (&self.manager_pubkey, manager)] {
+            input.update(cx, |state, cx| state.set_value(text, window, cx));
+        }
         for (area, text) in [
-            (&self.provider_config, pretty(&saved.provider_config)),
+            (&self.provider_config, pretty(&kubernetes_config(&saved))),
             (&self.env, pretty(&saved.env)),
             (&self.instructions, saved.instructions.clone()),
         ] {
             area.update(cx, |state, cx| state.set_value(text, window, cx));
         }
+        self.provider = saved.provider.clone();
         self.runtime = saved.runtime.clone();
         self.saved = saved;
         cx.notify();
@@ -143,11 +210,16 @@ impl SettingsTab {
     fn draft(&self, cx: &App) -> Result<Config, String> {
         parse(
             &self.saved,
-            &self.runtime,
-            &self.model.read(cx).value(),
-            &self.provider_config.read(cx).value(),
-            &self.env.read(cx).value(),
-            &self.instructions.read(cx).value(),
+            Draft {
+                provider: &self.provider,
+                runtime: &self.runtime,
+                model: &self.model.read(cx).value(),
+                provider_config: &self.provider_config.read(cx).value(),
+                relay_url: &self.relay_url.read(cx).value(),
+                manager_pubkey: &self.manager_pubkey.read(cx).value(),
+                env: &self.env.read(cx).value(),
+                instructions: &self.instructions.read(cx).value(),
+            },
         )
     }
 
@@ -183,8 +255,11 @@ impl Picking for SettingsTab {
         &mut self.open
     }
 
-    fn pick(&mut self, _: Picker, value: String, _: &mut Context<Self>) {
-        self.runtime = value;
+    fn pick(&mut self, picker: Picker, value: String, _: &mut Context<Self>) {
+        match picker {
+            Picker::Provider => self.provider = value,
+            Picker::Runtime => self.runtime = value,
+        }
     }
 }
 
@@ -203,6 +278,24 @@ impl Render for SettingsTab {
             .flex_col()
             .gap(space::S4)
             .children(self.view.type_control(changed, window, cx))
+            .child(field(
+                "Runs on",
+                choice(
+                    self.open,
+                    Picker::Provider,
+                    "remote-workspace-provider",
+                    &self.provider,
+                    options(PROVIDERS),
+                    saving,
+                    window,
+                    cx,
+                ),
+                Some(
+                    "The Sandbox manager starts Sandboxes for you, without cluster access on this device."
+                        .into(),
+                ),
+                &c,
+            ))
             .child(
                 div()
                     .flex()
@@ -232,18 +325,38 @@ impl Render for SettingsTab {
                         &c,
                     ))),
             )
-            .child(field(
-                "Provider config",
-                TextArea::new(&self.provider_config)
-                    .rows(10)
-                    .surface(Surface::Floating)
-                    .disabled(saving),
-                Some(
-                    "buzz-backend-kubernetes settings, such as context, namespace and image. Always a Sandbox per thread; no secrets."
-                        .into(),
-                ),
-                &c,
-            ))
+            .when(self.provider != RELAY, |this| {
+                this.child(field(
+                    "Provider config",
+                    TextArea::new(&self.provider_config)
+                        .rows(10)
+                        .surface(Surface::Floating)
+                        .disabled(saving),
+                    Some(
+                        "buzz-backend-kubernetes settings, such as context, namespace and image. Always a Sandbox per thread; no secrets."
+                            .into(),
+                    ),
+                    &c,
+                ))
+            })
+            .when(self.provider == RELAY, |this| {
+                this.child(field(
+                    "Relay",
+                    TextField::new(&self.relay_url)
+                        .surface(Surface::Floating)
+                        .disabled(saving),
+                    Some("Where the Sandbox manager listens; the agent's community by default.".into()),
+                    &c,
+                ))
+                .child(field(
+                    "Manager key",
+                    TextField::new(&self.manager_pubkey)
+                        .surface(Surface::Floating)
+                        .disabled(saving),
+                    Some("The Sandbox manager's public key, in hex.".into()),
+                    &c,
+                ))
+            })
             .child(field(
                 "Environment",
                 TextArea::new(&self.env)

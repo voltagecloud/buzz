@@ -132,8 +132,12 @@ fn session_scope_reads_the_camel_case_wire_shape_only() {
 }
 
 #[test]
-fn thread_sandbox_is_only_the_kubernetes_provider_with_sandbox_true() {
+fn thread_sandbox_is_a_kubernetes_or_relay_provider_with_sandbox_true() {
     for (provider, config, expected) in [
+        ("relay", serde_json::json!({"sandbox": true}), true),
+        ("relay", serde_json::json!({"sandbox": false}), false),
+        ("relay", serde_json::json!({}), false),
+        ("Relay", serde_json::json!({"sandbox": true}), false),
         ("kubernetes", serde_json::json!({"sandbox": true}), true),
         ("kubernetes", serde_json::json!({"sandbox": false}), false),
         ("kubernetes", serde_json::json!({"sandbox": "true"}), false),

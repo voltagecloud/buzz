@@ -1,6 +1,7 @@
 //! Remote workspace agents: each thread the agent is mentioned in gets its
 //! own Kubernetes Sandbox, which the agent's host starts with Voltage's
-//! `buzz-backend-kubernetes` provider. The harness runs in the Sandbox and
+//! `buzz-backend-kubernetes` provider, or `buzz-backend-relay`, which asks
+//! the Sandbox manager to start it. The harness runs in the Sandbox and
 //! talks to the community itself; this type only starts the session.
 //! Built only with the `voltage-sandbox` feature.
 
@@ -20,7 +21,8 @@ use gpui_kit::*;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Registered as `voltage.remote-workspace/kubernetes`.
+/// Registered as `voltage.remote-workspace/kubernetes`, whichever provider
+/// an agent uses: the key never changes.
 pub const PLUGIN: &str = "voltage.remote-workspace";
 pub const TYPE_ID: &str = "kubernetes";
 
@@ -45,11 +47,14 @@ impl AgentType for RemoteWorkspace {
     }
 
     fn title(&self) -> SharedString {
-        "Remote workspace (Kubernetes)".into()
+        "Remote workspace".into()
     }
 
     fn description(&self) -> Option<SharedString> {
-        Some("Each thread runs in its own Kubernetes Sandbox, started by the agent's host.".into())
+        Some(
+            "Each thread runs in its own Kubernetes Sandbox, started by the agent's host or the Sandbox manager."
+                .into(),
+        )
     }
 
     fn defaults(&self) -> TypeDefaults {
@@ -65,8 +70,14 @@ impl AgentType for RemoteWorkspace {
 
     fn summary(&self, agent: &crate::agents2::Agent) -> Option<String> {
         let config = Config::read(&agent.config);
-        let namespace = config.provider_config.get("namespace")?.as_str()?;
-        Some(format!("Kubernetes · {namespace}"))
+        let text = |name: &str| config.provider_config.get(name)?.as_str();
+        match config.provider.as_str() {
+            config::RELAY => {
+                let relay = url::Url::parse(text("relay_url")?).ok()?;
+                Some(format!("Sandbox manager · {}", relay.host_str()?))
+            }
+            _ => Some(format!("Kubernetes · {}", text("namespace")?)),
+        }
     }
 
     fn tabs(&self) -> Vec<AgentTab> {
