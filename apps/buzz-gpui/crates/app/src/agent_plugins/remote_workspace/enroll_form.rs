@@ -155,11 +155,12 @@ impl EnrollForm {
                 c,
             ))
             .child(row(&[Field::OpToken]))
-            .child(row(&[Field::DepotOrganization, Field::DepotToken]))
+            // Subscriptions first: both can run in parallel in every Sandbox.
+            .child(row(&[Field::CodexAccessToken, Field::ClaudeOauthToken]))
             .child(row(&[
                 Field::OpenaiApiKey,
                 Field::AnthropicApiKey,
-                Field::ClaudeOauthToken,
+                Field::OpenrouterApiKey,
             ]))
             .children(status)
     }

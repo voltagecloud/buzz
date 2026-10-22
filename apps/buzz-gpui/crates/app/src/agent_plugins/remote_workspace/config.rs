@@ -192,11 +192,12 @@ impl Config {
             set("BUZZ_ACP_SYSTEM_PROMPT", self.instructions.clone());
         }
         if !self.model.trim().is_empty() {
-            // Claude reads its startup model from ANTHROPIC_MODEL.
-            let key = if claude {
-                "ANTHROPIC_MODEL"
-            } else {
-                "BUZZ_ACP_MODEL"
+            // Claude reads its startup model from ANTHROPIC_MODEL, and the Buzz
+            // agent from BUZZ_AGENT_MODEL: it refuses to start without one.
+            let key = match runtime.id {
+                "claude" => "ANTHROPIC_MODEL",
+                "buzz-agent" => "BUZZ_AGENT_MODEL",
+                _ => "BUZZ_ACP_MODEL",
             };
             set(key, self.model.trim().into());
         }

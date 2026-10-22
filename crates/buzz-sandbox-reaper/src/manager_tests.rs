@@ -331,7 +331,7 @@ async fn enroll_is_refused_unless_the_profile_is_the_signing_owners() {
     }
     // The refusal is the image's message, which names no value.
     let mut incomplete = mine();
-    incomplete.as_object_mut().unwrap().remove("depot");
+    incomplete.as_object_mut().unwrap().remove("via");
     let invalid = manager.admit(&enroll(owner(), None, incomplete).event(), now());
     let Admission::Done { response, .. } = invalid else {
         panic!("not refused");

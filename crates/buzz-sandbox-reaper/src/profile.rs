@@ -16,10 +16,15 @@ const FIELDS: &[&str] = &[
     "git",
     "github",
     "via",
-    "depot",
     "models",
 ];
-const MODEL_FIELDS: &[&str] = &["openai_api_key", "anthropic_api_key", "claude_oauth_token"];
+const MODEL_FIELDS: &[&str] = &[
+    "openai_api_key",
+    "codex_access_token",
+    "anthropic_api_key",
+    "claude_oauth_token",
+    "openrouter_api_key",
+];
 
 /// Why a profile was refused: one of `profile.py`'s messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,21 +144,15 @@ pub fn validate(profile: &Value) -> Result<(), Invalid> {
         truthy(config.get("services")) && truthy(config.get("providers")),
         "via profile requires providers and services",
     )?;
-    let depot = fields(&top["depot"], &["organization", "token"])?;
-    require(
-        depot["organization"].as_str().is_some_and(|org| {
-            (1..=64).contains(&org.len())
-                && org
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-        }),
-        "Invalid Depot organization",
-    )?;
-    token(&depot["token"])?;
     let models = top["models"]
         .as_object()
         .filter(|models| models.keys().all(|k| MODEL_FIELDS.contains(&k.as_str())))
         .ok_or(Invalid("Unsupported model credential type"))?;
+    // Codex reads the access token before its saved API-key login, so allow only one.
+    require(
+        !(models.contains_key("openai_api_key") && models.contains_key("codex_access_token")),
+        "Choose either an OpenAI API key or a Codex access token",
+    )?;
     // Claude Code prefers an API key over the subscription token, so allow only one.
     require(
         !(models.contains_key("anthropic_api_key") && models.contains_key("claude_oauth_token")),
@@ -162,6 +161,12 @@ pub fn validate(profile: &Value) -> Result<(), Invalid> {
     for value in models.values() {
         token(value)?;
     }
+    require(
+        models
+            .get("codex_access_token")
+            .is_none_or(|value| value.as_str().is_some_and(|value| value.starts_with("at-"))),
+        "Use a Codex access token (at-...)",
+    )?;
     require(
         python_json_len(profile) <= MAX_BYTES,
         "Profile exceeds Secrets Manager size limit",

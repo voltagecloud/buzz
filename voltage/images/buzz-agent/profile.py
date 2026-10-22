@@ -13,13 +13,16 @@ import tomllib
 
 MAX_BYTES = 65536
 DIRECTORY = Path('/home/agent/.config/buzz-agent')
-FIELDS = {'version', 'developer', 'owner_pubkey', 'git', 'github', 'via', 'depot', 'models'}
-MODEL_FIELDS = {'openai_api_key', 'anthropic_api_key', 'claude_oauth_token'}
-# Billed API keys; the Codex device-login gate refuses them.
-API_KEY_FIELDS = {'openai_api_key', 'anthropic_api_key'}
+FIELDS = {'version', 'developer', 'owner_pubkey', 'git', 'github', 'via', 'models'}
+MODEL_FIELDS = {'openai_api_key', 'codex_access_token', 'anthropic_api_key', 'claude_oauth_token',
+                'openrouter_api_key'}
+# The Codex device-login gate refuses these: billed API keys and a Codex access token.
+API_KEY_FIELDS = {'openai_api_key', 'codex_access_token', 'anthropic_api_key', 'openrouter_api_key'}
 # Inherited values would override or mix with the profile's selected accounts.
-INHERITED_MODEL_VARIABLES = ('OPENAI_API_KEY', 'CODEX_API_KEY', 'ANTHROPIC_API_KEY',
-                             'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN')
+INHERITED_MODEL_VARIABLES = ('OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_ACCESS_TOKEN', 'ANTHROPIC_API_KEY',
+                             'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'OPENROUTER_API_KEY')
+# The shared Depot cache credential: the via profile's `depot` service, read from the vault.
+DEPOT_SERVICE = 'depot'
 
 
 def require(condition, message):
@@ -57,17 +60,18 @@ def validate(profile):
     require(isinstance(profile['via']['profile'], str), 'Invalid via profile')
     config = tomllib.loads(profile['via']['profile'])
     require(config.get('services') and config.get('providers'), 'via profile requires providers and services')
-    fields(profile['depot'], {'organization', 'token'})
-    require(isinstance(profile['depot']['organization'], str)
-            and re.fullmatch(r'[a-zA-Z0-9_-]{1,64}', profile['depot']['organization']), 'Invalid Depot organization')
-    token(profile['depot']['token'])
     require(isinstance(profile['models'], dict)
             and set(profile['models']) <= MODEL_FIELDS, 'Unsupported model credential type')
+    # Codex reads the access token before its saved API-key login, so allow only one.
+    require(not {'openai_api_key', 'codex_access_token'} <= set(profile['models']),
+            'Choose either an OpenAI API key or a Codex access token')
     # Claude Code prefers an API key over the subscription token, so allow only one.
     require(not {'anthropic_api_key', 'claude_oauth_token'} <= set(profile['models']),
             'Choose either a Claude API key or a Claude subscription token')
     for value in profile['models'].values():
         token(value)
+    require('codex_access_token' not in profile['models']
+            or profile['models']['codex_access_token'].startswith('at-'), 'Use a Codex access token (at-...)')
     require(len(json.dumps(profile).encode()) <= MAX_BYTES, 'Profile exceeds Secrets Manager size limit')
 
 
@@ -136,6 +140,34 @@ def write_file(path, value):
         stream.write(value)
 
 
+def depot(profile):
+    """The Depot organization and token the via profile's `depot` service names, or None.
+
+    The vault holds one Depot credential for every developer's agents. A missing,
+    malformed, or unreadable service only turns the remote build cache off."""
+    services = tomllib.loads(profile['via']['profile'])['services']
+    if not isinstance(services, dict) or DEPOT_SERVICE not in services:
+        print('Depot cache unavailable: the via profile has no depot service; building without it', file=sys.stderr)
+        return None
+    try:
+        secrets = services[DEPOT_SERVICE]['secrets']
+        references = [secrets['organization'], secrets['token']]
+        require(all(isinstance(value, str) and value.startswith('op://') for value in references),
+                'Depot references must be op:// references')
+        env = {k: v for k, v in os.environ.items() if not k.startswith('OP_')}
+        env['OP_SERVICE_ACCOUNT_TOKEN'] = profile['via']['op_token']
+        organization, value = (command('op', 'read', '--no-newline', reference, env=env).strip()
+                               for reference in references)
+        require(re.fullmatch(r'[a-zA-Z0-9_-]{1,64}', organization), 'Invalid Depot organization')
+        token(value)
+    # command() reports a failed read as ValueError; OSError covers an op that cannot run.
+    except (ValueError, KeyError, TypeError, AttributeError, OSError, subprocess.TimeoutExpired):
+        print('Depot cache unavailable: the via profile depot service could not be read; building without it',
+              file=sys.stderr)
+        return None
+    return organization, value
+
+
 def bootstrap():
     developer = os.environ.get('BUZZ_DEVELOPER_ID', '')
     arn = os.environ.get('BUZZ_DEVELOPER_PROFILE_ARN', '')
@@ -149,7 +181,7 @@ def bootstrap():
     require(result['ARN'] == arn, 'Secret response does not match the requested profile')
     setup_mode = bool(os.environ.get('BUZZ_SETUP_MODE'))
     require(not setup_mode or not API_KEY_FIELDS & set(profile['models']),
-            'Interactive account login cannot be combined with model API keys')
+            'Interactive account login cannot be combined with model API keys or a Codex access token')
     env = os.environ.copy()
     for key in INHERITED_MODEL_VARIABLES:
         require(not env.get(key), 'Model credentials must come from the selected developer profile')
@@ -158,9 +190,11 @@ def bootstrap():
                GIT_AUTHOR_NAME=profile['git']['name'], GIT_AUTHOR_EMAIL=profile['git']['email'],
                GIT_COMMITTER_NAME=profile['git']['name'], GIT_COMMITTER_EMAIL=profile['git']['email'])
     files = {'github-token': profile['github']['token'], 'op-token': profile['via']['op_token'],
-             'via.toml': profile['via']['profile'], 'depot-token': profile['depot']['token'],
-             'depot.json': json.dumps({'organization': profile['depot']['organization']}),
+             'via.toml': profile['via']['profile'],
              'profile.json': json.dumps({'developer': developer, 'version_id': result['VersionId']})}
+    cache = depot(profile)
+    if cache:
+        files.update({'depot-token': cache[1], 'depot.json': json.dumps({'organization': cache[0]})})
     for name, value in files.items():
         write_file(DIRECTORY / name, value)
     if 'openai_api_key' in profile['models']:
@@ -169,8 +203,16 @@ def bootstrap():
         env['CODEX_CONFIG'] = '{"cli_auth_credentials_store":"file"}'
         write_file(Path(env['CODEX_HOME']) / 'config.toml', 'cli_auth_credentials_store = "file"\n')
         command('codex', 'login', '--with-api-key', input=profile['models']['openai_api_key']+'\n', env=env)
+    if 'codex_access_token' in profile['models']:
+        # A workspace access token: no refresh token, so concurrent Sandboxes share it safely.
+        env['CODEX_ACCESS_TOKEN'] = profile['models']['codex_access_token']
     if 'anthropic_api_key' in profile['models']:
         env['ANTHROPIC_API_KEY'] = profile['models']['anthropic_api_key']
+    if 'openrouter_api_key' in profile['models']:
+        # The Buzz agent runtime routes any OpenRouter model; an agent's own
+        # BUZZ_AGENT_PROVIDER still wins.
+        env['OPENROUTER_API_KEY'] = profile['models']['openrouter_api_key']
+        env.setdefault('BUZZ_AGENT_PROVIDER', 'openrouter')
     # The Codex setup session cannot use the Claude token, and its gate refuses CLAUDE_* variables.
     if 'claude_oauth_token' in profile['models'] and not setup_mode:
         env['CLAUDE_CODE_OAUTH_TOKEN'] = profile['models']['claude_oauth_token']

@@ -30,11 +30,11 @@ pub enum Field {
     GithubToken,
     ViaProfile,
     OpToken,
-    DepotOrganization,
-    DepotToken,
+    CodexAccessToken,
+    ClaudeOauthToken,
     OpenaiApiKey,
     AnthropicApiKey,
-    ClaudeOauthToken,
+    OpenrouterApiKey,
 }
 
 impl Field {
@@ -47,11 +47,11 @@ impl Field {
         Field::GithubToken,
         Field::ViaProfile,
         Field::OpToken,
-        Field::DepotOrganization,
-        Field::DepotToken,
+        Field::CodexAccessToken,
+        Field::ClaudeOauthToken,
         Field::OpenaiApiKey,
         Field::AnthropicApiKey,
-        Field::ClaudeOauthToken,
+        Field::OpenrouterApiKey,
     ];
 
     /// Masked, and cleared once the form is sent.
@@ -60,10 +60,11 @@ impl Field {
             self,
             Field::GithubToken
                 | Field::OpToken
-                | Field::DepotToken
+                | Field::CodexAccessToken
                 | Field::OpenaiApiKey
                 | Field::AnthropicApiKey
                 | Field::ClaudeOauthToken
+                | Field::OpenrouterApiKey
         )
     }
 
@@ -77,11 +78,11 @@ impl Field {
             Field::GithubToken => "GitHub token",
             Field::ViaProfile => "via profile",
             Field::OpToken => "1Password service account token",
-            Field::DepotOrganization => "Depot organization",
-            Field::DepotToken => "Depot token",
+            Field::CodexAccessToken => "Codex access token",
             Field::OpenaiApiKey => "OpenAI API key",
             Field::AnthropicApiKey => "Anthropic API key",
             Field::ClaudeOauthToken => "Claude subscription token",
+            Field::OpenrouterApiKey => "OpenRouter API key",
         }
     }
 
@@ -89,8 +90,10 @@ impl Field {
     fn model(self) -> Option<&'static str> {
         match self {
             Field::OpenaiApiKey => Some("openai_api_key"),
+            Field::CodexAccessToken => Some("codex_access_token"),
             Field::AnthropicApiKey => Some("anthropic_api_key"),
             Field::ClaudeOauthToken => Some("claude_oauth_token"),
+            Field::OpenrouterApiKey => Some("openrouter_api_key"),
             _ => None,
         }
     }
@@ -145,10 +148,6 @@ pub fn profile(values: &Values, owner: &str) -> Result<Value, String> {
         },
         "github": {"login": text(Field::GithubLogin), "token": text(Field::GithubToken)},
         "via": {"profile": values.get(Field::ViaProfile), "op_token": text(Field::OpToken)},
-        "depot": {
-            "organization": text(Field::DepotOrganization),
-            "token": text(Field::DepotToken),
-        },
         "models": models,
     });
     validate(&profile)?;
@@ -174,7 +173,6 @@ pub fn validate(profile: &Value) -> Result<(), String> {
             "git",
             "github",
             "via",
-            "depot",
             "models",
         ],
     )?;
@@ -222,22 +220,26 @@ pub fn validate(profile: &Value) -> Result<(), String> {
         truthy(config.get("services")) && truthy(config.get("providers")),
         "via profile requires providers and services",
     )?;
-    let depot = &profile["depot"];
-    fields(depot, &["organization", "token"])?;
-    require(
-        matches(&depot["organization"], "[a-zA-Z0-9_-]{1,64}"),
-        "Invalid Depot organization",
-    )?;
-    token(&depot["token"])?;
     let models = profile["models"]
         .as_object()
         .ok_or("Unsupported model credential type")?;
-    let model_fields = ["openai_api_key", "anthropic_api_key", "claude_oauth_token"];
+    let model_fields = [
+        "openai_api_key",
+        "codex_access_token",
+        "anthropic_api_key",
+        "claude_oauth_token",
+        "openrouter_api_key",
+    ];
     require(
         models
             .keys()
             .all(|key| model_fields.contains(&key.as_str())),
         "Unsupported model credential type",
+    )?;
+    // Codex reads the access token before its saved API-key login, so allow only one.
+    require(
+        !(models.contains_key("openai_api_key") && models.contains_key("codex_access_token")),
+        "Choose either an OpenAI API key or a Codex access token",
     )?;
     // Claude Code prefers an API key over the subscription token, so allow only one.
     require(
@@ -247,6 +249,12 @@ pub fn validate(profile: &Value) -> Result<(), String> {
     for value in models.values() {
         token(value)?;
     }
+    require(
+        models
+            .get("codex_access_token")
+            .is_none_or(|value| value.as_str().is_some_and(|value| value.starts_with("at-"))),
+        "Use a Codex access token (at-...)",
+    )?;
     require(
         profile.to_string().len() <= MAX_PROFILE_BYTES,
         "Profile exceeds Secrets Manager size limit",
