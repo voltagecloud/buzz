@@ -1,0 +1,31 @@
+[package]
+name = "buzz-backend-relay"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Remote-agent provider that runs Sandbox sessions through a session manager over the Buzz relay (docs/remote-agents.md §Relay transport)"
+
+[lib]
+name = "buzz_backend_relay"
+path = "src/lib.rs"
+
+[[bin]]
+name = "buzz-backend-relay"
+path = "src/main.rs"
+
+[dependencies]
+# Wire types and the Sandbox request checks only; this provider never
+# contacts a cluster.
+buzz-backend-kubernetes = { path = "../buzz-backend-kubernetes" }
+buzz-sdk = { workspace = true }
+buzz-session-control = { workspace = true }
+buzz-ws-client = { workspace = true }
+nostr = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true }
+# The process-level CryptoProvider is installed explicitly, as in
+# buzz-backend-kubernetes: the release build unifies ring and aws-lc-rs.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

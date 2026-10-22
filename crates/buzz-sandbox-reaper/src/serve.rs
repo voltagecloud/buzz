@@ -56,12 +56,33 @@ pub struct ServeArgs {
     /// admin member's agent rather than as a member itself.
     #[arg(long, env = "BUZZ_AUTH_TAG", hide_env_values = true)]
     auth_tag: Option<String>,
+    /// JSON object of Kubernetes `provider_config` fields set on every
+    /// request, replacing the request's own: at least a digest-pinned
+    /// `image`, plus `pod_options` and the other Pod settings. Required by
+    /// `buzz-backend-relay` clients, which send none of them.
+    #[arg(long, env = "BUZZ_SANDBOX_PROVIDER_CONFIG")]
+    sandbox_provider_config: Option<String>,
+}
+
+fn sandbox_defaults(text: Option<&str>) -> Result<serde_json::Map<String, serde_json::Value>> {
+    let Some(text) = text else {
+        return Ok(serde_json::Map::new());
+    };
+    let serde_json::Value::Object(defaults) = serde_json::from_str(text)
+        .map_err(|_| anyhow::anyhow!("BUZZ_SANDBOX_PROVIDER_CONFIG is not valid JSON"))?
+    else {
+        anyhow::bail!("BUZZ_SANDBOX_PROVIDER_CONFIG must be a JSON object");
+    };
+    provider::check_managed_defaults(&defaults)
+        .map_err(|e| anyhow::anyhow!("BUZZ_SANDBOX_PROVIDER_CONFIG: {e}"))?;
+    Ok(defaults)
 }
 
 pub async fn serve(args: ServeArgs) -> Result<()> {
     let text = std::fs::read_to_string(&args.config)
         .with_context(|| format!("read config {}", args.config.display()))?;
     let config = ManagerConfig::parse(&text)?;
+    let defaults = sandbox_defaults(args.sandbox_provider_config.as_deref())?;
     let keys = load_keys(args.private_key_file.as_deref())?;
     let auth_tag = args
         .auth_tag
@@ -73,7 +94,7 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
         .await
         .context("build in-cluster Kubernetes client")?;
     let developers = config.len();
-    let manager = Arc::new(Manager::new(keys, config, client));
+    let manager = Arc::new(Manager::new(keys, config, client).with_sandbox_defaults(defaults));
     tracing::info!(manager = %manager.keys().public_key(), developers,
         "buzz-sandbox-reaper serve started");
     run(manager, &args.relay_url, auth_tag, crate::shutdown()).await;
@@ -321,3 +342,7 @@ fn reply(manager: &Manager, to: Waiter, reply: &Reply) -> Option<Event> {
 #[cfg(test)]
 #[path = "serve_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "relay_provider_tests.rs"]
+mod relay_provider_tests;

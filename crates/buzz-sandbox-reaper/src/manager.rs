@@ -202,6 +202,8 @@ pub struct Manager {
     keys: Keys,
     config: ManagerConfig,
     client: kube::Client,
+    /// `provider_config` fields set on every request (`--sandbox-provider-config`).
+    defaults: serde_json::Map<String, serde_json::Value>,
     state: Mutex<State>,
 }
 
@@ -255,8 +257,20 @@ impl Manager {
             keys,
             config,
             client,
+            defaults: serde_json::Map::new(),
             state: Mutex::default(),
         }
+    }
+
+    /// Set the `provider_config` fields the manager decides for every
+    /// request, replacing the request's own. Checked by
+    /// [`provider::check_managed_defaults`] first.
+    pub fn with_sandbox_defaults(
+        mut self,
+        defaults: serde_json::Map<String, serde_json::Value>,
+    ) -> Self {
+        self.defaults = defaults;
+        self
     }
 
     pub fn keys(&self) -> &Keys {
@@ -375,6 +389,7 @@ impl Manager {
             namespace: namespace.to_string(),
             agent: opened.signer,
             owner,
+            defaults: self.defaults.clone(),
         };
         Admission::Start {
             to,

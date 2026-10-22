@@ -26,7 +26,40 @@ pub enum Target {
         namespace: String,
         agent: nostr::PublicKey,
         owner: nostr::PublicKey,
+        /// `provider_config` fields the manager sets on every request, such
+        /// as `image` and `pod_options`. They replace the request's own.
+        defaults: serde_json::Map<String, serde_json::Value>,
     },
+}
+
+/// Fields a managed target decides itself, so its defaults cannot set them.
+const MANAGED_FIELDS: &[&str] = &["context", "namespace", "identity_policy", "sandbox"];
+
+/// Validate a managed target's `provider_config` defaults: no field the
+/// manager derives per request, and a complete configuration once those are
+/// added, including a digest-pinned `image`.
+pub fn check_managed_defaults(
+    defaults: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    if let Some(field) = MANAGED_FIELDS.iter().find(|f| defaults.contains_key(**f)) {
+        return Err(format!(
+            "the session manager derives provider_config.{field} itself"
+        ));
+    }
+    let mut config = defaults.clone();
+    config.insert("namespace".into(), "defaults-check".into());
+    config::parse(&serde_json::Value::Object(config)).map(|_| ())
+}
+
+/// The refusals a Sandbox `deploy` or `stop` makes before any cluster
+/// contact: the `sandbox` scope's shape and the approved `identity_policy`.
+/// A provider that forwards the request (`buzz-backend-relay`) runs them
+/// first, so a request that would be refused never leaves the machine.
+pub fn check_sandbox_request(request: &wire::DeployRequest) -> Result<(), wire::ProviderError> {
+    sandbox::Options::parse(&request.provider_config)?
+        .ok_or("the session manager starts Sandbox sessions only")?;
+    identity::check(request, true)?;
+    Ok(())
 }
 
 impl Target {
@@ -36,6 +69,7 @@ impl Target {
             namespace,
             agent,
             owner,
+            defaults,
             ..
         } = self
         else {
@@ -45,6 +79,7 @@ impl Target {
             .provider_config
             .as_object_mut()
             .ok_or("provider_config must be an object")?;
+        config.extend(defaults.clone());
         config.remove("context");
         config.insert("namespace".into(), namespace.as_str().into());
         config.insert(
@@ -359,6 +394,7 @@ mod tests {
             namespace: "buzz-agent-staging-dev".into(),
             agent: agent.public_key(),
             owner: owner.public_key(),
+            defaults: serde_json::Map::new(),
         }
     }
 
@@ -397,6 +433,36 @@ mod tests {
             error.message,
             "the session manager starts Sandbox sessions only"
         );
+    }
+
+    /// The manager's defaults replace the request's fields and may not set a
+    /// field the manager derives per request. (The forwarding checks in
+    /// `check_sandbox_request` are tested through `buzz-backend-relay`.)
+    #[tokio::test]
+    async fn managed_defaults_replace_request_fields() {
+        let (agent, owner) = (nostr::Keys::generate(), nostr::Keys::generate());
+        let image = format!("example.invalid/manager@sha256:{}", "b".repeat(64));
+        let defaults = serde_json::json!({"image": image});
+        let defaults = defaults.as_object().unwrap().clone();
+        check_managed_defaults(&defaults).unwrap();
+        let mut target = managed(&agent, &owner);
+        if let Target::Managed { defaults: d, .. } = &mut target {
+            *d = defaults.clone();
+        }
+        let mut request: wire::DeployRequest = serde_json::from_value(serde_json::json!({
+            "agent": {"relay_url": "wss://r", "private_key_nsec": "nsec1x"},
+            "provider_config": {"image": "attacker.invalid/x@sha256:00",
+                "sandbox": {"channel_id": uuid::Uuid::new_v4().to_string(),
+                    "thread_root": "a".repeat(64)}}
+        }))
+        .unwrap();
+        target.confine(&mut request).unwrap();
+        assert_eq!(request.provider_config["image"], image);
+        for field in MANAGED_FIELDS {
+            let mut bad = defaults.clone();
+            bad.insert(field.to_string(), serde_json::json!("x"));
+            assert!(check_managed_defaults(&bad).unwrap_err().contains(field));
+        }
     }
 
     /// A managed deploy still runs the identity check against the verified
