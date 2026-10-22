@@ -175,30 +175,29 @@ pub async fn filter_fanout_by_access(
     };
 
     // Owner-only kinds (kind:30622 DM visibility, kind:44200 agent turn
-    // metrics) reach only the pubkey named in their `p` tag. Same predicate as
-    // the pull paths, applied here so local and Redis delivery share it — a
-    // kindless `ids:[…]` subscription can otherwise match these events.
-    let kind = event_kind_u32(&stored_event.event);
-    let matches = if kind == buzz_core::kind::KIND_DM_VISIBILITY
-        || kind == buzz_core::kind::KIND_AGENT_TURN_METRIC
-    {
-        matches
-            .into_iter()
-            .filter(|(conn_id, _)| {
-                state
-                    .conn_manager
-                    .pubkey_for_conn(*conn_id)
-                    .is_some_and(|pk| {
-                        buzz_core::filter::reader_authorized_for_event(
-                            &stored_event.event,
-                            &hex::encode(pk),
-                        )
-                    })
-            })
-            .collect()
-    } else {
-        matches
-    };
+    // metrics, kind:24210 sandbox session control) reach only the pubkey named
+    // in their `p` tag. Same predicate as the pull paths, applied here so local
+    // and Redis delivery share it — a kindless `ids:[…]` subscription can
+    // otherwise match these events, and ephemeral kinds have no pull path.
+    let matches =
+        if buzz_core::kind::RESULT_GATED_KINDS.contains(&event_kind_u32(&stored_event.event)) {
+            matches
+                .into_iter()
+                .filter(|(conn_id, _)| {
+                    state
+                        .conn_manager
+                        .pubkey_for_conn(*conn_id)
+                        .is_some_and(|pk| {
+                            buzz_core::filter::reader_authorized_for_event(
+                                &stored_event.event,
+                                &hex::encode(pk),
+                            )
+                        })
+                })
+                .collect()
+        } else {
+            matches
+        };
 
     let Some(channel_id) = stored_event.channel_id else {
         return matches;
@@ -2041,6 +2040,7 @@ mod tests {
             for kind in [
                 buzz_core::kind::KIND_DM_VISIBILITY,
                 buzz_core::kind::KIND_AGENT_TURN_METRIC,
+                buzz_core::kind::KIND_SANDBOX_SESSION_CONTROL,
             ] {
                 let state = test_state().await;
                 let owner = Keys::generate();
@@ -2150,6 +2150,54 @@ mod tests {
                     stranger_rx.try_recv().is_err(),
                     "kind {kind}: stranger must not receive"
                 );
+            }
+        }
+
+        /// The same-pod path of a channel-less ephemeral event
+        /// (`handle_ephemeral_event`): a kind 24210 event reaches only its
+        /// `p`-tagged recipient. A stranger who learned its id, by kind or
+        /// kindless, and its own sender never receive it.
+        #[tokio::test]
+        async fn local_session_control_reaches_only_its_recipient() {
+            use buzz_core::kind::KIND_SANDBOX_SESSION_CONTROL;
+            let state = test_state().await;
+            let (sender, recipient, stranger) =
+                (Keys::generate(), Keys::generate(), Keys::generate());
+            let kind = Kind::Custom(KIND_SANDBOX_SESSION_CONTROL as u16);
+            let event = EventBuilder::new(kind, "ciphertext")
+                .tags([nostr::Tag::parse(["p", &recipient.public_key().to_hex()]).expect("p")])
+                .sign_with_keys(&sender)
+                .expect("sign");
+            let sub = |who: &Keys, filter: Filter| {
+                register_global_sub(
+                    &state,
+                    "control",
+                    filter,
+                    Some(who.public_key().to_bytes().to_vec()),
+                )
+                .1
+            };
+            let mut recipient_rx = sub(
+                &recipient,
+                Filter::new().kind(kind).pubkey(recipient.public_key()),
+            );
+            let mut others = [
+                sub(&stranger, Filter::new().kind(kind).id(event.id)),
+                sub(&stranger, Filter::new().id(event.id)),
+                sub(&sender, Filter::new().id(event.id)),
+            ];
+
+            super::super::fan_out_event_to_local_subscribers(
+                &state,
+                buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
+                &buzz_core::StoredEvent::new(event.clone(), None),
+            )
+            .await;
+
+            let delivered = event_from_ws_message(recipient_rx.try_recv().expect("delivered"));
+            assert_eq!(delivered.id, event.id);
+            for (n, rx) in others.iter_mut().enumerate() {
+                assert!(rx.try_recv().is_err(), "subscription {n} must not receive");
             }
         }
 
@@ -2783,6 +2831,7 @@ mod tests {
             for kind in [
                 buzz_core::kind::KIND_DM_VISIBILITY,
                 buzz_core::kind::KIND_AGENT_TURN_METRIC,
+                buzz_core::kind::KIND_SANDBOX_SESSION_CONTROL,
             ] {
                 let event = EventBuilder::new(Kind::Custom(kind as u16), "{}")
                     .tags([nostr::Tag::parse(["p", &owner.public_key().to_hex()]).expect("p")])
@@ -3291,6 +3340,82 @@ mod tests {
                 .await
                 .expect("ban owner");
             (state, tenant, owner, agent)
+        }
+
+        /// End to end through `handle_event`: a published kind 24210 event is
+        /// accepted and fanned out live to its `p`-tagged recipient only, never
+        /// to a stranger subscribed by its id.
+        /// Mutation: drop 24210 from `RESULT_GATED_KINDS` → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn session_control_event_is_delivered_live_only_to_its_recipient() {
+            use buzz_core::kind::KIND_SANDBOX_SESSION_CONTROL;
+            use nostr::{EventBuilder, Filter, Keys, Kind, Tag};
+            let state = crate::state::tests::test_state().await;
+            let host = format!("ws-session-control-{}.test", uuid::Uuid::new_v4().simple());
+            let community = state
+                .db
+                .ensure_configured_community(&host)
+                .await
+                .expect("ensure community")
+                .id;
+            let tenant = buzz_core::tenant::TenantContext::resolved(community, host);
+            let (sender, recipient, stranger) =
+                (Keys::generate(), Keys::generate(), Keys::generate());
+            let kind = Kind::Custom(KIND_SANDBOX_SESSION_CONTROL as u16);
+            let event = EventBuilder::new(kind, "ciphertext")
+                .tag(Tag::public_key(recipient.public_key()))
+                .sign_with_keys(&sender)
+                .expect("sign");
+            let subscribe = |who: &Keys, filter: Filter| {
+                let conn_id = uuid::Uuid::new_v4();
+                let (tx, rx) = tokio::sync::mpsc::channel(8);
+                state.conn_manager.register(
+                    conn_id,
+                    tx,
+                    tokio::sync::mpsc::channel(1).0,
+                    tokio::sync::mpsc::channel(1).0,
+                    None,
+                    tokio_util::sync::CancellationToken::new(),
+                    community,
+                    std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0)),
+                    std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+                    3,
+                    crate::state::CommunityConnectionControl::new(
+                        tokio_util::sync::CancellationToken::new(),
+                    ),
+                );
+                state
+                    .conn_manager
+                    .set_authenticated_pubkey(conn_id, who.public_key().to_bytes().to_vec());
+                state.sub_registry.register_scoped(
+                    community,
+                    conn_id,
+                    "control".into(),
+                    vec![filter],
+                    None,
+                );
+                rx
+            };
+            let mut recipient_rx = subscribe(
+                &recipient,
+                Filter::new().kind(kind).pubkey(recipient.public_key()),
+            );
+            let mut stranger_rx = subscribe(&stranger, Filter::new().id(event.id));
+
+            let frame = ok_frame(&state, &tenant, &sender, event.clone()).await;
+            assert_eq!(frame, format!(r#"["OK","{}",true,""]"#, event.id.to_hex()));
+            let axum::extract::ws::Message::Text(text) =
+                recipient_rx.try_recv().expect("recipient receives it live")
+            else {
+                panic!("expected a Text frame");
+            };
+            let delivered: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(delivered[2]["id"], event.id.to_hex());
+            assert!(
+                stranger_rx.try_recv().is_err(),
+                "a stranger subscribed by id must not receive it"
+            );
         }
 
         /// Ephemeral events return before ingest, so they carry their own ban

@@ -11,10 +11,10 @@ pub fn filters_match(filters: &[Filter], event: &StoredEvent) -> bool {
     filters.iter().any(|f| filter_match_one(f, event))
 }
 
-/// Result-level read authorization for relay-signed events whose content is
-/// private to a single viewer. Currently gates `KIND_DM_VISIBILITY` and
-/// `KIND_AGENT_TURN_METRIC`: the reader MUST equal the event's `#p` tag
-/// (owner). Returns `true` for every other kind.
+/// Result-level read authorization for events private to a single reader:
+/// every kind in [`crate::kind::RESULT_GATED_KINDS`] (`KIND_DM_VISIBILITY`,
+/// `KIND_AGENT_TURN_METRIC`, `KIND_SANDBOX_SESSION_CONTROL`). The reader MUST
+/// equal the event's `#p` tag. Returns `true` for every other kind.
 ///
 /// This guards every delivery surface — WS historical pull (`req.rs`), HTTP
 /// bridge (`bridge.rs`), and live fan-out (`event.rs`) — so a query that
@@ -22,7 +22,7 @@ pub fn filters_match(filters: &[Filter], event: &StoredEvent) -> bool {
 /// a known event id) still cannot read another user's private event.
 pub fn reader_authorized_for_event(event: &nostr::Event, reader_pubkey_hex: &str) -> bool {
     let kind = crate::kind::event_kind_u32(event);
-    if kind != crate::kind::KIND_DM_VISIBILITY && kind != crate::kind::KIND_AGENT_TURN_METRIC {
+    if !crate::kind::RESULT_GATED_KINDS.contains(&kind) {
         return true;
     }
     let p = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
@@ -318,5 +318,31 @@ mod tests {
             !reader_authorized_for_event(&metric, &agent_keys.public_key().to_hex()),
             "the authoring agent must NOT be authorized to read its own metric event (owner-only)"
         );
+    }
+
+    #[test]
+    fn reader_authorized_for_event_gates_sandbox_session_control_by_p() {
+        let sender = Keys::generate();
+        let recipient = Keys::generate().public_key().to_hex();
+        let stranger = Keys::generate().public_key().to_hex();
+        let control = |tags: Vec<Tag>| {
+            EventBuilder::new(
+                Kind::Custom(crate::kind::KIND_SANDBOX_SESSION_CONTROL as u16),
+                "ciphertext",
+            )
+            .tags(tags)
+            .sign_with_keys(&sender)
+            .expect("sign")
+        };
+        let addressed = control(vec![Tag::parse(["p", &recipient]).unwrap()]);
+        assert!(reader_authorized_for_event(&addressed, &recipient));
+        assert!(!reader_authorized_for_event(&addressed, &stranger));
+        // The sender is not a reader of its own request either.
+        assert!(!reader_authorized_for_event(
+            &addressed,
+            &sender.public_key().to_hex()
+        ));
+        // Untagged, it reaches no one.
+        assert!(!reader_authorized_for_event(&control(vec![]), &recipient));
     }
 }
