@@ -89,7 +89,8 @@ Developer tools and configured MCP servers remain available; the previous text-o
 
 ## Developer accounts
 
-Enroll GitHub, development `via`, and Depot access once per developer. Each of their five Sandboxes loads the same owner-bound profile.
+Enroll GitHub, development `via`, and model accounts once per developer. Each of their five Sandboxes loads the same owner-bound profile.
+The Depot cache credential is shared through the development vault, not enrolled; see [Depot build cache](#depot-build-cache).
 Terraform creates the empty Secrets Manager secret and grants the developer's service account read-only access to its exact ARN.
 
 On the developer workstation, copy [profile.example.json](profile.example.json) to a private file outside the repository.
@@ -114,7 +115,7 @@ BUZZ_DEVELOPER_PROFILE_ARN=<profile_arn from Terraform>
 ```
 
 Use that developer's `agent-workspace` service account. The bootstrap checks the profile against Buzz's verified owner before writing credentials.
-It configures Git identity, GitHub, via, and Depot in private workspace files. Missing profiles, owner mismatches, and unsafe paths refuse startup.
+It configures Git identity, GitHub, via, and the vault's Depot credential in private workspace files. Missing profiles, owner mismatches, and unsafe paths refuse startup.
 Re-enrollment publishes a new version for new sessions. Running sessions retain their current credentials; revoke upstream tokens when required.
 Credentials are excluded from checkpoints. Profile access through IRSA still needs staging validation; the local test uses a Secrets Manager emulator.
 
@@ -123,14 +124,19 @@ Credentials are excluded from checkpoints. Profile access through IRSA still nee
 | Field | Account | Runtime |
 | --- | --- | --- |
 | `openai_api_key` | OpenAI API billing | `OPENAI_API_KEY`; Codex login through its CLI |
+| `codex_access_token` | ChatGPT Business or Enterprise seat | `CODEX_ACCESS_TOKEN` |
 | `anthropic_api_key` | Anthropic API billing | `ANTHROPIC_API_KEY` |
 | `claude_oauth_token` | Claude subscription seat | `CLAUDE_CODE_OAUTH_TOKEN` |
 
-To use a Claude subscription, run `claude setup-token` on the developer workstation and store the long-lived token as `claude_oauth_token`.
-A profile can contain `anthropic_api_key` or `claude_oauth_token`, not both. Claude Code prefers an API key, so mixing them would bill the API silently.
-The bootstrap refuses an inherited `OPENAI_API_KEY`, `CODEX_API_KEY`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or `CLAUDE_CODE_OAUTH_TOKEN`.
+To use both subscriptions in parallel, enroll `codex_access_token` and `claude_oauth_token` together. Neither has a refresh token, so any number of Sandboxes can use them at once.
+- **Codex:** a workspace owner allows [Codex access tokens](https://learn.chatgpt.com/docs/enterprise/access-tokens); the developer creates one (`at-…`) at `chatgpt.com/admin/access-tokens`, within the workspace's expiry limit. Re-enroll before it expires.
+- **Claude:** run `claude setup-token` on the developer workstation and store the one-year token.
 
-Keep the API keys out of `models` to use the Codex setup gate for manual model-account enrollment; the gate refuses profiles with API keys.
+A profile can contain `openai_api_key` or `codex_access_token`, not both: Codex reads the access token first, so mixing them would hide which account runs.
+A profile can contain `anthropic_api_key` or `claude_oauth_token`, not both. Claude Code prefers an API key, so mixing them would bill the API silently.
+The bootstrap refuses an inherited `OPENAI_API_KEY`, `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or `CLAUDE_CODE_OAUTH_TOKEN`.
+
+Keep the API keys and the Codex access token out of `models` to use the Codex setup gate for manual model-account enrollment; the gate refuses them.
 `claude_oauth_token` is not an API key, so a profile with it can still use the gate.
 The gate session runs Codex only, so the bootstrap does not export the Claude token into it. Other Sandboxes that load the same profile receive it.
 Model credentials stay in the harness environment and are never written to workspace files. Tools that the agent runs inherit them.
@@ -160,13 +166,20 @@ Deleting the workspace removes local copies; upstream revocation remains separat
 
 ### Depot build cache
 
-Enroll a Depot user or organization token for the developer's approved organization:
+Every developer's agents share one Depot organization token, kept in the development vault.
+The via profile names it with a `depot` service; at startup the bootstrap reads both values with the profile's 1Password service account token:
 
-```bash
-buzz-agent-account depot --organization <organization-id>
+```toml
+[services.depot]
+description = "Depot build cache"
+provider = "onepassword"
+secrets.organization = "op://Buzz Agents Dev/Depot/organization"
+secrets.token = "op://Buzz Agents Dev/Depot/credential"
 ```
 
-Complete this before releasing the setup gate. The harness and its tools inherit the cache configuration.
+Without the service, or when the vault read fails, the session starts without the remote cache and logs `Depot cache unavailable`.
+To enroll a different token by hand in an existing Sandbox, run `buzz-agent-account depot --organization <organization-id>`.
+The harness and its tools inherit the cache configuration.
 For a separate interactive shell, use `buzz-agent-cache bash` after enrollment.
 The image pins Depot CLI and sccache; each repository selects its Turborepo version.
 Rust uses sccache's WebDAV backend, Turborepo uses `TURBO_API`, and Go 1.24+ uses `depot gocache`.

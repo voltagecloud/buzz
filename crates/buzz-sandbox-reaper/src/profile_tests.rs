@@ -12,7 +12,6 @@ pub(crate) fn valid(developer: &str, owner: &str) -> Value {
         "github": {"login": "ada-l", "token": "ghp_fixtureGitHubTokenDoNotLeak"},
         "via": {"profile": "[providers.op]\nkind = \"1password\"\n\n[services.github]\nprovider = \"op\"\n",
             "op_token": "ops_fixtureOnePasswordTokenDoNotLeak"},
-        "depot": {"organization": "voltage_org-1", "token": "depot_fixtureTokenDoNotLeak"},
         "models": {"anthropic_api_key": "sk-ant-fixtureModelKeyDoNotLeak"}
     })
 }
@@ -36,6 +35,9 @@ fn accepts_a_complete_profile() {
     validate(&value).unwrap();
     value["models"] = json!({"openai_api_key": "sk-x", "claude_oauth_token": "t"});
     validate(&value).unwrap();
+    // Both subscriptions, for Codex and Claude Code in parallel.
+    value["models"] = json!({"codex_access_token": "at-x", "claude_oauth_token": "t"});
+    validate(&value).unwrap();
 }
 
 #[test]
@@ -45,14 +47,13 @@ fn each_section_needs_exactly_its_fields() {
     extra["extra"] = json!(true);
     assert_eq!(validate(&extra), Err(Invalid(FIELDS)));
     let mut missing = profile();
-    missing.as_object_mut().unwrap().remove("depot");
+    missing.as_object_mut().unwrap().remove("via");
     assert_eq!(validate(&missing), Err(Invalid(FIELDS)));
     assert_eq!(validate(&json!([])), Err(Invalid(FIELDS)));
     for (pointer, bad) in [
         ("/git", json!({"name": "a", "email": "b"})),
         ("/github", json!({"login": "a", "token": "b", "scope": "c"})),
         ("/via", json!("profile")),
-        ("/depot", json!({"organization": "a"})),
     ] {
         assert_eq!(refused(pointer, bad), Err(Invalid(FIELDS)), "{pointer}");
     }
@@ -122,22 +123,12 @@ fn refuses_each_rule_with_its_message() {
             json!("services = []\nproviders = 1\n"),
             "via profile requires providers and services",
         ),
+        // The vault, not the profile, holds the shared Depot credential.
         (
-            "/depot/organization",
-            json!(""),
-            "Invalid Depot organization",
+            "/depot",
+            json!({"organization": "voltage", "token": "t"}),
+            "Profile fields are incomplete or unsupported",
         ),
-        (
-            "/depot/organization",
-            json!("a.b"),
-            "Invalid Depot organization",
-        ),
-        (
-            "/depot/organization",
-            json!("a".repeat(65)),
-            "Invalid Depot organization",
-        ),
-        ("/depot/token", json!("x\ty"), "Invalid credential"),
         ("/models", json!([]), "Unsupported model credential type"),
         (
             "/models",
@@ -148,6 +139,21 @@ fn refuses_each_rule_with_its_message() {
             "/models",
             json!({"anthropic_api_key": "k", "claude_oauth_token": "t"}),
             "Choose either a Claude API key or a Claude subscription token",
+        ),
+        (
+            "/models",
+            json!({"openai_api_key": "k", "codex_access_token": "at-t"}),
+            "Choose either an OpenAI API key or a Codex access token",
+        ),
+        (
+            "/models",
+            json!({"codex_access_token": "sk-proj-k"}),
+            "Use a Codex access token (at-...)",
+        ),
+        (
+            "/models",
+            json!({"codex_access_token": "at t"}),
+            "Invalid credential",
         ),
         (
             "/models",

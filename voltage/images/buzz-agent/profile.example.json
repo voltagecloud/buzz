@@ -15,9 +15,5 @@
     "profile": "REPLACE_WITH_DEVELOPMENT_VIA_TOML",
     "op_token": "REPLACE_WITH_DEVELOPMENT_VAULT_SERVICE_ACCOUNT_TOKEN"
   },
-  "depot": {
-    "organization": "REPLACE_WITH_DEPOT_ORGANIZATION",
-    "token": "REPLACE_WITH_DEPOT_USER_OR_ORGANIZATION_TOKEN"
-  },
   "models": {}
 }

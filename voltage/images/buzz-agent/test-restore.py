@@ -11,7 +11,6 @@ PROFILE = {
     'github': {'login': 'fixture', 'token': 'synthetic-profile-github'},
     'via': {'profile': '[providers.fixture]\ntype="fixture"\n[services.fixture]\nprovider="fixture"\n',
             'op_token': 'synthetic-profile-op'},
-    'depot': {'organization': 'fixture-org', 'token': 'synthetic-profile-depot'},
     'models': {},
 }
 

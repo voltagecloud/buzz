@@ -9,9 +9,11 @@ PROFILE = {
     'version': 1, 'developer': 'alice', 'owner_pubkey': OWNER,
     'git': {'name': 'Alice Fixture', 'email': 'alice@example.invalid', 'signing_key': 'A' * 40},
     'github': {'login': 'alice', 'token': 'synthetic-profile-github'},
-    'via': {'profile': '[providers.fixture]\ntype="fixture"\n[services.fixture]\nprovider="fixture"\n',
+    'via': {'profile': '[providers.fixture]\ntype="fixture"\n[services.fixture]\nprovider="fixture"\n'
+                       '[services.depot]\nprovider="fixture"\n'
+                       'secrets.organization="op://Fixture/Depot/organization"\n'
+                       'secrets.token="op://Fixture/Depot/credential"\n',
             'op_token': 'synthetic-profile-op'},
-    'depot': {'organization': 'fixture-org', 'token': 'synthetic-profile-depot'},
     'models': {'openai_api_key': 'synthetic-profile-openai', 'anthropic_api_key': 'synthetic-profile-anthropic'},
 }
 
@@ -64,12 +66,29 @@ failed = subprocess.run(['buzz-agent-profile', 'enroll', '--arn', value['ARN'], 
 require(failed.returncode != 0 and 'synthetic-profile-' not in failed.stdout+failed.stderr, 'mixed Claude credentials were enrolled or leaked')
 after = run('aws', 'secretsmanager', 'get-secret-value', '--secret-id', value['ARN'])
 require(json.loads(before)['VersionId'] == json.loads(after)['VersionId'], 'refused enrollment changed the profile')
+# Codex would read the access token first, so a profile cannot carry both Codex credentials.
+for models in ({'openai_api_key':'synthetic-profile-openai', 'codex_access_token':'at-synthetic-profile-codex'},
+               {'codex_access_token':'synthetic-profile-codex'}):
+    path.write_text(json.dumps(dict(profile, models=models)))
+    failed = subprocess.run(['buzz-agent-profile', 'enroll', '--arn', value['ARN'], '--file', str(path)],
+                            env=env, capture_output=True, text=True, timeout=60)
+    require(failed.returncode != 0 and 'synthetic-profile-' not in failed.stdout+failed.stderr, 'invalid Codex credentials were enrolled or leaked')
+after = run('aws', 'secretsmanager', 'get-secret-value', '--secret-id', value['ARN'])
+require(json.loads(before)['VersionId'] == json.loads(after)['VersionId'], 'refused enrollment changed the profile')
 print(json.dumps({'arn':value['ARN'], 'version':receipt['version_id']}))
 '''
 
 BOOT = COMMON + r'''
 mode = os.environ['FIXTURE_MODE']
 env = dict(os.environ)
+# The shared Depot credential comes from the vault through the via profile's depot service.
+tools = Path('/tmp/boot-tools')
+tools.mkdir()
+(tools/'op').write_text('#!/bin/sh\n[ "$OP_SERVICE_ACCOUNT_TOKEN" = synthetic-profile-op ] || exit 1\n'
+    + ('exit 1\n' if mode == 'no-depot' else '')
+    + 'case "$3" in */organization) printf fixture-org;; */credential) printf synthetic-profile-depot;; *) exit 1;; esac\n')
+(tools/'op').chmod(0o700)
+env['PATH'] = str(tools)+':'+env['PATH']
 def rotate(models):
     stored = json.loads(run('aws', 'secretsmanager', 'get-secret-value', '--secret-id', env['BUZZ_DEVELOPER_PROFILE_ARN']))
     profile = json.loads(stored['SecretString'])
@@ -113,6 +132,15 @@ expected = {'OPENAI_API_KEY':'synthetic-profile-openai', 'ANTHROPIC_API_KEY':'sy
 if mode == 'claude-oauth':
     rotate({'openai_api_key':'synthetic-profile-openai', 'claude_oauth_token':'synthetic-profile-claude-oauth'})
     expected.update(ANTHROPIC_API_KEY=None, CLAUDE_CODE_OAUTH_TOKEN='synthetic-profile-claude-oauth')
+if mode == 'subscriptions':
+    # Both subscriptions in one profile, for Codex and Claude Code in parallel.
+    rotate({'codex_access_token':'at-synthetic-profile-codex', 'claude_oauth_token':'synthetic-profile-claude-oauth'})
+    expected.update(OPENAI_API_KEY=None, ANTHROPIC_API_KEY=None, CODEX_ACCESS_TOKEN='at-synthetic-profile-codex',
+                    CLAUDE_CODE_OAUTH_TOKEN='synthetic-profile-claude-oauth')
+if mode == 'no-depot':
+    # An unreadable Depot credential turns the remote cache off; the session still starts.
+    expected.update(SCCACHE_WEBDAV_PASSWORD=None)
+if mode == 'inherited-codex': env['CODEX_ACCESS_TOKEN'] = 'at-synthetic-unselected-account'
 if mode == 'wrong-owner': env['BUZZ_ACP_AGENT_OWNER'] = 'b'*64
 if mode == 'wrong-developer': env['BUZZ_DEVELOPER_ID'] = 'bob'
 if mode == 'mixed-model': env['OPENAI_API_KEY'] = 'synthetic-unselected-account'
@@ -140,7 +168,7 @@ probe.chmod(0o700)
 result = subprocess.run(['sprig-entrypoint', 'auth-methods', '--agent-command', str(probe), '--agent-args', '', '--json'],
                         env=env, capture_output=True, text=True, timeout=45)
 require('synthetic-profile-' not in result.stdout+result.stderr, 'credential reached output')
-if mode not in ('valid', 'claude-oauth'):
+if mode not in ('valid', 'claude-oauth', 'subscriptions', 'no-depot'):
     require(result.returncode != 0 and not Path('/tmp/profile-adapter.ran').exists(), 'invalid profile started a runtime')
     print('PASS: refused '+mode)
 else:
@@ -151,12 +179,11 @@ else:
     for path in directory.iterdir():
         require(path.stat().st_mode & 0o777 == 0o600, 'credential file permissions too broad')
     require(not list(Path('/home/agent/.gnupg').glob('private-keys-v1.d/*.key')), 'signing key copied to workspace')
-    def contains_claude_token(path):
+    def contains(path, marker):
         # Codex creates helper symlinks to its binary outside the workspace.
         # Scan workspace files without following those links or loading whole files.
         if path.is_symlink() or not path.is_file():
             return False
-        marker = b'synthetic-profile-claude-oauth'
         tail = b''
         with path.open('rb') as stream:
             while chunk := stream.read(65536):
@@ -164,8 +191,10 @@ else:
                     return True
                 tail = chunk[-len(marker) + 1:]
         return False
-    require(not any(contains_claude_token(p) for p in Path('/home/agent').rglob('*')),
-            'Claude token written to the workspace')
+    for marker in (b'synthetic-profile-claude-oauth', b'at-synthetic-profile-codex'):
+        require(not any(contains(p, marker) for p in Path('/home/agent').rglob('*')),
+                'subscription token written to the workspace')
+    require((mode == 'no-depot') != (directory/'depot-token').exists(), 'Depot credential not loaded from the vault')
     print('PASS: fresh Sandbox bootstrap through packaged entrypoint and ACP adapter ('+mode+')')
 '''
 
@@ -191,8 +220,9 @@ def main():
         if result.returncode: raise RuntimeError('Enrollment fixture failed: '+result.stderr[-2000:])
         receipt = json.loads(result.stdout)
         print('PASS: one developer enrollment; wrong GitHub actor cannot replace it', flush=True)
-        modes = ['valid']*5 + ['wrong-owner', 'wrong-developer', 'mixed-model', 'inherited-claude', 'symlink',
-                               'missing', 'gate-api-key', 'claude-oauth', 'manual-gate']
+        modes = ['valid']*5 + ['wrong-owner', 'wrong-developer', 'mixed-model', 'inherited-claude',
+                               'inherited-codex', 'symlink', 'missing', 'gate-api-key', 'claude-oauth',
+                               'subscriptions', 'no-depot', 'manual-gate']
         for mode in modes:
             result = subprocess.run([*base, '-e', 'BUZZ_DEVELOPER_PROFILE_ARN='+receipt['arn'],
                 '-e', 'BUZZ_DEVELOPER_ID=alice', '-e', 'BUZZ_ACP_AGENT_OWNER='+OWNER,

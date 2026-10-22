@@ -3,10 +3,9 @@ use buzz_session_control::Reply;
 use core::prelude::v1::test;
 
 const OWNER: &str = "aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11";
-const TOKENS: [&str; 5] = [
+const TOKENS: [&str; 4] = [
     "ghp_fixtureGithubToken",
     "ops_fixtureOpToken",
-    "depot_fixtureToken",
     "sk-ant-fixtureKey",
     "sk-fixtureOpenaiKey",
 ];
@@ -29,8 +28,6 @@ fn values() -> Values {
             "[providers.op]\nkind = \"1password\"\n\n[services.github]\nprovider = \"op\"\n",
         ),
         (Field::OpToken, "ops_fixtureOpToken"),
-        (Field::DepotOrganization, "voltage"),
-        (Field::DepotToken, "depot_fixtureToken"),
         (Field::AnthropicApiKey, "sk-ant-fixtureKey"),
         (Field::OpenaiApiKey, "sk-fixtureOpenaiKey"),
     ] {
@@ -58,7 +55,6 @@ fn the_form_builds_a_profile_matching_profile_py() {
                 "profile": values().get(Field::ViaProfile),
                 "op_token": "ops_fixtureOpToken",
             },
-            "depot": {"organization": "voltage", "token": "depot_fixtureToken"},
             "models": {
                 "anthropic_api_key": "sk-ant-fixtureKey",
                 "openai_api_key": "sk-fixtureOpenaiKey",
@@ -69,6 +65,17 @@ fn the_form_builds_a_profile_matching_profile_py() {
     no_models.set(Field::AnthropicApiKey, String::new());
     no_models.set(Field::OpenaiApiKey, "  ".into());
     assert_eq!(profile(&no_models, OWNER).unwrap()["models"], json!({}));
+    // Both subscriptions, for Codex and Claude Code in parallel.
+    let mut subscriptions = no_models;
+    subscriptions.set(Field::CodexAccessToken, "at-fixtureCodexToken".into());
+    subscriptions.set(Field::ClaudeOauthToken, "sk-ant-oat01-fixture".into());
+    assert_eq!(
+        profile(&subscriptions, OWNER).unwrap()["models"],
+        json!({
+            "codex_access_token": "at-fixtureCodexToken",
+            "claude_oauth_token": "sk-ant-oat01-fixture",
+        })
+    );
 }
 
 #[test]
@@ -98,11 +105,10 @@ fn the_profile_is_refused_as_profile_py_refuses_it() {
             "via profile requires providers and services",
         ),
         (
-            Field::DepotOrganization,
-            "volt age",
-            "Invalid Depot organization",
+            Field::CodexAccessToken,
+            "at-fixtureCodexToken",
+            "Choose either an OpenAI API key or a Codex access token",
         ),
-        (Field::DepotToken, "", "Invalid credential"),
         (
             Field::OpToken,
             "x".repeat(8193).as_str(),
@@ -117,6 +123,14 @@ fn the_profile_is_refused_as_profile_py_refuses_it() {
         assert_eq!(refused(field, text), message, "{field:?}");
     }
     assert_eq!(profile(&values(), "AA").unwrap_err(), "Invalid Buzz owner");
+    // An OpenAI API key pasted as the Codex access token.
+    let mut pasted = values();
+    pasted.set(Field::OpenaiApiKey, String::new());
+    pasted.set(Field::CodexAccessToken, "sk-proj-fixture".into());
+    assert_eq!(
+        profile(&pasted, OWNER).unwrap_err(),
+        "Use a Codex access token (at-...)"
+    );
     let mut extra = profile(&values(), OWNER).unwrap();
     extra["models"]["gemini_api_key"] = json!("x");
     assert_eq!(
