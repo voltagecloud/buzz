@@ -5,8 +5,19 @@ use buzz_host::api::{Launch, LaunchSpec};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
-/// The only provider whose sessions belong to threads.
-pub const PROVIDER: &str = "kubernetes";
+/// Runs each thread's Sandbox with the developer's own cluster access.
+pub const KUBERNETES: &str = "kubernetes";
+/// Asks Voltage's Sandbox manager to run it, over the relay.
+pub const RELAY: &str = "relay";
+
+/// The providers whose sessions belong to threads, as Settings names them.
+pub const PROVIDERS: &[(&str, &str)] = &[
+    (KUBERNETES, "Kubernetes"),
+    (RELAY, "Sandbox manager (relay)"),
+];
+
+/// What the relay provider takes; the manager decides the rest.
+const RELAY_FIELDS: &[&str] = &["relay_url", "manager_pubkey", "sandbox", "timeout_seconds"];
 
 /// A harness the agent's image runs, as the desktop's catalog has it.
 pub struct Runtime {
@@ -68,7 +79,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            provider: PROVIDER.into(),
+            provider: KUBERNETES.into(),
             provider_config: json!({ "sandbox": true }),
             env: BTreeMap::new(),
             runtime: RUNTIMES[0].id.into(),
@@ -130,12 +141,22 @@ impl Config {
         })
     }
 
+    /// The relay provider's config: the manager at `manager_pubkey` on
+    /// `relay_url`.
+    pub fn relay(relay_url: &str, manager_pubkey: &str) -> Value {
+        json!({
+            "relay_url": relay_url.trim(),
+            "manager_pubkey": manager_pubkey.trim(),
+            "sandbox": true,
+        })
+    }
+
     /// Whether the host will accept it, as far as the GUI can tell.
     pub fn validate(&self) -> Result<(), String> {
-        if self.provider != PROVIDER {
-            return Err(format!(
-                "Remote workspaces run on the {PROVIDER} provider only."
-            ));
+        match self.provider.as_str() {
+            KUBERNETES => {}
+            RELAY => validate_relay(&self.provider_config)?,
+            _ => return Err("Remote workspaces run on the kubernetes or relay provider.".into()),
         }
         buzz_remote_sessions::validate_provider_config(&self.provider_config)?;
         if let Some(key) = self.env.keys().find(|key| !env_name(key)) {
@@ -216,6 +237,45 @@ impl Config {
 }
 
 const SESSION_POLICY: &str = "BUZZ_ACP_SESSION_POLICY";
+
+/// The relay provider's schema: a `wss://` relay, the manager's key, and
+/// an optional timeout of at most 15 minutes.
+fn validate_relay(config: &Value) -> Result<(), String> {
+    let config = config
+        .as_object()
+        .ok_or("The provider config must be a JSON object.")?;
+    if let Some(key) = config
+        .keys()
+        .find(|key| !RELAY_FIELDS.contains(&key.as_str()))
+    {
+        return Err(format!(
+            "The relay provider does not take {key}; the Sandbox manager decides it."
+        ));
+    }
+    let relay = config.get("relay_url").and_then(Value::as_str);
+    if !relay.is_some_and(wss_url) {
+        return Err("The relay URL must be a wss:// address.".into());
+    }
+    let manager = config.get("manager_pubkey").and_then(Value::as_str);
+    if !manager.is_some_and(lowercase_hex_key) {
+        return Err("The manager key must be 64 lowercase hex characters.".into());
+    }
+    if let Some(timeout) = config.get("timeout_seconds")
+        && !timeout.as_u64().is_some_and(|n| (1..=900).contains(&n))
+    {
+        return Err("The timeout must be 1 to 900 seconds.".into());
+    }
+    Ok(())
+}
+
+fn wss_url(text: &str) -> bool {
+    url::Url::parse(text).is_ok_and(|url| url.scheme() == "wss" && url.host_str().is_some())
+}
+
+/// A Nostr public key as the provider takes it.
+pub fn lowercase_hex_key(text: &str) -> bool {
+    text.len() == 64 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
 
 /// `[A-Za-z_][A-Za-z0-9_]*`, which the provider requires.
 fn env_name(key: &str) -> bool {

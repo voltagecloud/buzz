@@ -1,5 +1,6 @@
-//! Remote workspace requests through a host, against a stub
-//! `buzz-backend-kubernetes` that records what it is asked.
+//! Remote workspace requests through a host, against stub
+//! `buzz-backend-kubernetes` and `buzz-backend-relay` providers that record
+//! what they are asked.
 
 use buzz_host::api::*;
 use buzz_host::credentials::FileCredentials;
@@ -30,8 +31,13 @@ impl Provider {
     /// `response` after `delay` seconds. Requests are appended to
     /// `requests`; one that starts while another runs leaves `overlap`.
     fn new(response: Value, delay: &str) -> Self {
+        Self::named("kubernetes", response, delay)
+    }
+
+    /// [`Self::new`], installed as `buzz-backend-<id>`.
+    fn named(id: &str, response: Value, delay: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let info = json!({"ok": true, "name": "kubernetes", "version": "1",
+        let info = json!({"ok": true, "name": id, "version": "1",
             "protocol_version": 1, "description": "Stub", "config_schema": {},
             "ops": ["info", "deploy", "stop", "recover"]});
         let d = dir.path().display();
@@ -42,7 +48,7 @@ impl Provider {
              printf '%s\\n' \"$request\" >> '{d}/requests'\nsleep {delay}\n\
              rm -f '{d}/busy'\nprintf '%s\\n' '{response}' ;;\nesac\n"
         );
-        let path = dir.path().join("buzz-backend-kubernetes");
+        let path = dir.path().join(format!("buzz-backend-{id}"));
         std::fs::write(&path, script).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         Self { dir }
@@ -66,8 +72,13 @@ impl Provider {
 }
 
 fn host(state: &Path, provider: &Provider) -> Arc<AgentHost> {
-    let sandboxes = Sandboxes::new(&state.join("state"))
-        .with_provider_dirs(vec![provider.dir.path().to_path_buf()]);
+    host_of(state, &[provider])
+}
+
+/// A host that finds providers in each of `providers`' directories.
+fn host_of(state: &Path, providers: &[&Provider]) -> Arc<AgentHost> {
+    let dirs = providers.iter().map(|p| p.dir.path().to_path_buf());
+    let sandboxes = Sandboxes::new(&state.join("state")).with_provider_dirs(dirs.collect());
     AgentHost::start(HostConfig {
         info: HostInfo {
             id: "devbox".into(),
@@ -210,6 +221,64 @@ async fn a_start_carries_the_bound_scope_and_custody_identity() {
         "{refused:?}"
     );
     assert_eq!(provider.requests().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_relay_session_runs_the_relay_provider_by_its_id() {
+    let state = tempfile::tempdir().unwrap();
+    let kubernetes = Provider::new(deployed(), "0");
+    // One answer for deploy and stop alike.
+    let answer = json!({"ok": true, "agent_id": "agent-1", "state": "ended"});
+    let relay = Provider::named("relay", answer, "0");
+    let host = host_of(state.path(), &[&kubernetes, &relay]);
+    let (pubkey, owner) = agent(&host).await;
+    let manager = "d".repeat(64);
+    let mut session = session(&pubkey, &owner, 'a');
+    session.spec.provider = "relay".into();
+    session.spec.provider_config_json = json!({
+        "relay_url": RELAY, "manager_pubkey": manager, "sandbox": true,
+    })
+    .to_string();
+
+    let started = sandbox(&host, start(session.clone())).await;
+    assert!(matches!(started, SandboxResponse::Started), "{started:?}");
+    let ended = sandbox(
+        &host,
+        SandboxRequest::End {
+            session: session.clone(),
+        },
+    )
+    .await;
+    assert!(matches!(ended, SandboxResponse::Ended { .. }), "{ended:?}");
+    let mode = RecoveryMode::Fresh;
+    let recovered = sandbox(&host, SandboxRequest::Recover { session, mode }).await;
+    assert!(
+        matches!(recovered, SandboxResponse::Started),
+        "{recovered:?}"
+    );
+
+    assert!(kubernetes.requests().is_empty());
+    let [deploy, stop, recover] = relay.requests().try_into().unwrap();
+    assert_eq!(deploy["op"], "deploy");
+    assert_eq!(stop["op"], "stop");
+    assert_eq!(recover["op"], "deploy");
+    assert_eq!(
+        recover["provider_config"]["sandbox"]["recovery"]["mode"],
+        "fresh"
+    );
+    let config = &deploy["provider_config"];
+    assert_eq!(config["relay_url"], RELAY);
+    assert_eq!(config["manager_pubkey"], manager);
+    assert_eq!(
+        config["sandbox"],
+        json!({"channel_id": CHANNEL, "thread_root": "a".repeat(64)})
+    );
+    assert_eq!(
+        config["identity_policy"],
+        json!({"agent_pubkey": pubkey, "owner_pubkey": owner.pubkey_hex()})
+    );
+    let nsec = deploy["agent"]["private_key_nsec"].as_str().unwrap();
+    assert_eq!(Identity::from_nsec(nsec).unwrap().pubkey_hex(), pubkey);
 }
 
 struct NoAsks;

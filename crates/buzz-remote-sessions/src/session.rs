@@ -103,10 +103,15 @@ impl Action {
     }
 }
 
+/// The providers whose sessions can belong to threads: Kubernetes, and the
+/// relay provider that asks a Sandbox manager to run them.
+pub const THREAD_PROVIDERS: &[&str] = &["kubernetes", "relay"];
+
 /// Whether launches require a published channel thread instead of app
-/// lifecycle events: the Kubernetes provider with `sandbox: true`.
+/// lifecycle events: a [`THREAD_PROVIDERS`] provider with `sandbox: true`.
 pub fn is_thread_sandbox(provider_id: &str, config: &serde_json::Value) -> bool {
-    provider_id == "kubernetes" && config.get("sandbox") == Some(&serde_json::Value::Bool(true))
+    THREAD_PROVIDERS.contains(&provider_id)
+        && config.get("sandbox") == Some(&serde_json::Value::Bool(true))
 }
 
 /// Replace a thread Sandbox's `sandbox: true` request with the published

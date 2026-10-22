@@ -37,4 +37,6 @@ pub use recovery::{
     RecoveryPrompts, MAX_RECOVERY_PROMPTS,
 };
 pub use scope::{assert_expected_relay_scope, assert_expected_signer, relay_http_base_url};
-pub use session::{is_thread_sandbox, RecoveryMode, SessionScope, Tenant, REPLAY_FLOOR_ENV_VAR};
+pub use session::{
+    is_thread_sandbox, RecoveryMode, SessionScope, Tenant, REPLAY_FLOOR_ENV_VAR, THREAD_PROVIDERS,
+};

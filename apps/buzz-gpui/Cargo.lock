@@ -971,7 +971,7 @@ dependencies = [
  "bech32 0.11.1",
  "buzz-credential-store",
  "getrandom 0.3.4",
- "hmac",
+ "hmac 0.12.1",
  "libc",
  "nix 0.31.3",
  "nostr 0.45.5",
@@ -982,6 +982,27 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "url",
+ "zeroize",
+]
+
+[[package]]
+name = "buzz-core"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "hex",
+ "hmac 0.13.0",
+ "nostr 0.44.8",
+ "percent-encoding",
+ "rand 0.10.3",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "subtle",
+ "thiserror 2.0.21",
+ "url",
+ "uuid",
  "zeroize",
 ]
 
@@ -1009,7 +1030,7 @@ dependencies = [
  "fs2",
  "futures-util",
  "getrandom 0.3.4",
- "hmac",
+ "hmac 0.12.1",
  "http",
  "image",
  "libc",
@@ -1050,6 +1071,7 @@ dependencies = [
  "buzz-relay-client",
  "buzz-remote-sessions",
  "buzz-sandbox-host",
+ "buzz-session-control",
  "buzz-ui",
  "buzzodz-plugins",
  "chrono",
@@ -1145,6 +1167,8 @@ dependencies = [
  "base64 0.22.1",
  "buzz-desktop",
  "buzz-keychain",
+ "buzz-session-control",
+ "nostr 0.44.8",
  "nostr 0.45.5",
  "secp256k1 0.31.1",
  "serde_json",
@@ -1270,6 +1294,31 @@ dependencies = [
  "tempfile",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "buzz-sdk"
+version = "0.1.0"
+dependencies = [
+ "buzz-core",
+ "nostr 0.44.8",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "uuid",
+]
+
+[[package]]
+name = "buzz-session-control"
+version = "0.1.0"
+dependencies = [
+ "buzz-core",
+ "buzz-sdk",
+ "nostr 0.44.8",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "zeroize",
 ]
 
 [[package]]
@@ -1637,6 +1686,12 @@ checksum = "c0f78a02292a74a88ac736019ab962ece0bc380e3f977bf72e376c5d78ff0678"
 dependencies = [
  "cc",
 ]
+
+[[package]]
+name = "cmov"
+version = "0.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 
 [[package]]
 name = "cocoa"
@@ -2084,6 +2139,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ctutils"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "03bb0e1cc970d482d121d9a1744999169b69a07470b3d644a7894e53fcaf4574"
+dependencies = [
+ "cmov",
+]
+
+[[package]]
 name = "cursor-icon"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2220,6 +2284,7 @@ dependencies = [
  "block-buffer 0.12.1",
  "const-oid",
  "crypto-common 0.2.2",
+ "ctutils",
 ]
 
 [[package]]
@@ -3229,7 +3294,7 @@ dependencies = [
  "log",
  "presser",
  "thiserror 2.0.21",
- "windows 0.57.0",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -4190,7 +4255,7 @@ version = "0.12.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b5f8eb2ad728638ea2c7d47a21db23b7b58a72ed6a38256b8a1849f15fbbdf7"
 dependencies = [
- "hmac",
+ "hmac 0.12.1",
 ]
 
 [[package]]
@@ -4200,6 +4265,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
 dependencies = [
  "digest 0.10.7",
+]
+
+[[package]]
+name = "hmac"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6303bc9732ae41b04cb554b844a762b4115a61bfaa81e3e83050991eeb56863f"
+dependencies = [
+ "digest 0.11.3",
 ]
 
 [[package]]
@@ -4346,7 +4420,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.57.0",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
@@ -6157,7 +6231,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.4.3",
  "hkdf",
- "hmac",
+ "hmac 0.12.1",
  "md-5",
  "num",
  "num-bigint-dig",
@@ -6288,7 +6362,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6375,7 +6449,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ed6a7761f76e3b9f92dfb0a60a6a6477c61024b775147ff0973a02653abaf2"
 dependencies = [
  "digest 0.10.7",
- "hmac",
+ "hmac 0.12.1",
 ]
 
 [[package]]
@@ -8056,7 +8130,7 @@ version = "3.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32824fab5e16e6c4d86dc1ba84489390419a39f97699852b66480bb87d297ed8"
 dependencies = [
- "dirs 5.0.1",
+ "dirs 6.0.0",
 ]
 
 [[package]]
@@ -9998,7 +10072,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
