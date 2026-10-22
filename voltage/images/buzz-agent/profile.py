@@ -147,6 +147,7 @@ def depot(profile):
     malformed, or unreadable service only turns the remote build cache off."""
     services = tomllib.loads(profile['via']['profile'])['services']
     if not isinstance(services, dict) or DEPOT_SERVICE not in services:
+        print('Depot cache unavailable: the via profile has no depot service; building without it', file=sys.stderr)
         return None
     try:
         secrets = services[DEPOT_SERVICE]['secrets']
@@ -159,7 +160,8 @@ def depot(profile):
                                for reference in references)
         require(re.fullmatch(r'[a-zA-Z0-9_-]{1,64}', organization), 'Invalid Depot organization')
         token(value)
-    except (ValueError, KeyError, TypeError, AttributeError, subprocess.TimeoutExpired):
+    # command() reports a failed read as ValueError; OSError covers an op that cannot run.
+    except (ValueError, KeyError, TypeError, AttributeError, OSError, subprocess.TimeoutExpired):
         print('Depot cache unavailable: the via profile depot service could not be read; building without it',
               file=sys.stderr)
         return None
