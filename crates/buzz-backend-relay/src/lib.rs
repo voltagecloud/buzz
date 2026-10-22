@@ -32,6 +32,19 @@ use crate::config::RelayConfig;
 pub const ACCEPT_WITHIN: Duration = Duration::from_secs(30);
 /// Bound on connecting, authenticating and subscribing to replies.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Longest a stop may wait, as buzz-backend-kubernetes waits; under the
+/// GPUI host's 150-second End deadline, so the client sees this provider's
+/// own timeout rather than its own.
+pub const STOP_WITHIN: Duration = Duration::from_secs(120);
+
+/// How long `op` may take: `timeout_seconds`, but never more than
+/// [`STOP_WITHIN`] for a stop.
+fn time_limit(op: Op, configured: Duration) -> Duration {
+    match op {
+        Op::Stop => configured.min(STOP_WITHIN),
+        _ => configured,
+    }
+}
 const SUBSCRIPTION: &str = "session-control-replies";
 
 /// The provider's self-description. Pure: no relay contact.
@@ -226,7 +239,8 @@ impl Exchange<'_> {
             ));
         }
         let accept_by = tokio::time::Instant::now() + self.accept_within;
-        let done_by = started + self.config.timeout;
+        let limit = time_limit(op, self.config.timeout);
+        let done_by = started + limit;
         let mut accepted = false;
         loop {
             let wait_until = if accepted {
@@ -240,9 +254,8 @@ impl Exchange<'_> {
                     refused(
                         ErrorCode::ManagerTimeout,
                         &format!(
-                            "the session manager did not finish the request within \
-                             timeout_seconds ({})",
-                            self.config.timeout.as_secs()
+                            "the session manager did not finish the request within {} seconds",
+                            limit.as_secs()
                         ),
                     )
                 } else {
