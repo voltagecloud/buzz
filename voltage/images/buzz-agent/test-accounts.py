@@ -46,6 +46,23 @@ with tempfile.TemporaryDirectory() as temp:
     assert failed.returncode != 0, 'missing signer produced an unsigned commit'
     print('PASS: author/committer identity and signature verified through an extra socket; workspace has no private key; signer loss refuses commits')
     run('gpgconf','--homedir',str(signer),'--kill','gpg-agent')
+    # A profile Sandbox signs with the developer's agent-only SSH key file instead.
+    key=Path(temp)/'agent-signing-key'
+    run('ssh-keygen','-q','-t','ed25519','-N','','-C','fixture agents','-f',str(key))
+    key.chmod(0o600)
+    env={**os.environ,'BUZZ_GIT_IDENTITY':'user','BUZZ_GIT_NAME':'Signing Fixture',
+         'BUZZ_GIT_EMAIL':'fixture@example.invalid','BUZZ_GIT_SIGNING_KEY':str(key),
+         'BUZZ_GIT_SIGNING_FORMAT':'ssh'}
+    run('buzz-agent-account','init',env=env)
+    (repo/'source.txt').write_text('ssh signed fixture\n')
+    run('git','-C',str(repo),'add','source.txt')
+    run('git','-C',str(repo),'commit','-m','test: sign with the agent key')
+    signers=Path(temp)/'allowed_signers'
+    signers.write_text('fixture@example.invalid '+key.with_suffix('.pub').read_text())
+    run('git','-C',str(repo),'-c','gpg.ssh.allowedSignersFile='+str(signers),'verify-commit','HEAD')
+    status=json.loads(run('buzz-agent-account','status',env=env))
+    assert status['signing_required'] is True
+    print('PASS: commits are signed with the agent SSH key and verify against its public key')
 '''
 
 result = subprocess.run(['docker', 'run', '--rm', '-i', '--network', 'none',

@@ -166,3 +166,14 @@ fn the_github_api_must_be_https_unless_loopback() {
     assert!(GitHub::new("http://github.example.com").is_err());
     assert!(GitHub::new("not a url").is_err());
 }
+
+/// A profile without a developer ID is stored under the signing owner's.
+#[test]
+fn a_profile_without_a_developer_gets_the_owners() {
+    let owner = nostr::Keys::generate().public_key();
+    let mut sent = profile();
+    sent.as_object_mut().unwrap().remove("developer");
+    sent["owner_pubkey"] = json!(owner.to_hex());
+    let admitted = admit_profile(&json!({"profile": sent}), &owner, &developer()).unwrap();
+    assert_eq!(admitted["developer"], "dev");
+}

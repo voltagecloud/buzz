@@ -7,7 +7,7 @@ import uuid
 OWNER = 'a' * 64
 PROFILE = {
     'version': 1, 'developer': 'fixture', 'owner_pubkey': OWNER,
-    'git': {'name': 'Restore Fixture', 'email': 'fixture@example.invalid', 'signing_key': 'A' * 40},
+    'git': {'name': 'Restore Fixture', 'email': 'fixture@example.invalid', 'ssh_signing_key': '-----BEGIN OPENSSH PRIVATE KEY-----\nc3ludGhldGljLWZpeHR1cmUta2V5\n-----END OPENSSH PRIVATE KEY-----\n'},
     'github': {'login': 'fixture', 'token': 'synthetic-profile-github'},
     'via': {'profile': '[providers.fixture]\ntype="fixture"\n[services.fixture]\nprovider="fixture"\n',
             'op_token': 'synthetic-profile-op'},

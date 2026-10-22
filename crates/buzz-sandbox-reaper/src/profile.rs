@@ -77,6 +77,24 @@ fn is_github_login(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || *b == b'-')
 }
 
+/// `profile.py`'s `SSH_SIGNING_KEY`: one OpenSSH private key block, its body
+/// 1 to 4,000 base64 characters and newlines, with an optional final newline.
+fn is_ssh_signing_key(value: &str) -> bool {
+    const BEGIN: &str = "-----BEGIN OPENSSH PRIVATE KEY-----\n";
+    const END: &str = "-----END OPENSSH PRIVATE KEY-----";
+    let Some(rest) = value.strip_prefix(BEGIN) else {
+        return false;
+    };
+    let rest = rest.strip_suffix('\n').unwrap_or(rest);
+    let Some(body) = rest.strip_suffix(END) else {
+        return false;
+    };
+    (1..=4000).contains(&body.len())
+        && body
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'\n'))
+}
+
 /// Python truthiness of a TOML value.
 fn truthy(value: Option<&toml::Value>) -> bool {
     match value {
@@ -112,8 +130,8 @@ pub fn validate(profile: &Value) -> Result<(), Invalid> {
         }),
         "Invalid Buzz owner",
     )?;
-    let git = fields(&top["git"], &["name", "email", "signing_key"])?;
-    for value in git.values() {
+    let git = fields(&top["git"], &["name", "email", "ssh_signing_key"])?;
+    for value in [&git["name"], &git["email"]] {
         require(
             value.as_str().is_some_and(|value| {
                 (1..=256).contains(&value.chars().count()) && !value.chars().any(|c| c < ' ')
@@ -122,10 +140,10 @@ pub fn validate(profile: &Value) -> Result<(), Invalid> {
         )?;
     }
     require(
-        git["signing_key"].as_str().is_some_and(|key| {
-            (40..=64).contains(&key.len()) && key.bytes().all(|b| b.is_ascii_hexdigit())
-        }),
-        "Use a full OpenPGP signing fingerprint",
+        git["ssh_signing_key"]
+            .as_str()
+            .is_some_and(is_ssh_signing_key),
+        "Invalid SSH signing key",
     )?;
     let github = fields(&top["github"], &["login", "token"])?;
     require(

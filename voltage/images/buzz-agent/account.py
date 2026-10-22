@@ -50,9 +50,15 @@ def initialize():
         raise ValueError('developer Git identity is incomplete')
     for option, key in fields.items():
         run('git', 'config', '--global', option, os.environ[key])
-    for option, value in {'commit.gpgsign': 'true', 'tag.gpgsign': 'true',
-                          'gpg.format': 'openpgp', 'gpg.program': '/usr/local/bin/buzz-gpg',
-                          'credential.https://github.com.helper': '!gh auth git-credential'}.items():
+    # Profile Sandboxes sign with an agent-only SSH key file; a manual setup uses a forwarded GPG signer.
+    signing = os.environ.get('BUZZ_GIT_SIGNING_FORMAT', 'openpgp')
+    if signing not in ('openpgp', 'ssh'):
+        raise ValueError('unsupported Git signing format')
+    options = {'commit.gpgsign': 'true', 'tag.gpgsign': 'true', 'gpg.format': signing,
+               'credential.https://github.com.helper': '!gh auth git-credential'}
+    if signing == 'openpgp':
+        options['gpg.program'] = '/usr/local/bin/buzz-gpg'
+    for option, value in options.items():
         run('git', 'config', '--global', option, value)
     os.chmod(WORKSPACE_HOME / '.gitconfig', 0o600)
     (WORKSPACE_HOME / '.gnupg').mkdir(mode=0o700, exist_ok=True)
@@ -104,7 +110,8 @@ def main():
     else:
         print(json.dumps({'git_identity': run('git', 'config', '--global', 'user.email'),
                           'signing_required': run('git', 'config', '--global', 'commit.gpgsign') == 'true',
-                          'signer_connected': (WORKSPACE_HOME / '.gnupg/S.gpg-agent').is_socket(),
+                          'signer_connected': (WORKSPACE_HOME / '.gnupg/S.gpg-agent').is_socket()
+                          or (DIRECTORY / 'ssh-signing-key').is_file(),
                           'github_configured': (DIRECTORY / 'github-token').is_file(),
                           'depot_configured': all((DIRECTORY / name).is_file() for name in ['depot-token', 'depot.json']),
                           'via_configured': all((DIRECTORY / name).is_file() for name in ['op-token', 'via.toml'])}))

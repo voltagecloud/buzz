@@ -23,6 +23,8 @@ INHERITED_MODEL_VARIABLES = ('OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_ACCESS_TO
                              'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'OPENROUTER_API_KEY')
 # The shared Depot cache credential: the via profile's `depot` service, read from the vault.
 DEPOT_SERVICE = 'depot'
+# The developer's agent-only commit signing key, registered on their GitHub account at enrollment.
+SSH_SIGNING_KEY = re.compile(r'-----BEGIN OPENSSH PRIVATE KEY-----\n[A-Za-z0-9+/=\n]{1,4000}-----END OPENSSH PRIVATE KEY-----\n?')
 
 
 def require(condition, message):
@@ -46,11 +48,12 @@ def validate(profile):
             and re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?', profile['developer']), 'Invalid developer ID')
     require(isinstance(profile['owner_pubkey'], str)
             and re.fullmatch(r'[0-9a-f]{64}', profile['owner_pubkey']), 'Invalid Buzz owner')
-    fields(profile['git'], {'name', 'email', 'signing_key'})
-    for value in profile['git'].values():
+    fields(profile['git'], {'name', 'email', 'ssh_signing_key'})
+    for value in (profile['git']['name'], profile['git']['email']):
         require(isinstance(value, str) and 0 < len(value) <= 256
                 and not any(ord(c) < 32 for c in value), 'Invalid Git identity')
-    require(re.fullmatch(r'[0-9A-Fa-f]{40,64}', profile['git']['signing_key']), 'Use a full OpenPGP signing fingerprint')
+    require(isinstance(profile['git']['ssh_signing_key'], str)
+            and SSH_SIGNING_KEY.fullmatch(profile['git']['ssh_signing_key']), 'Invalid SSH signing key')
     fields(profile['github'], {'login', 'token'})
     require(isinstance(profile['github']['login'], str)
             and re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9-]{0,38}', profile['github']['login']), 'Invalid GitHub login')
@@ -185,12 +188,16 @@ def bootstrap():
     env = os.environ.copy()
     for key in INHERITED_MODEL_VARIABLES:
         require(not env.get(key), 'Model credentials must come from the selected developer profile')
+    # Commits are signed with the agent-only SSH key; the key file stays out of checkpoints.
+    signing_key = DIRECTORY / 'ssh-signing-key'
     env.update(BUZZ_GIT_IDENTITY='user', BUZZ_GIT_NAME=profile['git']['name'],
-               BUZZ_GIT_EMAIL=profile['git']['email'], BUZZ_GIT_SIGNING_KEY=profile['git']['signing_key'],
+               BUZZ_GIT_EMAIL=profile['git']['email'], BUZZ_GIT_SIGNING_KEY=str(signing_key),
+               BUZZ_GIT_SIGNING_FORMAT='ssh',
                GIT_AUTHOR_NAME=profile['git']['name'], GIT_AUTHOR_EMAIL=profile['git']['email'],
                GIT_COMMITTER_NAME=profile['git']['name'], GIT_COMMITTER_EMAIL=profile['git']['email'])
     files = {'github-token': profile['github']['token'], 'op-token': profile['via']['op_token'],
              'via.toml': profile['via']['profile'],
+             'ssh-signing-key': profile['git']['ssh_signing_key'].rstrip('\n') + '\n',
              'profile.json': json.dumps({'developer': developer, 'version_id': result['VersionId']})}
     cache = depot(profile)
     if cache:

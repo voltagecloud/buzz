@@ -145,12 +145,14 @@ Model credentials stay in the harness environment and are never written to works
 The checkpoint secret scan also refuses Claude subscription tokens.
 Do not clone one rotating Codex login cache across concurrent Sandboxes; [OpenAI's account-cache guidance](https://learn.chatgpt.com/docs/auth/ci-cd-auth) requires separate runners or serialized use.
 
-The profile stores a public signing fingerprint. Connect the selected remote signer and import its public key before testing signed commits.
-This change does not distribute private signing keys or establish the signing connection.
+Commits are signed with an agent-only SSH key, `git.ssh_signing_key` in the profile: one OpenSSH Ed25519 private key.
+The GPUI enroll form generates it with `ssh-keygen` and registers its public half on the developer's GitHub account as a signing key, so commits show as Verified with the developer's verified Git email.
+The bootstrap writes it to `.config/buzz-agent/ssh-signing-key` (mode `0600`, excluded from checkpoints) and configures `gpg.format ssh` with `commit.gpgsign` and `tag.gpgsign`.
+The developer's own GPG key never leaves their device. Revoke agent signing by deleting that key under GitHub → Settings → SSH and GPG keys; enrolling again creates a new one.
 
 For manual enrollment or troubleshooting in an existing Sandbox:
 
-Set `BUZZ_GIT_IDENTITY=user`, `BUZZ_GIT_NAME`, `BUZZ_GIT_EMAIL`, and `BUZZ_GIT_SIGNING_KEY` for the workspace owner.
+Set `BUZZ_GIT_IDENTITY=user`, `BUZZ_GIT_NAME`, `BUZZ_GIT_EMAIL`, and `BUZZ_GIT_SIGNING_KEY` for the workspace owner. `BUZZ_GIT_SIGNING_FORMAT=ssh` makes `BUZZ_GIT_SIGNING_KEY` the path of an SSH private key; the default, `openpgp`, a key a forwarded GPG agent holds.
 The account helper configures Git to require OpenPGP signatures. `buzz-gpg` uses an available GPG agent without starting one.
 Remote signing transport still requires validation; no private key is embedded or exported by this image.
 

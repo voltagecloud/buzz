@@ -1,6 +1,9 @@
 use super::*;
 use serde_json::json;
 
+/// An agent signing key in the shape `ssh-keygen -t ed25519` writes.
+pub(crate) const SSH_KEY: &str = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQ==\nAAAAMwAAAAtzc2gtZWQyNTUxOQ\n-----END OPENSSH PRIVATE KEY-----\n";
+
 /// A profile `profile.py` accepts, with fixture secrets.
 pub(crate) fn valid(developer: &str, owner: &str) -> Value {
     json!({
@@ -8,7 +11,7 @@ pub(crate) fn valid(developer: &str, owner: &str) -> Value {
         "developer": developer,
         "owner_pubkey": owner,
         "git": {"name": "Ada Lovelace", "email": "ada@example.com",
-            "signing_key": "ABCDEF0123456789ABCDEF0123456789ABCDEF01"},
+            "ssh_signing_key": SSH_KEY},
         "github": {"login": "ada-l", "token": "ghp_fixtureGitHubTokenDoNotLeak"},
         "via": {"profile": "[providers.op]\nkind = \"1password\"\n\n[services.github]\nprovider = \"op\"\n",
             "op_token": "ops_fixtureOnePasswordTokenDoNotLeak"},
@@ -39,6 +42,9 @@ fn accepts_a_complete_profile() {
     value["models"] = json!({"codex_access_token": "at-x", "claude_oauth_token": "t"});
     validate(&value).unwrap();
     value["models"] = json!({"openrouter_api_key": "sk-or-x", "anthropic_api_key": "k"});
+    validate(&value).unwrap();
+    // The final newline is optional, as `profile.py`'s `\n?` allows.
+    value["git"]["ssh_signing_key"] = json!(SSH_KEY.trim_end_matches('\n'));
     validate(&value).unwrap();
 }
 
@@ -80,20 +86,36 @@ fn refuses_each_rule_with_its_message() {
         ("/git/email", json!("a".repeat(257)), "Invalid Git identity"),
         ("/git/name", json!("Ada\nLovelace"), "Invalid Git identity"),
         ("/git/email", json!(7), "Invalid Git identity"),
+        // The old OpenPGP fingerprint is not a signing key the Sandbox can use.
         (
-            "/git/signing_key",
-            json!("ABCDEF01"),
-            "Use a full OpenPGP signing fingerprint",
+            "/git/ssh_signing_key",
+            json!("ABCDEF0123456789ABCDEF0123456789ABCDEF01"),
+            "Invalid SSH signing key",
         ),
         (
-            "/git/signing_key",
-            json!("G".repeat(40)),
-            "Use a full OpenPGP signing fingerprint",
+            "/git/ssh_signing_key",
+            json!("-----BEGIN OPENSSH PRIVATE KEY-----\n-----END OPENSSH PRIVATE KEY-----\n"),
+            "Invalid SSH signing key",
         ),
         (
-            "/git/signing_key",
-            json!("a".repeat(65)),
-            "Use a full OpenPGP signing fingerprint",
+            "/git/ssh_signing_key",
+            json!(
+                "-----BEGIN OPENSSH PRIVATE KEY-----\nab cd\n-----END OPENSSH PRIVATE KEY-----\n"
+            ),
+            "Invalid SSH signing key",
+        ),
+        (
+            "/git/ssh_signing_key",
+            json!(format!(
+                "-----BEGIN OPENSSH PRIVATE KEY-----\n{}\n-----END OPENSSH PRIVATE KEY-----\n",
+                "a".repeat(4000)
+            )),
+            "Invalid SSH signing key",
+        ),
+        (
+            "/git/ssh_signing_key",
+            json!("-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----\n"),
+            "Invalid SSH signing key",
         ),
         ("/github/login", json!("-ada"), "Invalid GitHub login"),
         (
