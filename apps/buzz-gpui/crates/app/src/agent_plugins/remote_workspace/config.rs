@@ -5,16 +5,9 @@ use buzz_host::api::{Launch, LaunchSpec};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
-/// Runs each thread's Sandbox with the developer's own cluster access.
-pub const KUBERNETES: &str = "kubernetes";
-/// Asks Voltage's Sandbox manager to run it, over the relay.
+/// Every Remote workspace agent asks Voltage's Sandbox manager, over the
+/// relay, to run each thread's Sandbox: a developer needs only their Buzz key.
 pub const RELAY: &str = "relay";
-
-/// The providers whose sessions belong to threads, as Settings names them.
-pub const PROVIDERS: &[(&str, &str)] = &[
-    (KUBERNETES, "Kubernetes"),
-    (RELAY, "Sandbox manager (relay)"),
-];
 
 /// What the relay provider takes; the manager decides the rest.
 const RELAY_FIELDS: &[&str] = &["relay_url", "manager_pubkey", "sandbox", "timeout_seconds"];
@@ -79,7 +72,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            provider: KUBERNETES.into(),
+            provider: RELAY.into(),
             provider_config: json!({ "sandbox": true }),
             env: BTreeMap::new(),
             runtime: RUNTIMES[0].id.into(),
@@ -114,7 +107,7 @@ impl Config {
             .filter(|id| RUNTIMES.iter().any(|runtime| runtime.id == id))
             .unwrap_or(default.runtime);
         Self {
-            provider: text("provider").unwrap_or(default.provider),
+            provider: default.provider,
             provider_config,
             env,
             runtime,
@@ -153,11 +146,7 @@ impl Config {
 
     /// Whether the host will accept it, as far as the GUI can tell.
     pub fn validate(&self) -> Result<(), String> {
-        match self.provider.as_str() {
-            KUBERNETES => {}
-            RELAY => validate_relay(&self.provider_config)?,
-            _ => return Err("Remote workspaces run on the kubernetes or relay provider.".into()),
-        }
+        validate_relay(&self.provider_config)?;
         buzz_remote_sessions::validate_provider_config(&self.provider_config)?;
         if let Some(key) = self.env.keys().find(|key| !env_name(key)) {
             return Err(format!("{key:?} is not an environment variable name."));
