@@ -297,6 +297,7 @@ impl ThreadPanel {
         ];
         // A selected message is revealed once its thread has loaded.
         subscriptions.push(cx.observe_self(|this, cx| this.reveal_target(cx)));
+        subscriptions.push(super::thread_banners::observe(cx));
         let weak = cx.entity().downgrade();
         list.set_scroll_handler(move |event, _, cx| {
             if event.visible_range.start < LOAD_OLDER_WITHIN && event.is_scrolled {
@@ -1431,6 +1432,40 @@ impl Render for ThreadPanel {
                     .px(px(16.))
                     .pb(px(12.))
                     .child(retry("retry-older-empty", true, cx))
+                    .into_any_element(),
+            );
+        }
+
+        let thread = super::thread_banners::BannerThread {
+            relay: self.community.read(cx).origin.websocket().to_owned(),
+            channel: self.channel.clone(),
+            root: self.root_id.to_hex(),
+        };
+        for (index, banner) in super::thread_banners::for_thread(&thread, cx)
+            .into_iter()
+            .enumerate()
+        {
+            status.push(note(banner.text).into_any_element());
+            if banner.buttons.is_empty() {
+                continue;
+            }
+            let buttons = banner.buttons.into_iter().enumerate().map(|(at, button)| {
+                let action = button.action;
+                Button::new(
+                    ElementId::Name(format!("thread-banner-{index}-{at}").into()),
+                    button.label,
+                )
+                .size(ButtonSize::Sm)
+                .loading(button.loading)
+                .on_click(move |_, window, cx| action(window, cx))
+            });
+            status.push(
+                div()
+                    .px(px(16.))
+                    .pb(px(12.))
+                    .flex()
+                    .gap(px(8.))
+                    .children(buttons)
                     .into_any_element(),
             );
         }
