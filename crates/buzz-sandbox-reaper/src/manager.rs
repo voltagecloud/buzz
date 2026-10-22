@@ -44,6 +44,8 @@ const _: () = assert!(REPLAY_WINDOW_SECS > buzz_session_control::EXPIRATION_SECS
 pub struct ManagerConfig {
     /// Owner pubkey to its developer.
     developers: HashMap<PublicKey, Developer>,
+    /// The bucket every developer's checkpoints go to, under `<id>/`.
+    checkpoint_bucket: String,
 }
 
 /// One configured developer.
@@ -66,6 +68,8 @@ struct ConfigFile {
     version: u32,
     /// Developer ID (the Terraform `developers` key) to its binding.
     developers: BTreeMap<String, DeveloperEntry>,
+    /// The checkpoint bucket, shared by every developer under `<id>/`.
+    checkpoint_bucket: String,
 }
 
 #[derive(Deserialize)]
@@ -87,6 +91,8 @@ pub enum ManagerConfigError {
     UnsupportedVersion(u64),
     #[error("developers must list at least one developer")]
     NoDevelopers,
+    #[error("checkpoint_bucket is invalid")]
+    InvalidCheckpointBucket,
     #[error("developers.{developer}.{field} is invalid")]
     InvalidField {
         developer: String,
@@ -95,6 +101,17 @@ pub enum ManagerConfigError {
     /// The owner selects the namespace, so it must select only one.
     #[error("developers.{developer}.owner_pubkey belongs to another developer too")]
     DuplicateOwner { developer: String },
+}
+
+/// An S3 bucket name: 3 to 63 lowercase letters, digits, dots, and hyphens,
+/// starting and ending with a letter or digit.
+fn is_bucket_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    let edge = |b: &u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    (3..=63).contains(&bytes.len())
+        && bytes.iter().all(|b| edge(b) || *b == b'.' || *b == b'-')
+        && bytes.first().is_some_and(edge)
+        && bytes.last().is_some_and(edge)
 }
 
 /// Terraform's developer ID rule: 1-32 of `[a-z0-9-]`, starting and ending
@@ -142,6 +159,9 @@ impl ManagerConfig {
         if file.developers.is_empty() {
             return Err(ManagerConfigError::NoDevelopers);
         }
+        if !is_bucket_name(&file.checkpoint_bucket) {
+            return Err(ManagerConfigError::InvalidCheckpointBucket);
+        }
         let mut developers = HashMap::new();
         for (id, developer) in file.developers {
             let invalid = |field| ManagerConfigError::InvalidField {
@@ -171,12 +191,37 @@ impl ManagerConfig {
                 return Err(ManagerConfigError::DuplicateOwner { developer: id });
             }
         }
-        Ok(Self { developers })
+        Ok(Self {
+            developers,
+            checkpoint_bucket: file.checkpoint_bucket,
+        })
     }
 
     /// The developer whose owner key is `owner`.
     pub fn developer(&self, owner: &PublicKey) -> Option<&Developer> {
         self.developers.get(owner)
+    }
+
+    /// The launch environment every Sandbox of `developer` gets, whatever the
+    /// request sends: where its profile and checkpoints are. The image needs
+    /// the profile to start, and a Sandbox deploy is refused without
+    /// checkpoint storage.
+    pub fn launch_env(&self, developer: &Developer) -> BTreeMap<String, String> {
+        BTreeMap::from([
+            ("BUZZ_DEVELOPER_ID".to_string(), developer.id.clone()),
+            (
+                "BUZZ_DEVELOPER_PROFILE_ARN".to_string(),
+                developer.profile_secret_arn.clone(),
+            ),
+            (
+                "BUZZ_CHECKPOINT_BUCKET".to_string(),
+                self.checkpoint_bucket.clone(),
+            ),
+            (
+                "BUZZ_CHECKPOINT_PREFIX".to_string(),
+                format!("{}/", developer.id),
+            ),
+        ])
     }
 
     /// How many developers the manager serves.
@@ -399,6 +444,7 @@ impl Manager {
                         agent: opened.signer,
                         owner,
                         defaults: self.defaults.clone(),
+                        env: self.config.launch_env(developer),
                     },
                 },
                 Err(response) => return answer(response),
