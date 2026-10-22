@@ -1071,6 +1071,7 @@ dependencies = [
  "buzz-relay-client",
  "buzz-remote-sessions",
  "buzz-sandbox-host",
+ "buzz-session-control",
  "buzz-ui",
  "buzzodz-plugins",
  "chrono",

@@ -27,6 +27,8 @@ buzz-relay-client = { path = "../relay" }
 buzz-sandbox-host = { path = "../sandbox-host", optional = true }
 # The remote workspace type's config checks and recovery codes.
 buzz-remote-sessions = { path = "../../../../crates/buzz-remote-sessions", optional = true }
+# The enroll request's envelope and replies.
+buzz-session-control = { path = "../../../../crates/buzz-session-control", optional = true }
 serde_json = "1"
 buzz-ui = { path = "../ui" }
 buzzodz-plugins.workspace = true
@@ -78,7 +80,12 @@ url = "2"
 
 [features]
 # Remote workspaces on Voltage's Kubernetes provider; off for upstream builds.
-voltage-sandbox = ["dep:buzz-sandbox-host", "dep:buzz-remote-sessions"]
+voltage-sandbox = [
+    "dep:buzz-sandbox-host",
+    "dep:buzz-remote-sessions",
+    "dep:buzz-session-control",
+    "buzz-identity/session-control",
+]
 
 [dev-dependencies]
 # Paused time for timing tests.
