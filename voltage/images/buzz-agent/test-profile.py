@@ -139,6 +139,8 @@ if mode == 'subscriptions':
                     CLAUDE_CODE_OAUTH_TOKEN='synthetic-profile-claude-oauth')
 if mode == 'no-depot':
     # An unreadable Depot credential turns the remote cache off; the session still starts.
+    # Earlier modes rotated the shared fixture profile, so restore its original models.
+    rotate({'openai_api_key':'synthetic-profile-openai', 'anthropic_api_key':'synthetic-profile-anthropic'})
     expected.update(SCCACHE_WEBDAV_PASSWORD=None)
 if mode == 'inherited-codex': env['CODEX_ACCESS_TOKEN'] = 'at-synthetic-unselected-account'
 if mode == 'wrong-owner': env['BUZZ_ACP_AGENT_OWNER'] = 'b'*64
