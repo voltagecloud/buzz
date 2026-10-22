@@ -1901,6 +1901,92 @@ a later leak of the manager key exposes every recorded request. Mitigations:
 - The short `expiration` on every event limits how long a relay may hold it
   for delivery.
 
+**The session manager.** `buzz-sandbox-reaper serve` authenticates to the
+relay as the manager key (NIP-42, with an optional NIP-OA tag for relay
+membership) and subscribes to kind `24210` with `#p` set to its own key. It
+authorizes each request in this order:
+
+1. The event id and signature verify, and the event passes the parser
+   checks above. Otherwise the manager ignores the event: it cannot address
+   a reply.
+2. The `auth` tag verifies for the signer at the event's `created_at`
+   (`verify_auth_tag_for_auth_event`), and its owner is a configured
+   developer.
+3. The payload's `private_key_nsec` is the signer's key, and the payload's
+   `op` matches the envelope's.
+4. `created_at` is within 60 s of the manager's clock, and the event has not
+   expired.
+5. The manager has not received the event id in the last 10 minutes.
+6. The namespace is the verified owner's developer namespace from the
+   configuration file. It replaces `provider_config.namespace`, and the verified agent and owner
+   replace `identity_policy`. The manager runs Sandbox sessions only.
+7. `enroll` is signed by the owner key itself, without an `auth` tag.
+
+Then the manager replies `accepted` and runs the request in-process with
+its own in-cluster credentials (`provider::run`), and replies `done` with the
+provider response. A retry is a new event with the same `request_id`: while
+the request runs, it is answered `accepted` and then `done`, and for
+10 minutes after the request finishes, it is answered with the recorded
+response. A `request_id` is scoped to its signer. A different request with
+the same `request_id` is refused.
+
+Refusals are `done` replies with one of these codes
+(`crates/buzz-backend-kubernetes/src/wire.rs`):
+
+| `code` | Meaning | Client action |
+| --- | --- | --- |
+| `unauthorized_owner` | No `auth` tag, a tag that does not verify for the signer, or an owner that is not a configured developer. | ask an admin to add the developer |
+| `signer_mismatch` | The payload's agent key is not the signer, or `enroll` is not signed by the owner. | sign with the payload's key |
+| `stale_request` | `created_at` is more than 60 s from the manager's clock, or the event has expired. | fix the clock, then retry |
+| `replayed_request` | The manager has already received this event. | retry with a new event |
+| `request_id_reused` | The `request_id` belongs to a different request. | use a new `request_id` |
+| `manager_busy` | The manager is at its limit: 16 running requests, 1,024 tracked requests, 10,000 recent event ids, or 8 events for one request. | retry later |
+| `unsupported_op` | An unknown operation, or `enroll`, which this version does not implement. | update Buzz |
+| `unsupported_version` | An envelope version other than `1`. | update Buzz |
+| `manager_unavailable` | Client-side: no reply within the deadline. Ephemeral events reach only connected subscribers. | retry |
+
+Provider refusals keep their own codes (§Sandbox error codes).
+
+The configuration file is the only source of developers. Terraform renders
+it from the `staging-agent` `developers` map into the ConfigMap
+`sandbox-manager-config` (key `config.json`) in the `buzz-sandbox-manager`
+namespace:
+
+```json
+{"version":1,
+ "developers":{"<id>":{"owner_pubkey":"<64 lowercase hex>",
+   "namespace":"buzz-agent-staging-<id>","profile_secret_arn":"arn:..."}}}
+```
+
+The manager refuses to start on an unknown `version`, an invalid field, or
+an owner key that two developers share, because the owner selects the
+namespace. `profile_secret_arn` is where `enroll` will write the profile.
+
+| Flag | Environment | Default |
+| --- | --- | --- |
+| `--config <path>` | `BUZZ_SANDBOX_MANAGER_CONFIG` | `/etc/buzz-sandbox-manager/config.json` |
+| `--relay-url <url>` | `BUZZ_RELAY_URL` | required |
+| `--private-key-file <path>` | `BUZZ_PRIVATE_KEY_FILE` | unset: the key (nsec or hex) is read from `BUZZ_PRIVATE_KEY` |
+| `--auth-tag <json>` | `BUZZ_AUTH_TAG` | unset |
+
+The manager's ServiceAccount (`sandbox-manager`) needs a Role in each
+developer namespace: `sandboxes.agents.x-k8s.io` get, create, update, patch
+and delete; `pods` get and list; and `secrets` get, create and delete.
+Recovery deletes the thread's recovery journal Secret once a newer
+tombstone or the bound replacement supersedes it. The manager uses no
+watch. Logs are JSON and name only event ids,
+operations and codes. The `buzz_ws_client` target is capped at `info`,
+because its debug logs quote whole relay frames.
+
+Limits of this version:
+
+- One replica. The replay cache and the request records are in memory, so a
+  restart forgets them. The 60 s freshness window still refuses old events.
+- The manager reconnects with backoff from 1 s to 60 s. At shutdown it
+  aborts running requests. Deploy and stop are idempotent and journaled, so
+  a retry resumes them.
+- No `progress` replies, no health listener, and no `enroll`.
+
 ### Distribution
 
 Its own release workflow (macOS arm64/x64 + Linux musl; the sprig workflow's
