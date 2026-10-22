@@ -231,8 +231,14 @@ pub enum ErrorCode {
     UnsupportedOp,
     /// The manager does not support the request's envelope version.
     UnsupportedVersion,
-    /// Client-side: the manager did not answer within the deadline.
+    /// Client-side: the manager did not accept the request within 30 s.
     ManagerUnavailable,
+    /// Client-side: the manager accepted the request but did not finish it
+    /// within the provider's `timeout_seconds`.
+    ManagerTimeout,
+    /// Client-side: the provider could not connect or authenticate to the
+    /// relay, or lost the connection before the manager answered.
+    RelayUnavailable,
 }
 
 /// A failed operation: the display message and, for a refusal a client can

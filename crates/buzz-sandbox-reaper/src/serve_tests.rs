@@ -18,15 +18,21 @@ const BOUND: Duration = Duration::from_secs(20);
 
 /// An in-memory relay: every accepted EVENT is recorded and delivered to the
 /// connections whose subscription matches its kind and `p` tag.
-struct FakeRelay {
-    url: String,
+pub(super) struct FakeRelay {
+    pub(super) url: String,
     published: Arc<std::sync::Mutex<Vec<Event>>>,
     /// Pubkeys with a `#p` subscription.
     subscribed: watch::Receiver<Vec<String>>,
 }
 
 impl FakeRelay {
-    async fn start() -> Self {
+    pub(super) async fn start() -> Self {
+        Self::start_with(true).await
+    }
+
+    /// A relay that accepts AUTH only when `admit` is set; otherwise it
+    /// refuses with a message no client should repeat.
+    pub(super) async fn start_with(admit: bool) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}", listener.local_addr().unwrap());
         let (hub, _) = broadcast::channel::<Event>(64);
@@ -36,7 +42,7 @@ impl FakeRelay {
         tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
-                tokio::spawn(connection(ws, hub.clone(), relay.clone()));
+                tokio::spawn(connection(ws, hub.clone(), relay.clone(), admit));
             }
         });
         Self {
@@ -46,7 +52,7 @@ impl FakeRelay {
         }
     }
 
-    async fn wait_for_subscriber(&mut self, pubkey: &PublicKey) {
+    pub(super) async fn wait_for_subscriber(&mut self, pubkey: &PublicKey) {
         let hex = pubkey.to_hex();
         tokio::time::timeout(BOUND, self.subscribed.wait_for(|keys| keys.contains(&hex)))
             .await
@@ -54,7 +60,7 @@ impl FakeRelay {
             .unwrap();
     }
 
-    fn published_by(&self, pubkey: &PublicKey) -> Vec<Event> {
+    pub(super) fn published_by(&self, pubkey: &PublicKey) -> Vec<Event> {
         let published = self.published.lock().unwrap();
         published
             .iter()
@@ -73,6 +79,7 @@ async fn connection(
     mut ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
     hub: broadcast::Sender<Event>,
     (published, subscribed): Relay,
+    admit: bool,
 ) {
     let send = |frame: Value| Message::Text(frame.to_string().into());
     ws.send(send(json!(["AUTH", "challenge"]))).await.unwrap();
@@ -88,6 +95,11 @@ async fn connection(
                     "AUTH" => {
                         let event: Event = serde_json::from_value(frame[1].clone()).unwrap();
                         event.verify().unwrap();
+                        if !admit {
+                            let refusal = "restricted: relay-detail-not-for-clients";
+                            ws.send(send(json!(["OK", event.id, false, refusal]))).await.unwrap();
+                            continue;
+                        }
                         authed = Some(event.pubkey);
                         ws.send(send(json!(["OK", event.id, true, ""]))).await.unwrap();
                     }
@@ -127,7 +139,7 @@ async fn connection(
     }
 }
 
-fn keys(byte: &str) -> Keys {
+pub(super) fn keys(byte: &str) -> Keys {
     Keys::parse(&byte.repeat(32)).unwrap()
 }
 

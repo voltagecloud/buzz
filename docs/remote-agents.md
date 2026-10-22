@@ -1950,7 +1950,9 @@ Refusals are `done` replies with one of these codes
 | `manager_busy` | The manager is at its limit: 16 running requests, 1,024 tracked requests, 10,000 recent event ids, or 8 events for one request. | retry later |
 | `unsupported_op` | An unknown operation, or `enroll`, which this version does not implement. | update Buzz |
 | `unsupported_version` | An envelope version other than `1`. | update Buzz |
-| `manager_unavailable` | Client-side: no reply within the deadline. Ephemeral events reach only connected subscribers. | retry |
+| `manager_unavailable` | Client-side: the manager did not accept the request within 30 s. Ephemeral events reach only connected subscribers, so a manager that is down never sees it. | retry |
+| `manager_timeout` | Client-side: the manager accepted the request but did not finish it within the provider's `timeout_seconds`. | retry; the retry joins or replays the same run |
+| `relay_unavailable` | Client-side: the provider could not connect, authenticate or subscribe to the relay, the relay refused the request, or the connection dropped before `done`. The relay's own message is not repeated. | check the relay URL and the agent's owner attestation, then retry |
 
 Provider refusals keep their own codes (§Sandbox error codes).
 
@@ -1975,6 +1977,16 @@ namespace. `profile_secret_arn` is where `enroll` will write the profile.
 | `--relay-url <url>` | `BUZZ_RELAY_URL` | required |
 | `--private-key-file <path>` | `BUZZ_PRIVATE_KEY_FILE` | unset: the key (nsec or hex) is read from `BUZZ_PRIVATE_KEY` |
 | `--auth-tag <json>` | `BUZZ_AUTH_TAG` | unset |
+| `--sandbox-provider-config <json>` | `BUZZ_SANDBOX_PROVIDER_CONFIG` | unset: each request's own fields stand |
+
+`BUZZ_SANDBOX_PROVIDER_CONFIG` is a JSON object of Kubernetes
+`provider_config` fields that the manager sets on every request, replacing
+the request's own: a digest-pinned `image`, and usually `pod_options`
+(Sandbox requires `active_deadline_seconds`), resources and
+`service_account`. It may not set `namespace`, `context`, `identity_policy`
+or `sandbox`, which the manager derives per request. The manager refuses to
+start if the object is invalid. `buzz-backend-relay` clients send none of
+these fields, so the manager needs this setting to serve them.
 
 The manager's ServiceAccount (`sandbox-manager`) needs a Role in each
 developer namespace: `sandboxes.agents.x-k8s.io` get, create, update, patch
@@ -1984,6 +1996,38 @@ tombstone or the bound replacement supersedes it. The manager uses no
 watch. Logs are JSON and name only event ids,
 operations and codes. The `buzz_ws_client` target is capped at `info`,
 because its debug logs quote whole relay frames.
+
+**The relay provider.** `buzz-backend-relay` (`crates/buzz-backend-relay`)
+speaks the provider protocol on stdin and stdout like
+`buzz-backend-kubernetes`, and advertises `info`, `deploy`, `stop` and
+`recover`. `info` and every local refusal answer without contacting the
+relay. Its `provider_config`, with no other field accepted:
+
+| Field | Required | Value |
+| --- | --- | --- |
+| `relay_url` | yes | `wss://` URL of the community relay the manager listens on; `ws://` only to a loopback host |
+| `manager_pubkey` | yes | the manager's key, 64 lowercase hex |
+| `timeout_seconds` | no | 1 to 900, default 600: how long the manager has to finish a request |
+| `sandbox` | yes, at launch | as for Kubernetes; the desktop stores `true` and binds the thread at launch |
+| `identity_policy` | yes, at launch | as for Kubernetes |
+
+For `deploy` and `stop` it runs the Kubernetes provider's checks that
+precede cluster contact (the `sandbox` scope and the approved identity),
+then:
+
+1. It connects to `relay_url` as the agent (`private_key_nsec`), with the
+   payload's `auth_tag` in NIP-42 AUTH, and subscribes to kind `24210`
+   events `p`-tagged to the agent.
+2. It publishes one request to `manager_pubkey`. The payload is the stdin
+   request with `provider_config` reduced to `sandbox` and
+   `identity_policy`; the `request_id` is the stdin one, or a new UUID.
+3. It waits for the `done` reply, skipping `accepted`, `progress` and any
+   event that is not the manager's reply to this request, and prints the
+   manager's response unchanged.
+
+It answers `manager_unavailable` if nothing accepts the request within
+30 s, `manager_timeout` if `done` does not arrive within `timeout_seconds`,
+and `relay_unavailable` for a relay failure.
 
 Limits of this version:
 

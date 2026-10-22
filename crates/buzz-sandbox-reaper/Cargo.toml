@@ -45,6 +45,9 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 
 [dev-dependencies]
 buzz-backend-kubernetes = { path = "../buzz-backend-kubernetes", features = ["test-utils"] }
+# The relay provider's end-to-end tests run against this crate's fake relay
+# and the manager in process (serve::relay_provider_tests).
+buzz-backend-relay = { path = "../buzz-backend-relay" }
 tokio-tungstenite = { workspace = true }
 tower = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
