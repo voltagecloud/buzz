@@ -1,8 +1,10 @@
 //! What the agent launches with: the provider, the harness, its model and
 //! instructions, and the environment. The Kubernetes provider's config is
-//! edited as JSON; the relay provider's is its relay and manager key.
+//! edited as JSON; the relay provider's is its relay and manager key, and
+//! beside them the form that enrolls a developer profile with the manager.
 
 use super::config::{Config, KUBERNETES, PROVIDERS, RELAY, RUNTIMES};
+use super::enroll_form::{self, EnrollForm};
 use crate::agent_plugins::tabs::{
     Picking, choice, field, instructions_field, instructions_state, options, saved_config,
 };
@@ -32,6 +34,7 @@ pub struct SettingsTab {
     manager_pubkey: Entity<InputState>,
     env: Entity<TextareaState>,
     instructions: Entity<TextareaState>,
+    enroll: EnrollForm,
     open: Option<Picker>,
     saving: bool,
     error: Option<String>,
@@ -90,6 +93,17 @@ pub fn relay_fields(saved: &Config, community: &str) -> (String, String) {
     )
 }
 
+/// The developer ID a Kubernetes config's namespace names, for the
+/// enroll form.
+fn developer_of(saved: &Config) -> &str {
+    saved
+        .provider_config
+        .get("namespace")
+        .and_then(Value::as_str)
+        .and_then(|namespace| namespace.strip_prefix("buzz-agent-staging-"))
+        .unwrap_or_default()
+}
+
 /// The draft as a config: the fields parsed, and the whole checked.
 pub fn parse(saved: &Config, draft: Draft) -> Result<Config, String> {
     let provider_config = if draft.provider == RELAY {
@@ -144,8 +158,12 @@ impl SettingsTab {
         });
         let env = textarea(&pretty(&saved.env), window, cx);
         let instructions = instructions_state(&saved.instructions, window, cx);
+        let enroll = EnrollForm::new(developer_of(&saved), window, cx);
         let mut subscriptions = Vec::new();
-        for input in [&model, &relay_url, &manager_pubkey] {
+        for input in [&model, &relay_url, &manager_pubkey]
+            .into_iter()
+            .chain(enroll.inputs())
+        {
             subscriptions.push(cx.subscribe(input, |_, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
                     cx.notify();
@@ -179,6 +197,7 @@ impl SettingsTab {
             manager_pubkey,
             env,
             instructions,
+            enroll,
             open: None,
             saving: false,
             error: None,
@@ -240,6 +259,57 @@ impl SettingsTab {
             let _ = this.update(cx, |this, cx| {
                 this.saving = false;
                 this.error = result.err();
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+}
+
+impl SettingsTab {
+    /// Sends the enroll form to the manager in the relay fields, as the
+    /// signed-in owner. Its tokens are cleared at once, sent or not.
+    fn enroll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let relay = self.relay_url.read(cx).value().trim().to_owned();
+        let manager = self.manager_pubkey.read(cx).value().trim().to_owned();
+        let owner = enroll_form::owner(cx);
+        let pubkey = owner
+            .as_ref()
+            .map(|owner| owner.pubkey_hex())
+            .unwrap_or_default();
+        let profile = self.enroll.submit(&pubkey, window, cx);
+        let relay_config = Config {
+            provider: RELAY.into(),
+            provider_config: Config::relay(&relay, &manager),
+            ..Config::default()
+        };
+        let started = (|| {
+            let owner = owner.ok_or("Sign in to enroll a profile.")?;
+            relay_config.validate()?;
+            let session = enroll_form::session(&relay, cx)
+                .ok_or("Join the community at the relay to enroll through it.")?;
+            Ok::<_, String>((owner, session, profile?))
+        })();
+        let (owner, session, profile) = match started {
+            Ok(started) => started,
+            Err(error) => {
+                self.enroll.status = Some(Err(error));
+                cx.notify();
+                return;
+            }
+        };
+        self.enroll.sending = true;
+        self.enroll.status = None;
+        let sent = crate::runtime::Runtime::handle(cx)
+            .spawn(super::enroll::enroll(session, owner, manager, profile));
+        cx.spawn(async move |this, cx| {
+            let outcome = sent
+                .await
+                .unwrap_or_else(|_| Err("The enrollment was cancelled.".into()));
+            let _ = this.update(cx, |this, cx| {
+                this.enroll.sending = false;
+                this.enroll.status = Some(outcome);
                 cx.notify();
             });
         })
@@ -375,6 +445,22 @@ impl Render for SettingsTab {
                 "Sent as the harness's system prompt when a thread's Sandbox starts.",
                 &c,
             ))
+            .when(self.provider == RELAY, |this| {
+                let sending = self.enroll.sending;
+                let owner = enroll_form::owner(cx).map(|owner| owner.pubkey_hex());
+                this.child(self.enroll.render(owner.as_deref(), sending, &c))
+                    .child(
+                        div().flex().child(
+                            Button::new(
+                                "remote-workspace-enroll",
+                                if sending { "Enrolling…" } else { "Enroll profile" },
+                            )
+                            .loading(sending)
+                            .disabled(sending)
+                            .on_click(cx.listener(|this, _, window, cx| this.enroll(window, cx))),
+                        ),
+                    )
+            })
             .children(
                 self.error
                     .clone()

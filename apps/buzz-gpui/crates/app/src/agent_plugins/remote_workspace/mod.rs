@@ -6,6 +6,8 @@
 //! Built only with the `voltage-sandbox` feature.
 
 pub mod config;
+mod enroll;
+mod enroll_form;
 mod recovery;
 mod settings;
 
