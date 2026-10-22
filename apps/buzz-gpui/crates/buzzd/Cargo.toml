@@ -11,6 +11,7 @@ anyhow.workspace = true
 buzz-host = { path = "../host" }
 buzz-host-rpc = { path = "../host-rpc" }
 buzz-keychain = { path = "../keychain" }
+buzz-sandbox-host = { path = "../sandbox-host", optional = true }
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
 getrandom = "0.3"
@@ -20,6 +21,10 @@ toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
+
+[features]
+# Remote workspaces on Voltage's Kubernetes provider; off for upstream builds.
+voltage-sandbox = ["dep:buzz-sandbox-host"]
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 # The host name where there is no /etc/hostname.

@@ -100,7 +100,7 @@ async fn run(config: Config, state_dir: PathBuf, token: String) -> Result<()> {
         state_dir: state_dir.clone(),
         credentials,
         legacy_dir: dirs::data_dir(),
-        sandbox: None,
+        sandbox: sandbox(&state_dir),
     })
     .map_err(anyhow::Error::msg)?;
     let handler = Arc::new(RpcHandler(host));
@@ -151,6 +151,17 @@ async fn run(config: Config, state_dir: PathBuf, token: String) -> Result<()> {
     servers.shutdown().await;
     drop(handler);
     Ok(())
+}
+
+/// Remote workspaces, in builds with them.
+fn sandbox(state_dir: &Path) -> Option<Arc<dyn buzz_host::sandbox::SandboxBackend>> {
+    #[cfg(feature = "voltage-sandbox")]
+    return Some(Arc::new(buzz_sandbox_host::Sandboxes::new(state_dir)));
+    #[cfg(not(feature = "voltage-sandbox"))]
+    {
+        let _ = state_dir;
+        None
+    }
 }
 
 fn load_config(path: &Path) -> Result<Config> {

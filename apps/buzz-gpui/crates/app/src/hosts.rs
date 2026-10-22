@@ -208,7 +208,7 @@ fn start_embedded(
         state_dir: data.join("host"),
         credentials,
         legacy_dir: dirs::data_dir(),
-        sandbox: None,
+        sandbox: sandbox(&data.join("host")),
     })?;
     let (connector, listener) = transport::memory();
     let server = runtime.spawn(buzz_host_rpc::serve(
@@ -218,6 +218,17 @@ fn start_embedded(
         ServerOptions::default(),
     ));
     Ok((connector, (server, host)))
+}
+
+/// Remote workspaces, in builds with them.
+fn sandbox(state_dir: &std::path::Path) -> Option<Arc<dyn buzz_host::sandbox::SandboxBackend>> {
+    #[cfg(feature = "voltage-sandbox")]
+    return Some(Arc::new(buzz_sandbox_host::Sandboxes::new(state_dir)));
+    #[cfg(not(feature = "voltage-sandbox"))]
+    {
+        let _ = state_dir;
+        None
+    }
 }
 
 fn remote_connector(host: &RemoteHost) -> Result<Arc<dyn Connector>, String> {
