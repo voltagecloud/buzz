@@ -1,5 +1,4 @@
 use super::*;
-use crate::managed_agents::discovery::command_search;
 
 #[test]
 fn redact_secrets_replaces_nsec() {
@@ -212,8 +211,13 @@ esac"#,
     );
     write_test_provider(&provider, &body);
 
-    let id = provider_deploy(&provider, &serde_json::json!({}), &serde_json::json!({}))
-        .expect("staged deploy");
+    let id = provider_deploy(
+        &provider,
+        None,
+        &serde_json::json!({}),
+        &serde_json::json!({}),
+    )
+    .expect("staged deploy");
     assert_eq!(id, "remote-1");
     let paths: Vec<_> = std::fs::read_to_string(log)
         .unwrap()
@@ -267,8 +271,13 @@ esac"#,
     write_test_provider(&provider, &body);
     let inode_before = std::fs::metadata(&provider).unwrap().ino();
 
-    let id = provider_deploy(&provider, &serde_json::json!({}), &serde_json::json!({}))
-        .expect("deploy from immutable staged copy");
+    let id = provider_deploy(
+        &provider,
+        None,
+        &serde_json::json!({}),
+        &serde_json::json!({}),
+    )
+    .expect("deploy from immutable staged copy");
 
     assert_eq!(id, "original-staged-bytes");
     assert_eq!(
@@ -308,8 +317,13 @@ esac"#,
     write_test_provider(&provider, &body);
     let inode_before = std::fs::metadata(&provider).unwrap().ino();
 
-    let id = provider_deploy(&provider, &serde_json::json!({}), &serde_json::json!({}))
-        .expect("deploy from immutable staged copy");
+    let id = provider_deploy(
+        &provider,
+        None,
+        &serde_json::json!({}),
+        &serde_json::json!({}),
+    )
+    .expect("deploy from immutable staged copy");
 
     assert_eq!(id, "original-staged-bytes");
     assert_ne!(
@@ -342,6 +356,7 @@ esac"#,
 
     let error = provider_deploy(
         &provider,
+        None,
         &serde_json::json!({"private_key_nsec": "nsec1must-not-cross"}),
         &serde_json::json!({}),
     )
@@ -362,8 +377,13 @@ fn provider_deploy_requires_an_explicit_integer_protocol_version() {
 printf '%s\n' '{"ok":true,"version":"1.0.0"}'"#,
     );
 
-    let error =
-        provider_deploy(&provider, &serde_json::json!({}), &serde_json::json!({})).unwrap_err();
+    let error = provider_deploy(
+        &provider,
+        None,
+        &serde_json::json!({}),
+        &serde_json::json!({}),
+    )
+    .unwrap_err();
     assert!(
         error
             .to_string()
@@ -382,11 +402,11 @@ fn provider_info_requires_the_complete_flat_wire_shape() {
         "description": "Kubernetes provider",
         "config_schema": {}
     });
-    assert!(validate_provider_info(&complete).is_ok());
+    assert!(parse_provider_info(&complete).is_ok());
 
     let mut missing = complete.clone();
     missing.as_object_mut().unwrap().remove("config_schema");
-    assert!(validate_provider_info(&missing)
+    assert!(parse_provider_info(&missing)
         .unwrap_err()
         .contains("config_schema"));
 
@@ -395,7 +415,7 @@ fn provider_info_requires_the_complete_flat_wire_shape() {
         "provider".into(),
         serde_json::json!({"protocol_version": 1}),
     );
-    assert!(validate_provider_info(&nested)
+    assert!(parse_provider_info(&nested)
         .unwrap_err()
         .contains("unknown field provider"));
 }
@@ -418,7 +438,7 @@ fn info_with_ops(ops: Option<serde_json::Value>) -> serde_json::Value {
 #[test]
 fn provider_info_ops_are_parsed_and_default_to_deploy_only() {
     let advertised = info_with_ops(Some(serde_json::json!(["info", "deploy", "stop"])));
-    assert!(validate_provider_info(&advertised).is_ok());
+    assert!(parse_provider_info(&advertised).is_ok());
     assert_eq!(
         advertised_ops(&advertised).unwrap(),
         ["info", "deploy", "stop"]
@@ -426,7 +446,7 @@ fn provider_info_ops_are_parsed_and_default_to_deploy_only() {
 
     // Providers predating `ops` keep working and have no stop.
     let legacy = info_with_ops(None);
-    assert!(validate_provider_info(&legacy).is_ok());
+    assert!(parse_provider_info(&legacy).is_ok());
     assert_eq!(advertised_ops(&legacy).unwrap(), ["info", "deploy"]);
 
     for malformed in [
@@ -437,16 +457,21 @@ fn provider_info_ops_are_parsed_and_default_to_deploy_only() {
         serde_json::json!(vec!["stop"; 33]),
     ] {
         let info = info_with_ops(Some(malformed.clone()));
-        let error = validate_provider_info(&info).unwrap_err();
+        let error = parse_provider_info(&info).unwrap_err();
         assert!(error.to_string().contains("ops"), "{malformed}: {error}");
     }
 }
 
 #[test]
 fn stop_response_state_accepts_only_the_wire_states() {
-    for state in ["ending", "ended", "absent"] {
-        let response = serde_json::json!({"ok": true, "agent_id": "a", "state": state});
+    for (wire, state) in [
+        ("ending", StopState::Ending),
+        ("ended", StopState::Ended),
+        ("absent", StopState::Absent),
+    ] {
+        let response = serde_json::json!({"ok": true, "agent_id": "a", "state": wire});
         assert_eq!(stop_response_state(&response).unwrap(), state);
+        assert_eq!(serde_json::to_value(state).unwrap(), wire);
     }
     let unknown = serde_json::json!({"ok": true, "agent_id": "a", "state": "running"});
     assert!(stop_response_state(&unknown)
@@ -480,7 +505,7 @@ fn provider_stop_sends_stop_only_to_a_provider_that_advertises_it() {
     let agent = serde_json::json!({"private_key_nsec": "nsec1must-not-cross"});
 
     stop_test_provider(&provider, "", &marker);
-    let error = provider_stop(&provider, &agent, &serde_json::json!({})).unwrap_err();
+    let error = provider_stop(&provider, None, &agent, &serde_json::json!({})).unwrap_err();
     assert!(
         error.to_string().contains("cannot end remote sessions"),
         "{error}"
@@ -488,15 +513,18 @@ fn provider_stop_sends_stop_only_to_a_provider_that_advertises_it() {
     assert!(!marker.exists(), "the secret-bearing stop must not be sent");
 
     stop_test_provider(&provider, r#""ops":["info","deploy"],"#, &marker);
-    assert!(provider_stop(&provider, &agent, &serde_json::json!({})).is_err());
+    assert!(provider_stop(&provider, None, &agent, &serde_json::json!({})).is_err());
     assert!(!marker.exists(), "the secret-bearing stop must not be sent");
 
     stop_test_provider(&provider, r#""ops":["info","deploy","stop"],"#, &marker);
-    assert_eq!(provider_ops(&provider).unwrap(), ["info", "deploy", "stop"]);
-    assert!(!marker.exists(), "provider_ops runs only info");
     assert_eq!(
-        provider_stop(&provider, &agent, &serde_json::json!({})).unwrap(),
-        "ending"
+        provider_info(&provider, None).unwrap().ops,
+        ["info", "deploy", "stop"]
+    );
+    assert!(!marker.exists(), "provider_info runs only info");
+    assert_eq!(
+        provider_stop(&provider, None, &agent, &serde_json::json!({})).unwrap(),
+        StopState::Ending
     );
     assert!(marker.exists());
 }
@@ -515,7 +543,7 @@ case "$request" in
 esac"#,
     );
     let agent = serde_json::json!({"env_vars": {"API": "env-secret-value"}});
-    let error = provider_stop(&provider, &agent, &serde_json::json!({})).unwrap_err();
+    let error = provider_stop(&provider, None, &agent, &serde_json::json!({})).unwrap_err();
     assert!(!error.to_string().contains("env-secret-value"), "{error}");
     assert!(!error.to_string().contains("nsec1leak"), "{error}");
     assert!(error.to_string().contains("[REDACTED]"), "{error}");
@@ -649,171 +677,122 @@ fn provider_filename_strips_the_windows_extension() {
 }
 
 #[test]
-fn command_discovery_dirs_include_all_spawn_search_sources_without_duplicates() {
-    let workspace = PathBuf::from("workspace");
-    let path = PathBuf::from("path");
-    let managed = PathBuf::from("managed");
-    let login = PathBuf::from("login");
-    let nvm = PathBuf::from("nvm");
-
-    assert_eq!(
-        command_search::merge_command_discovery_dirs([
-            vec![workspace.clone(), path.clone()],
-            vec![path, managed.clone()],
-            vec![login.clone()],
-            vec![managed, nvm.clone()],
-        ]),
-        vec![
-            workspace,
-            PathBuf::from("path"),
-            PathBuf::from("managed"),
-            login,
-            nvm
-        ]
-    );
-}
-
-#[test]
-fn acp_command_filename_supports_windows_shims_and_rejects_extensionless_windows_files() {
-    assert_eq!(
-        acp_command_from_filename("buzz-janet-acp.EXE", true),
-        Some("buzz-janet-acp")
-    );
-    assert_eq!(
-        acp_command_from_filename("buzz-janet-acp.cmd", true),
-        Some("buzz-janet-acp")
-    );
-    assert_eq!(
-        acp_command_from_filename("buzz-janet-acp.BAT", true),
-        Some("buzz-janet-acp")
-    );
-    assert_eq!(acp_command_from_filename("buzz-janet-acp", true), None);
-    assert_eq!(
-        acp_command_from_filename("buzz-janet-acp", false),
-        Some("buzz-janet-acp")
-    );
-    assert_eq!(acp_command_from_filename("buzz-acp.exe", true), None);
-}
-
-#[test]
-fn discovers_only_namespaced_acp_commands() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    for command in [
-        "buzz-janet-acp",
-        "buzz-acp",
-        "buzz--acp",
-        "janet-acp",
-        "buzz-janet-helper",
-    ] {
-        let filename = if cfg!(windows) {
-            format!("{command}.cmd")
-        } else {
-            command.to_string()
-        };
-        let path = dir.path().join(filename);
-        std::fs::write(&path, "#!/bin/sh\n").expect("write fixture");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut permissions = std::fs::metadata(&path).expect("metadata").permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(&path, permissions).expect("chmod fixture");
-        }
-    }
-
-    let candidates = discover_acp_command_candidates_in([dir.path().to_path_buf()], |command| {
-        Some(dir.path().join(command))
-    });
-    assert_eq!(
-        candidates
-            .into_iter()
-            .map(|(command, _)| command)
-            .collect::<Vec<_>>(),
-        vec!["buzz-janet-acp"]
-    );
-}
-
-#[test]
-fn acp_command_discovery_deduplicates_path_entries() {
-    let first = tempfile::tempdir().expect("first temp dir");
-    let second = tempfile::tempdir().expect("second temp dir");
-    let command = "buzz-janet-acp";
-    let filename = if cfg!(windows) {
-        format!("{command}.cmd")
-    } else {
-        command.to_string()
-    };
-    for dir in [first.path(), second.path()] {
-        let path = dir.join(&filename);
-        std::fs::write(&path, "#!/bin/sh\n").expect("write fixture");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut permissions = std::fs::metadata(&path).expect("metadata").permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(&path, permissions).expect("chmod fixture");
-        }
-    }
-
-    let resolved = second.path().join(&filename);
-    let candidates = discover_acp_command_candidates_in(
-        [first.path().to_path_buf(), second.path().to_path_buf()],
-        |_| Some(resolved.clone()),
-    );
-    assert_eq!(candidates.len(), 1);
-    assert_eq!(candidates[0].0, "buzz-janet-acp");
-    assert_eq!(candidates[0].1, resolved);
-}
-
-#[test]
 fn resolve_provider_binary_rejects_invalid_ids() {
-    // Path traversal
-    assert!(resolve_provider_binary("../evil").is_err());
-    // Empty
-    assert!(resolve_provider_binary("").is_err());
-    // Uppercase
-    assert!(resolve_provider_binary("MyProvider").is_err());
-    // Spaces
-    assert!(resolve_provider_binary("my provider").is_err());
-    // Shell metacharacters
-    assert!(resolve_provider_binary("foo;rm -rf /").is_err());
-    // Valid format but not on PATH — should fail with "not found"
-    assert!(resolve_provider_binary("nonexistent-test-id-12345").is_err());
-}
-
-#[test]
-fn resolve_provider_binary_accepts_valid_id_format() {
-    // Valid ID format should pass validation. If the binary happens to
-    // exist on PATH, Ok is returned; otherwise Err contains "not found"
-    // (not "invalid provider ID"). Either outcome proves validation passed.
-    match resolve_provider_binary("zzz-nonexistent-test-provider") {
-        Ok(_) => {} // unlikely but fine — binary exists
-        Err(e) => assert!(
-            e.contains("not found"),
-            "expected 'not found' error, got: {e}"
-        ),
-    }
-}
-
-#[test]
-fn portable_acp_aliases_exclude_paths_arguments_and_platform_metacharacters() {
-    for command in ["buzz-acp", "buzz-janet-acp", "buzz-Team_2-acp"] {
-        assert!(is_portable_acp_command(command), "{command}");
-    }
-    for command in [
-        "",
-        "buzz--acp",
-        "/tmp/buzz-janet-acp",
-        r"C:\buzz-janet-acp.cmd",
-        "buzz-../evil-acp",
-        "buzz-a b-acp",
-        "buzz-a&b-acp",
-        "buzz-a%PATH%-acp",
-        "buzz-a\nb-acp",
-        "buzz-a\u{202e}b-acp",
-        "other-command",
-        "buzz-janet-acp.exe",
+    let discovery = Discovery::default();
+    for invalid in [
+        "../evil",      // path traversal
+        "",             // empty
+        "MyProvider",   // uppercase
+        "my provider",  // spaces
+        "foo;rm -rf /", // shell metacharacters
+        "-leading-dash",
     ] {
-        assert!(!is_portable_acp_command(command), "{command:?}");
+        let error = resolve_provider_binary(invalid, None, &discovery).unwrap_err();
+        assert!(
+            error.message.contains("invalid provider ID"),
+            "{invalid:?}: {error}"
+        );
     }
+    // Valid format but not discovered.
+    let error = resolve_provider_binary("nonexistent-test-id-12345", None, &discovery).unwrap_err();
+    assert!(error.message.contains("not found"), "{error}");
+}
+
+#[cfg(unix)]
+fn install_backend(dir: &Path, id: &str) -> PathBuf {
+    let path = dir.join(format!("buzz-backend-{id}"));
+    write_test_provider(&path, "exit 0");
+    path
+}
+
+#[cfg(unix)]
+#[test]
+fn discovery_lists_executable_providers_first_directory_first() {
+    use std::os::unix::fs::PermissionsExt;
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let preferred = install_backend(first.path(), "kubernetes");
+    install_backend(second.path(), "kubernetes");
+    install_backend(second.path(), "other");
+    let not_executable = second.path().join("buzz-backend-plain");
+    std::fs::write(&not_executable, "").unwrap();
+    std::fs::set_permissions(&not_executable, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::write(second.path().join("unrelated"), "").unwrap();
+    let discovery = Discovery {
+        dirs: vec![first.path().to_path_buf(), second.path().to_path_buf()],
+    };
+
+    let ids: Vec<String> = discovery
+        .candidates()
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(ids.iter().filter(|id| *id == "other").count(), 1);
+    assert!(!ids.iter().any(|id| id == "plain"), "{ids:?}");
+    assert_eq!(
+        resolve_provider_binary("kubernetes", None, &discovery).unwrap(),
+        preferred.canonicalize().unwrap(),
+        "the first directory wins"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_cached_binary_is_used_only_when_discovered_for_the_same_provider() {
+    let bundled = tempfile::tempdir().unwrap();
+    let path_dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let discovered = install_backend(bundled.path(), "kubernetes");
+    let alternate = install_backend(path_dir.path(), "kubernetes");
+    let other_provider = install_backend(path_dir.path(), "other");
+    let undiscovered = install_backend(outside.path(), "kubernetes");
+    let discovery = Discovery {
+        dirs: vec![bundled.path().to_path_buf(), path_dir.path().to_path_buf()],
+    };
+    let resolve =
+        |cached: &Path| resolve_provider_binary("kubernetes", Some(cached), &discovery).unwrap();
+
+    // A cached path that is still the discovered candidate for this id is kept.
+    assert_eq!(resolve(&discovered), discovered.canonicalize().unwrap());
+    // A tampered record cannot redirect calls to another provider's binary,
+    // an undiscovered or shadowed binary, or a missing file: discovery
+    // decides instead.
+    for tampered in [
+        other_provider,
+        undiscovered,
+        alternate,
+        outside.path().join("missing"),
+    ] {
+        assert_eq!(
+            resolve(&tampered),
+            discovered.canonicalize().unwrap(),
+            "{}",
+            tampered.display()
+        );
+    }
+}
+
+#[test]
+fn discovery_searches_the_bundled_directory_first_then_path_then_local_bin() {
+    let bundled = PathBuf::from("/nonexistent/bundle/Contents/MacOS");
+    let discovery = Discovery::from_env(Some(bundled.clone()));
+    assert_eq!(discovery.dirs.first(), Some(&bundled));
+    if let Some(home) = dirs::home_dir() {
+        assert!(discovery.dirs.contains(&home.join(".local").join("bin")));
+    }
+    let path_dirs: Vec<PathBuf> =
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect();
+    if let Some(first_path_dir) = path_dirs.first() {
+        // Already-listed directories keep their PATH position.
+        let discovery = Discovery::from_env(Some(first_path_dir.clone()));
+        assert_eq!(
+            discovery
+                .dirs
+                .iter()
+                .filter(|dir| *dir == first_path_dir)
+                .count(),
+            1
+        );
+    }
+    assert!(!Discovery::from_env(None).dirs.contains(&bundled));
 }

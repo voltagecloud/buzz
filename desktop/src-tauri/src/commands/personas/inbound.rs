@@ -113,7 +113,14 @@ pub async fn reconcile_inbound_persona_event(
                 let _ = app.emit("agents-data-changed", ());
                 return Err(message);
             }
-            super::super::agents::deploy_to_provider(&app, &state, &pubkey, &Default::default(), None)
+            super::super::agents::deploy_to_provider(
+                &app,
+                &state,
+                &pubkey,
+                buzz_remote_sessions::Tenant::default(),
+                None,
+                None,
+            )
             .await
             .map_err(|error| {
                 format!(

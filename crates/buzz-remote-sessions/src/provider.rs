@@ -1,5 +1,5 @@
-use super::discovery::{command_search::command_discovery_dirs, resolve_command};
-use super::process_spawn::spawn_with_busy_retry as spawn_provider;
+use crate::process::spawn_with_busy_retry as spawn_provider;
+use crate::SessionError;
 use sha2::{Digest, Sha256};
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -8,66 +8,54 @@ use std::time::Duration;
 
 const STDERR_CAP: usize = 65536;
 /// Provider responses should be small JSON objects. Cap stdout to prevent a
-/// buggy or malicious provider from OOM-ing the desktop process.
+/// buggy or malicious provider from OOM-ing the host process.
 const STDOUT_CAP: usize = 1_048_576; // 1 MB
-const PROVIDER_PROTOCOL_VERSION: u64 = 1;
+/// The provider protocol version this client speaks (spec §Info).
+pub const PROTOCOL_VERSION: u64 = 1;
+/// The `info.ops` entry a provider advertises when `deploy` accepts
+/// `provider_config.sandbox.recovery`, so ended thread sessions can be
+/// recovered.
+const RECOVER_OP: &str = "recover";
 
-/// A failed provider operation, or a command that ended in one.
-///
-/// `code` is the provider's stable refusal code (`docs/remote-agents.md`
-/// §Sandbox error codes). It is absent for transient failures, desktop-side
-/// failures, and providers that predate codes. As a Tauri command error it
-/// serializes as the plain message when there is no code, and as
-/// `{"message": ..., "code": ...}` when there is one; the frontend's
-/// `invokeTauri` accepts both shapes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProviderFailure {
-    pub message: String,
-    pub code: Option<String>,
+/// A provider's validated `info` response.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProviderInfo {
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    /// Operations the provider advertises. A provider that omits `ops`
+    /// answers only `info` and `deploy`.
+    pub ops: Vec<String>,
+    pub config_schema: serde_json::Value,
 }
 
-impl From<String> for ProviderFailure {
-    fn from(message: String) -> Self {
-        Self {
-            message,
-            code: None,
-        }
+impl ProviderInfo {
+    /// Whether the provider advertises `op` in `info.ops`.
+    pub fn supports(&self, op: &str) -> bool {
+        self.ops.iter().any(|advertised| advertised == op)
+    }
+
+    /// Whether the provider can end thread sessions (`stop`) and recover
+    /// ended ones (`recover`). Session actions need both.
+    pub fn supports_lifecycle(&self) -> bool {
+        self.supports("stop") && self.supports(RECOVER_OP)
     }
 }
 
-impl From<&str> for ProviderFailure {
-    fn from(message: &str) -> Self {
-        message.to_string().into()
-    }
-}
-
-impl From<ProviderFailure> for String {
-    fn from(failure: ProviderFailure) -> Self {
-        failure.message
-    }
-}
-
-impl std::fmt::Display for ProviderFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
-impl serde::Serialize for ProviderFailure {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeStruct;
-        let Some(code) = &self.code else {
-            return serializer.serialize_str(&self.message);
-        };
-        let mut failure = serializer.serialize_struct("ProviderFailure", 2)?;
-        failure.serialize_field("message", &self.message)?;
-        failure.serialize_field("code", code)?;
-        failure.end()
-    }
+/// The state a `stop` response reports for the thread's session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StopState {
+    /// The stop is draining; the session ends once its Pod is gone.
+    Ending,
+    /// The session has ended.
+    Ended,
+    /// The thread has no session.
+    Absent,
 }
 
 /// A provider's refusal code, if it is a well-formed snake_case token.
-/// Anything else is dropped rather than passed to the frontend.
+/// Anything else is dropped rather than passed to the host.
 fn refusal_code(response: &serde_json::Value) -> Option<String> {
     response
         .get("code")
@@ -80,17 +68,18 @@ fn refusal_code(response: &serde_json::Value) -> Option<String> {
         .map(String::from)
 }
 
-fn validate_provider_info(info: &serde_json::Value) -> Result<(), String> {
+/// Validate an `info` response against protocol v1's flat wire shape.
+fn parse_provider_info(info: &serde_json::Value) -> Result<ProviderInfo, String> {
     let object = info
         .as_object()
         .ok_or_else(|| "provider info response must be a JSON object".to_string())?;
     let actual_version = object
         .get("protocol_version")
         .and_then(serde_json::Value::as_u64);
-    if actual_version != Some(PROVIDER_PROTOCOL_VERSION) {
+    if actual_version != Some(PROTOCOL_VERSION) {
         return Err(match actual_version {
             Some(version) => format!(
-                "unsupported provider protocol version {version}; desktop requires {PROVIDER_PROTOCOL_VERSION}"
+                "unsupported provider protocol version {version}; this client requires {PROTOCOL_VERSION}"
             ),
             None => "provider info response missing integer protocol_version".to_string(),
         });
@@ -98,22 +87,20 @@ fn validate_provider_info(info: &serde_json::Value) -> Result<(), String> {
     if object.get("ok") != Some(&serde_json::Value::Bool(true)) {
         return Err("provider info response must contain ok: true".to_string());
     }
-    for field in ["name", "version", "description"] {
-        if object
+    let text = |field: &str| {
+        object
             .get(field)
-            .is_none_or(|value| value.as_str().is_none_or(str::is_empty))
-        {
-            return Err(format!(
-                "provider info response missing non-empty string {field}"
-            ));
-        }
-    }
-    if !object
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(String::from)
+            .ok_or_else(|| format!("provider info response missing non-empty string {field}"))
+    };
+    let (name, version, description) = (text("name")?, text("version")?, text("description")?);
+    let config_schema = object
         .get("config_schema")
-        .is_some_and(serde_json::Value::is_object)
-    {
-        return Err("provider info response missing object config_schema".to_string());
-    }
+        .filter(|schema| schema.is_object())
+        .cloned()
+        .ok_or_else(|| "provider info response missing object config_schema".to_string())?;
 
     const FIELDS: &[&str] = &[
         "ok",
@@ -132,13 +119,19 @@ fn validate_provider_info(info: &serde_json::Value) -> Result<(), String> {
             "provider info response contains unknown field {field}"
         ));
     }
-    advertised_ops(info).map(drop)
+    Ok(ProviderInfo {
+        name,
+        version,
+        description,
+        ops: advertised_ops(info)?,
+        config_schema,
+    })
 }
 
 /// Operations a provider advertises in `info.ops`. The field is additive
 /// within protocol v1: a provider that omits it answers only `info` and
 /// `deploy`, so it has no `stop` and no session recovery.
-pub(crate) fn advertised_ops(info: &serde_json::Value) -> Result<Vec<String>, String> {
+fn advertised_ops(info: &serde_json::Value) -> Result<Vec<String>, String> {
     const MAX_OPS: usize = 32;
     let Some(ops) = info.get("ops") else {
         return Ok(vec!["info".to_string(), "deploy".to_string()]);
@@ -157,12 +150,35 @@ pub(crate) fn advertised_ops(info: &serde_json::Value) -> Result<Vec<String>, St
 }
 
 /// The terminal state a `stop` response reports for the thread's session.
-fn stop_response_state(response: &serde_json::Value) -> Result<String, String> {
+fn stop_response_state(response: &serde_json::Value) -> Result<StopState, String> {
     match response.get("state").and_then(serde_json::Value::as_str) {
-        Some(state @ ("ending" | "ended" | "absent")) => Ok(state.to_string()),
+        Some("ending") => Ok(StopState::Ending),
+        Some("ended") => Ok(StopState::Ended),
+        Some("absent") => Ok(StopState::Absent),
         Some(state) => Err(format!("stop response has unknown state {state:?}")),
         None => Err("stop response missing state".to_string()),
     }
+}
+
+/// The backend agent id a successful `deploy` response carries.
+fn deployed_agent_id(response: &serde_json::Value) -> Result<String, String> {
+    response["agent_id"]
+        .as_str()
+        .map(String::from)
+        .ok_or_else(|| "deploy response missing agent_id".to_string())
+}
+
+/// The in-band failure a provider reported with `ok: false`, if any, with
+/// `secrets` redacted from its message.
+fn reported_failure(response: &serde_json::Value, secrets: &[&str]) -> Option<SessionError> {
+    if response.get("ok").and_then(serde_json::Value::as_bool) != Some(false) {
+        return None;
+    }
+    let error = response["error"].as_str().unwrap_or("unknown error");
+    Some(SessionError {
+        message: redact_secrets_with(error, secrets),
+        code: refusal_code(response),
+    })
 }
 
 /// Invoke a provider binary: write JSON to stdin, read JSON from stdout.
@@ -172,22 +188,28 @@ fn stop_response_state(response: &serde_json::Value) -> Result<String, String> {
 /// daemonizes or leaves descendants holding pipes open, the caller still gets
 /// all data written before the child exited and returns without leaking threads
 /// (the readers drop naturally when the sender is gone and the pipe closes or
-/// the desktop process exits).
+/// the host process exits). The provider runs in `cwd` when one is given.
 pub fn invoke_provider(
     binary: &Path,
+    cwd: Option<&Path>,
     request: &serde_json::Value,
     timeout: Duration,
-) -> Result<serde_json::Value, ProviderFailure> {
+) -> Result<serde_json::Value, SessionError> {
     let request_bytes = format!(
         "{}\n",
         serde_json::to_string(request).map_err(|e| e.to_string())?
     );
 
     let mut cmd = std::process::Command::new(binary);
-    if let Some(home) = super::default_agent_workdir() {
-        cmd.current_dir(home);
+    if let Some(cwd) = cwd {
+        cmd.current_dir(cwd);
     }
-    crate::util::configure_no_window(&mut cmd);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        // CREATE_NO_WINDOW: no console window flashes up for each call.
+        cmd.creation_flags(0x0800_0000);
+    }
     cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -377,12 +399,8 @@ pub fn invoke_provider(
             }
         })?;
 
-    if response.get("ok").and_then(|v| v.as_bool()) == Some(false) {
-        let error = response["error"].as_str().unwrap_or("unknown error");
-        return Err(ProviderFailure {
-            message: redact_secrets_with(error, &env_secret_refs),
-            code: refusal_code(&response),
-        });
+    if let Some(failure) = reported_failure(&response, &env_secret_refs) {
+        return Err(failure);
     }
 
     Ok(response)
@@ -437,13 +455,13 @@ fn redact_secrets(s: &str) -> String {
 /// `extras` entry verbatim. Used to scrub user-supplied env values out of
 /// provider stderr/JSON-error text — providers may echo their request
 /// back in failure messages, and persona/agent `env_vars` may carry API
-/// keys that the desktop just persisted via `last_error`.
+/// keys that a host may persist as an agent's last error.
 ///
 /// Entries shorter than 4 chars are skipped: too noisy to scrub blindly
 /// (would match every short token in normal log output). Entries are
 /// applied in decreasing length order so superstrings get scrubbed before
 /// substrings — protects against partial overlap leaks.
-pub(crate) fn redact_secrets_with(s: &str, extras: &[&str]) -> String {
+pub fn redact_secrets_with(s: &str, extras: &[&str]) -> String {
     let mut result = s.to_string();
 
     // Extras: longest first to avoid partial-overlap leaks. We use
@@ -515,14 +533,11 @@ fn env_secrets_from_request(request: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
-/// Public-in-crate helper: redact every non-empty value from `env` (plus
-/// the standard nsec/sprt_tok prefix scrubbing) out of `s`. Used by
-/// callers that already have a flat env map handy — e.g. model discovery
-/// formatting child stderr into a frontend-visible error.
-pub(crate) fn redact_env_values_in(
-    s: &str,
-    env: &std::collections::BTreeMap<String, String>,
-) -> String {
+/// Redact every non-empty value from `env` (plus the standard nsec/sprt_tok
+/// prefix scrubbing) out of `s`. Used by callers that already have a flat env
+/// map handy — e.g. model discovery formatting child stderr into a
+/// user-visible error.
+pub fn redact_env_values_in(s: &str, env: &std::collections::BTreeMap<String, String>) -> String {
     let values: Vec<&str> = env
         .values()
         .filter(|v| !v.is_empty())
@@ -605,33 +620,37 @@ fn stage_provider(
     ))
 }
 
-/// Run `info` on a staged provider and return the operations it advertises.
-fn negotiate_staged_provider(staged: &Path) -> Result<Vec<String>, String> {
+/// Run `info` on a staged provider and validate its answer.
+fn negotiate_staged_provider(
+    staged: &Path,
+    cwd: Option<&Path>,
+) -> Result<ProviderInfo, SessionError> {
     let info_request = serde_json::json!({
         "op": "info",
         "request_id": uuid::Uuid::new_v4().to_string(),
     });
-    let info = invoke_provider(staged, &info_request, Duration::from_secs(10))?;
-    validate_provider_info(&info)?;
-    advertised_ops(&info)
+    let info = invoke_provider(staged, cwd, &info_request, Duration::from_secs(10))?;
+    Ok(parse_provider_info(&info)?)
 }
 
-/// Operations a provider advertises. Runs only `info`, which carries no
-/// agent secret, on a staged copy of the binary.
-pub fn provider_ops(binary: &Path) -> Result<Vec<String>, String> {
+/// A provider's validated `info`. Runs only `info`, which carries no agent
+/// secret, on a staged copy of the binary.
+pub fn provider_info(binary: &Path, cwd: Option<&Path>) -> Result<ProviderInfo, SessionError> {
     let (_directory, staged, _digest, _execution_guard) = stage_provider(binary)?;
-    negotiate_staged_provider(&staged)
+    negotiate_staged_provider(&staged, cwd)
 }
 
 /// Deploy through one immutable staged copy: negotiate protocol v1 before the
 /// secret-bearing request, then invoke deploy on those exact same bytes.
+/// Returns the backend agent id.
 pub fn provider_deploy(
     binary: &Path,
+    cwd: Option<&Path>,
     agent: &serde_json::Value,
     provider_config: &serde_json::Value,
-) -> Result<String, ProviderFailure> {
+) -> Result<String, SessionError> {
     let (_directory, staged, _digest, _execution_guard) = stage_provider(binary)?;
-    negotiate_staged_provider(&staged)?;
+    negotiate_staged_provider(&staged, cwd)?;
 
     let request = serde_json::json!({
         "op": "deploy",
@@ -639,27 +658,21 @@ pub fn provider_deploy(
         "agent": agent,
         "provider_config": provider_config,
     });
-    let resp = invoke_provider(&staged, &request, Duration::from_secs(600))?;
-    resp["agent_id"]
-        .as_str()
-        .map(String::from)
-        .ok_or_else(|| "deploy response missing agent_id".into())
+    let resp = invoke_provider(&staged, cwd, &request, Duration::from_secs(600))?;
+    Ok(deployed_agent_id(&resp)?)
 }
 
 /// End a remote session through one immutable staged copy. The `stop`
 /// request carries the same secret-bearing payload as `deploy`, so it is sent
 /// only after the same bytes negotiated protocol v1 and advertised `stop`.
-/// Returns the session state: `ending`, `ended`, or `absent`.
 pub fn provider_stop(
     binary: &Path,
+    cwd: Option<&Path>,
     agent: &serde_json::Value,
     provider_config: &serde_json::Value,
-) -> Result<String, ProviderFailure> {
+) -> Result<StopState, SessionError> {
     let (_directory, staged, _digest, _execution_guard) = stage_provider(binary)?;
-    if !negotiate_staged_provider(&staged)?
-        .iter()
-        .any(|op| op == "stop")
-    {
+    if !negotiate_staged_provider(&staged, cwd)?.supports("stop") {
         return Err(
             "this provider cannot end remote sessions; update the provider and try again".into(),
         );
@@ -670,7 +683,7 @@ pub fn provider_stop(
         "agent": agent,
         "provider_config": provider_config,
     });
-    let response = invoke_provider(&staged, &request, Duration::from_secs(120))?;
+    let response = invoke_provider(&staged, cwd, &request, Duration::from_secs(120))?;
     Ok(stop_response_state(&response)?)
 }
 
@@ -762,10 +775,10 @@ fn validate_config_value(
     Ok(())
 }
 
-/// Derive a provider id from the filename Tauri stages at runtime. Tauri
-/// removes its target-triple suffix while copying an external binary, but on
-/// Windows leaves the executable/script extension, which is not part of the
-/// provider id.
+/// Derive a provider id from a `buzz-backend-*` filename. Tauri removes its
+/// target-triple suffix while copying an external binary, but on Windows
+/// leaves the executable/script extension, which is not part of the provider
+/// id.
 fn provider_id_from_filename(name: &str) -> Option<&str> {
     let raw = name.strip_prefix("buzz-backend-")?;
     let id = [".exe", ".bat", ".cmd"]
@@ -780,164 +793,86 @@ fn provider_id_from_filename(name: &str) -> Option<&str> {
     (!id.is_empty()).then_some(id)
 }
 
-fn executable_search_dirs() -> Vec<PathBuf> {
-    let path_var = std::env::var_os("PATH").unwrap_or_default();
-    let mut dirs: Vec<PathBuf> = std::env::split_paths(&path_var).collect();
+/// The directories searched for `buzz-backend-*` providers, in order.
+///
+/// A snapshot: build one per operation when `PATH` can change at runtime.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Discovery {
+    pub dirs: Vec<PathBuf>,
+}
 
-    // Prepend the exe parent dir (Contents/MacOS/ in a .app bundle) so bundled
-    // extensions are found even when the process PATH is minimal.
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            let parent_buf = parent.to_path_buf();
-            if !dirs.contains(&parent_buf) {
-                dirs.insert(0, parent_buf);
+impl Discovery {
+    /// `bundled` (when given and not already on `PATH`), then `PATH`, then
+    /// `~/.local/bin`.
+    ///
+    /// `bundled` is the directory a host ships providers in, such as a
+    /// `.app` bundle's `Contents/MacOS/` next to the executable; `None` when
+    /// the host bundles none. `~/.local/bin` is the conventional location for
+    /// user-installed Buzz extension binaries (symlinks created by install
+    /// scripts). On macOS, GUI apps inherit a minimal PATH from launchd
+    /// (`/usr/bin:/bin:/usr/sbin:/sbin`) which excludes both, so they are
+    /// added regardless of how the host was launched.
+    pub fn from_env(bundled: Option<PathBuf>) -> Self {
+        let path_var = std::env::var_os("PATH").unwrap_or_default();
+        let mut dirs: Vec<PathBuf> = std::env::split_paths(&path_var).collect();
+        if let Some(bundled) = bundled {
+            if !dirs.contains(&bundled) {
+                dirs.insert(0, bundled);
             }
         }
-    }
-
-    // Also include ~/.local/bin — the conventional location for user-installed
-    // Buzz extension binaries (symlinks created by install scripts).
-    if let Some(home) = dirs::home_dir() {
-        let local_bin = home.join(".local").join("bin");
-        if !dirs.contains(&local_bin) {
-            dirs.push(local_bin);
+        if let Some(home) = dirs::home_dir() {
+            let local_bin = home.join(".local").join("bin");
+            if !dirs.contains(&local_bin) {
+                dirs.push(local_bin);
+            }
         }
+        Self { dirs }
     }
 
-    dirs
-}
+    /// Enumerate `buzz-backend-*` executables. Returns (id, path) pairs,
+    /// first directory first. Does NOT execute any binaries.
+    pub fn candidates(&self) -> Vec<(String, PathBuf)> {
+        let prefix = "buzz-backend-";
+        let mut seen = std::collections::HashSet::new();
+        let mut results = Vec::new();
 
-fn strip_windows_command_extension(name: &str) -> &str {
-    [".exe", ".bat", ".cmd"]
-        .into_iter()
-        .find_map(|extension| {
-            name.get(name.len().saturating_sub(extension.len())..)
-                .filter(|suffix| suffix.eq_ignore_ascii_case(extension))
-                .map(|_| &name[..name.len() - extension.len()])
-        })
-        .unwrap_or(name)
-}
-
-/// Whether a transport is a portable stock or conventional wrapper alias.
-/// Shared artifacts carry aliases only, never machine paths or command lines.
-/// Owner-controlled native commands and owner-device sync retain legacy values.
-pub(crate) fn is_portable_acp_command(command: &str) -> bool {
-    if command == super::DEFAULT_ACP_COMMAND {
-        return true;
-    }
-    command.len() <= 255
-        && command
-            .strip_prefix("buzz-")
-            .and_then(|name| name.strip_suffix("-acp"))
-            .is_some_and(|name| {
-                !name.is_empty()
-                    && name
-                        .bytes()
-                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
-            })
-}
-
-/// Reject nonportable commands at foreign catalog and snapshot boundaries.
-pub(crate) fn validate_portable_acp_command(command: Option<&str>) -> Result<(), String> {
-    if command.is_some_and(|command| !is_portable_acp_command(command)) {
-        return Err("ACP command must be buzz-acp or a portable buzz-*-acp alias".to_string());
-    }
-    Ok(())
-}
-
-fn acp_command_from_filename(name: &str, require_windows_extension: bool) -> Option<&str> {
-    let command = strip_windows_command_extension(name);
-    if require_windows_extension && command == name {
-        return None;
-    }
-    (command != super::DEFAULT_ACP_COMMAND && is_portable_acp_command(command)).then_some(command)
-}
-
-/// Enumerate PATH for buzz-backend-* executables. Returns (id, path) pairs.
-/// Only includes files that are executable. Does NOT execute any binaries.
-///
-/// On macOS, GUI apps inherit a minimal PATH from launchd (`/usr/bin:/bin:/usr/sbin:/sbin`)
-/// which excludes both the app bundle's `Contents/MacOS/` dir and `~/.local/bin`.
-/// We augment the search with those directories so bundled and user-installed providers
-/// are always discovered regardless of how the desktop was launched.
-pub fn discover_provider_candidates() -> Vec<(String, PathBuf)> {
-    let prefix = "buzz-backend-";
-    let mut seen = std::collections::HashSet::new();
-    let mut results = Vec::new();
-
-    for dir in executable_search_dirs() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with(prefix) {
-                if let Some(id) = provider_id_from_filename(&name) {
-                    if !seen.contains(&name) && is_executable(&entry.path()) {
-                        seen.insert(name.clone());
-                        results.push((id.to_string(), entry.path()));
+        for dir in &self.dirs {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with(prefix) {
+                    if let Some(id) = provider_id_from_filename(&name) {
+                        if !seen.contains(&name) && is_executable(&entry.path()) {
+                            seen.insert(name.clone());
+                            results.push((id.to_string(), entry.path()));
+                        }
                     }
                 }
             }
         }
+        results
     }
-    results
-}
-
-/// Enumerate executable `buzz-*-acp` drop-in wrappers without running them.
-/// The stock `buzz-acp` command is deliberately excluded because it has no
-/// namespaced middle segment and is always the editor's built-in default.
-///
-/// Candidate names come from the normal executable search directories, but
-/// each result is resolved through the same command resolver used at spawn.
-/// This guarantees the path shown for a command is the path that command will
-/// execute, even when managed shims or workspace builds take precedence.
-pub fn discover_acp_command_candidates() -> Vec<(String, PathBuf)> {
-    discover_acp_command_candidates_in(command_discovery_dirs(), resolve_command)
-}
-
-fn discover_acp_command_candidates_in(
-    dirs: impl IntoIterator<Item = PathBuf>,
-    mut resolve: impl FnMut(&str) -> Option<PathBuf>,
-) -> Vec<(String, PathBuf)> {
-    let mut seen = std::collections::HashSet::new();
-    let mut results = Vec::new();
-
-    for dir in dirs {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let filename = entry.file_name().to_string_lossy().to_string();
-            let Some(command) = acp_command_from_filename(&filename, cfg!(windows)) else {
-                continue;
-            };
-            if !entry.path().is_file() || !is_executable(&entry.path()) {
-                continue;
-            }
-            if seen.insert(command.to_string()) {
-                if let Some(path) = resolve(command) {
-                    results.push((command.to_string(), path));
-                }
-            }
-        }
-    }
-
-    results.sort_by(|left, right| left.0.cmp(&right.0));
-    results
 }
 
 /// Resolve a provider ID to a discovered, executable binary path.
 ///
 /// This is the ONLY way to resolve provider binaries for execution. It:
 /// 1. Validates the ID against `^[a-z0-9][a-z0-9_-]*$` (no path traversal)
-/// 2. Looks up the ID in `discover_provider_candidates()` (PATH-discovered only)
-/// 3. Returns the canonical path of the discovered binary
+/// 2. Keeps `cached` only when it is a discovered candidate for this ID, so a
+///    tampered record cannot redirect calls to another provider's binary
+/// 3. Otherwise looks up the ID in [`Discovery::candidates`]
+/// 4. Returns the canonical path of the discovered binary
 ///
-/// All deploy, start, and create paths MUST use this instead of raw
-/// `resolve_command(format!("buzz-backend-{id}"))` to prevent a compromised
-/// frontend/IPC caller from steering execution to an arbitrary binary.
-pub fn resolve_provider_binary(provider_id: &str) -> Result<PathBuf, String> {
+/// Every deploy, stop, and info path MUST use this instead of resolving
+/// `buzz-backend-{id}` as a command, to prevent a compromised caller from
+/// steering execution to an arbitrary binary.
+pub fn resolve_provider_binary(
+    provider_id: &str,
+    cached: Option<&Path>,
+    discovery: &Discovery,
+) -> Result<PathBuf, SessionError> {
     // Reject IDs that could be path components or shell metacharacters.
     let valid_id = provider_id
         .chars()
@@ -945,12 +880,24 @@ pub fn resolve_provider_binary(provider_id: &str) -> Result<PathBuf, String> {
         && !provider_id.is_empty()
         && provider_id.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit());
     if !valid_id {
-        return Err(format!(
-            "invalid provider ID '{provider_id}': must match [a-z0-9][a-z0-9_-]*"
-        ));
+        return Err(
+            format!("invalid provider ID '{provider_id}': must match [a-z0-9][a-z0-9_-]*").into(),
+        );
     }
 
-    let candidates = discover_provider_candidates();
+    let candidates = discovery.candidates();
+    let cached = cached
+        .filter(|path| path.exists())
+        .map(|path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf()))
+        .filter(|canonical| {
+            candidates.iter().any(|(id, candidate)| {
+                id == provider_id && candidate.canonicalize().ok().as_ref() == Some(canonical)
+            })
+        });
+    if let Some(cached) = cached {
+        return Ok(cached);
+    }
+
     let found = candidates
         .into_iter()
         .find(|(id, _)| id == provider_id)
@@ -959,10 +906,8 @@ pub fn resolve_provider_binary(provider_id: &str) -> Result<PathBuf, String> {
     match found {
         Some(path) => path
             .canonicalize()
-            .map_err(|e| format!("provider binary not accessible: {e}")),
-        None => Err(format!(
-            "provider 'buzz-backend-{provider_id}' not found on PATH"
-        )),
+            .map_err(|e| format!("provider binary not accessible: {e}").into()),
+        None => Err(format!("provider 'buzz-backend-{provider_id}' not found on PATH").into()),
     }
 }
 
@@ -982,21 +927,10 @@ fn is_executable(path: &Path) -> bool {
     }
 }
 
-#[derive(Debug, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BackendProviderInfo {
-    pub id: String,
-    pub binary_path: String,
-}
-
-/// A PATH-discovered drop-in wrapper for the stock `buzz-acp` harness.
-#[derive(Debug, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AcpCommandCandidate {
-    pub command: String,
-    pub binary_path: String,
-}
+#[cfg(test)]
+#[path = "provider_tests.rs"]
+mod tests;
 
 #[cfg(test)]
-#[path = "backend_tests.rs"]
-mod tests;
+#[path = "wire_fixture_tests.rs"]
+mod wire_fixture_tests;

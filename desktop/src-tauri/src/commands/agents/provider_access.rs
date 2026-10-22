@@ -78,8 +78,15 @@ pub(crate) async fn reconcile_on_workspace_apply(
                 "provider access reconciliation failed for agent {pubkey}: {error}"
             ));
         }
-        if let Err(error) =
-            super::deploy_to_provider(app, state, &pubkey, &Default::default(), None).await
+        if let Err(error) = super::deploy_to_provider(
+            app,
+            state,
+            &pubkey,
+            buzz_remote_sessions::Tenant::default(),
+            None,
+            None,
+        )
+        .await
         {
             return Err(format!(
                 "provider access reconciliation failed for agent {pubkey}: {error}"

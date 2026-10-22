@@ -45,11 +45,11 @@ pub(crate) fn apply_agent_display_env(command: &mut std::process::Command, title
     }
 }
 
-/// Env var carrying the startup replay floor to the harness. Shared with the
-/// provider deploy path (`commands::agents::provider_deploy`) so the local
-/// spawn and the remote `launch.policy_env` injection name the key from one
-/// place.
-pub(crate) const REPLAY_FLOOR_ENV_VAR: &str = "BUZZ_ACP_REPLAY_FLOOR";
+/// Env var carrying the startup replay floor to the harness. Owned by
+/// `buzz-remote-sessions`, whose deploy path injects it into the remote
+/// `launch.policy_env`, so the local spawn and the remote injection name the
+/// key from one place.
+pub(crate) use buzz_remote_sessions::REPLAY_FLOOR_ENV_VAR;
 
 /// Apply the publish-first replay floor: inject [`REPLAY_FLOOR_ENV_VAR`] from
 /// `replay_floor_unix` (or leave the key untouched if `None`).

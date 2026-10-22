@@ -1,6 +1,6 @@
 use super::*;
 use crate::commands::agents::{tests::*, workspace_owner_hex};
-use crate::managed_agents::save_managed_agents;
+use crate::managed_agents::{save_managed_agents, BackendKind};
 use serde_json::{json, Value};
 use std::{os::unix::fs::PermissionsExt, path::Path};
 use tauri::Manager;
@@ -39,7 +39,7 @@ fn lifecycle_actions_enforce_scope_and_preserve_provider_codes() {
         )],
     )
     .unwrap();
-    let session: RemoteSessionScope = serde_json::from_value(json!({
+    let session: SessionScope = serde_json::from_value(json!({
         "channelId": "f9ee507e-d03c-4570-baa6-02951c38e1cd", "threadRoot": "a".repeat(64),
     }))
     .unwrap();
@@ -83,7 +83,7 @@ fn lifecycle_actions_enforce_scope_and_preserve_provider_codes() {
     ] {
         for error in [
             end(expected_relay, signer).unwrap_err(),
-            recover(RemoteRecoveryMode::Fresh, expected_relay, signer).unwrap_err(),
+            recover(RecoveryMode::Fresh, expected_relay, signer).unwrap_err(),
         ] {
             assert!(error.message.contains(message), "{error}");
             assert!(error.message.contains("nothing was changed"), "{error}");
@@ -99,7 +99,7 @@ fn lifecycle_actions_enforce_scope_and_preserve_provider_codes() {
             json!(["stop", "recover"]),
             json!({"ok": true, "agent_id": "remote", "state": stop_state}),
         );
-        assert_eq!(end(relay, &owner).unwrap(), stop_state);
+        assert_eq!(json!(end(relay, &owner).unwrap()), json!(stop_state));
         let request: Value =
             serde_json::from_str(&std::fs::read_to_string(&capture).unwrap()).unwrap();
         assert_eq!(request["op"], "stop");
@@ -115,7 +115,7 @@ fn lifecycle_actions_enforce_scope_and_preserve_provider_codes() {
             .get("recovery")
             .is_none());
     }
-    for mode in [RemoteRecoveryMode::Fresh, RemoteRecoveryMode::Checkpoint] {
+    for mode in [RecoveryMode::Fresh, RecoveryMode::Checkpoint] {
         install_provider(
             home,
             json!(["stop", "recover"]),
@@ -143,7 +143,7 @@ fn lifecycle_actions_enforce_scope_and_preserve_provider_codes() {
         install_provider(home, json!(["stop", "recover"]), response);
         for error in [
             end(relay, &owner).unwrap_err(),
-            recover(RemoteRecoveryMode::Checkpoint, relay, &owner).unwrap_err(),
+            recover(RecoveryMode::Checkpoint, relay, &owner).unwrap_err(),
         ] {
             assert_eq!(error.code.as_deref(), code);
             assert!(error.message.contains("fixture refusal"), "{error}");

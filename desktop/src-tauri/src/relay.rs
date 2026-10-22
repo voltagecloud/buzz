@@ -83,19 +83,8 @@ pub fn effective_agent_relay_url(_record_relay: &str, workspace_relay: &str) -> 
     workspace_relay.to_string()
 }
 
-pub fn relay_http_base_url(relay_url: &str) -> String {
-    let trimmed = relay_url.trim().trim_end_matches('/');
-
-    if let Some(suffix) = trimmed.strip_prefix("wss://") {
-        return format!("https://{}", suffix);
-    }
-
-    if let Some(suffix) = trimmed.strip_prefix("ws://") {
-        return format!("http://{}", suffix);
-    }
-
-    trimmed.to_string()
-}
+/// The relay's HTTP API base URL; shared with the remote-session client.
+pub use buzz_remote_sessions::relay_http_base_url;
 
 mod scope;
 pub use scope::{
