@@ -1948,8 +1948,13 @@ Refusals are `done` replies with one of these codes
 | `replayed_request` | The manager has already received this event. | retry with a new event |
 | `request_id_reused` | The `request_id` belongs to a different request. | use a new `request_id` |
 | `manager_busy` | The manager is at its limit: 16 running requests, 1,024 tracked requests, 10,000 recent event ids, or 8 events for one request. | retry later |
-| `unsupported_op` | An unknown operation, or `enroll`, which this version does not implement. | update Buzz |
+| `unsupported_op` | An unknown operation. | update Buzz |
 | `unsupported_version` | An envelope version other than `1`. | update Buzz |
+| `profile_owner_mismatch` | `enroll`: the profile's `owner_pubkey` is not the signing key. | sign with the profile's owner |
+| `profile_developer_mismatch` | `enroll`: the profile's `developer` is not the signing owner's developer ID. | fix the profile's `developer` |
+| `invalid_profile` | `enroll`: the payload is not `{"profile": <object>}`, or the profile fails the image's validation; the message is the image's. | fix the profile |
+| `github_login_mismatch` | `enroll`: GitHub reports another login for the profile's token, refuses the token, or cannot be reached. | use a token for `github.login`, or retry |
+| `profile_store_failed` | `enroll`: Secrets Manager refused or failed the write; the message carries a label such as `access_denied`. | retry, or ask an admin |
 | `manager_unavailable` | Client-side: the manager did not accept the request within 30 s. Ephemeral events reach only connected subscribers, so a manager that is down never sees it. | retry |
 | `manager_timeout` | Client-side: the manager accepted the request but did not finish it within the provider's `timeout_seconds`. | retry; the retry joins or replays the same run |
 | `relay_unavailable` | Client-side: the provider could not connect, authenticate or subscribe to the relay, the relay refused the request, or the connection dropped before `done`. The relay's own message is not repeated. | check the relay URL and the agent's owner attestation, then retry |
@@ -1969,7 +1974,11 @@ namespace:
 
 The manager refuses to start on an unknown `version`, an invalid field, or
 an owner key that two developers share, because the owner selects the
-namespace. `profile_secret_arn` is where `enroll` will write the profile.
+namespace. `profile_secret_arn` is where `enroll` writes the profile. It
+must be that developer's own secret,
+`arn:aws:secretsmanager:<region>:<account>:secret:voltage/staging/agents/<id>/profile-<6 characters>`,
+so one owner can never reach another developer's secret, and `enroll`
+writes to `<region>` (`AWS_REGION` is not used for it).
 
 | Flag | Environment | Default |
 | --- | --- | --- |
@@ -1978,6 +1987,7 @@ namespace. `profile_secret_arn` is where `enroll` will write the profile.
 | `--private-key-file <path>` | `BUZZ_PRIVATE_KEY_FILE` | unset: the key (nsec or hex) is read from `BUZZ_PRIVATE_KEY` |
 | `--auth-tag <json>` | `BUZZ_AUTH_TAG` | unset |
 | `--sandbox-provider-config <json>` | `BUZZ_SANDBOX_PROVIDER_CONFIG` | unset: each request's own fields stand |
+| `--github-api-url <url>` | `BUZZ_GITHUB_API_URL` | `https://api.github.com`; `http://` only to a loopback host |
 
 `BUZZ_SANDBOX_PROVIDER_CONFIG` is a JSON object of Kubernetes
 `provider_config` fields that the manager sets on every request, replacing
@@ -1996,6 +2006,32 @@ tombstone or the bound replacement supersedes it. The manager uses no
 watch. Logs are JSON and name only event ids,
 operations and codes. The `buzz_ws_client` target is capped at `info`,
 because its debug logs quote whole relay frames.
+
+**Enrollment.** `enroll` stores a developer's agent profile, so no one
+needs Secrets Manager access to enroll. The Buzz app signs it with the
+owner key itself, with no `auth` tag. The payload is `{"profile": <object>}`,
+where the profile is the schema `voltage/images/buzz-agent/profile.py`
+validates. After the authorization steps above, the manager checks, in
+order:
+
+1. The signer is a configured developer's `owner_pubkey`
+   (`unauthorized_owner`).
+2. The profile's `owner_pubkey` is the signer (`profile_owner_mismatch`).
+3. The profile's `developer` is that developer's ID
+   (`profile_developer_mismatch`).
+4. The profile passes the port of `profile.py`'s `validate()`
+   (`crates/buzz-sandbox-reaper/src/profile.rs`, `invalid_profile`).
+5. `GET <BUZZ_GITHUB_API_URL>/user` with the profile's GitHub token reports
+   the profile's `github.login`, ignoring case (`github_login_mismatch`).
+
+Then it calls `secretsmanager:PutSecretValue` on the developer's
+`profile_secret_arn` with the profile JSON, using the ambient AWS
+credentials (IRSA), and replies `done` with `{"ok":true,"version_id":"<id>"}`.
+A failed write is `profile_store_failed`. Replies, logs and refusal
+messages never contain a profile value; the serialized profile is zeroized
+after the write. Neither the check nor the write uses the filesystem.
+Unlike `profile.py enroll`, the manager does not check the 1Password token
+(`op whoami`); the image still refuses a profile it cannot load.
 
 **The relay provider.** `buzz-backend-relay` (`crates/buzz-backend-relay`)
 speaks the provider protocol on stdin and stdout like
@@ -2036,7 +2072,7 @@ Limits of this version:
 - The manager reconnects with backoff from 1 s to 60 s. At shutdown it
   aborts running requests. Deploy and stop are idempotent and journaled, so
   a retry resumes them.
-- No `progress` replies, no health listener, and no `enroll`.
+- No `progress` replies and no health listener.
 
 ### Distribution
 

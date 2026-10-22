@@ -23,6 +23,7 @@ use nostr::{Event, Keys, Tag, Timestamp};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
+use crate::enroll::{self, Enrollment, SecretsManagerStore};
 use crate::manager::{response_value, Admission, Job, Manager, ManagerConfig, Waiter};
 
 /// Bound on connecting, authenticating and subscribing.
@@ -62,6 +63,9 @@ pub struct ServeArgs {
     /// `buzz-backend-relay` clients, which send none of them.
     #[arg(long, env = "BUZZ_SANDBOX_PROVIDER_CONFIG")]
     sandbox_provider_config: Option<String>,
+    /// GitHub REST API base for the enrollment login check.
+    #[arg(long, env = "BUZZ_GITHUB_API_URL", default_value = enroll::DEFAULT_GITHUB_API_URL)]
+    github_api_url: String,
 }
 
 fn sandbox_defaults(text: Option<&str>) -> Result<serde_json::Map<String, serde_json::Value>> {
@@ -90,11 +94,15 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
         .map(buzz_sdk::nip_oa::parse_auth_tag)
         .transpose()
         .map_err(|_| anyhow::anyhow!("BUZZ_AUTH_TAG is not a valid owner attestation"))?;
+    let github = enroll::GitHub::new(&args.github_api_url)
+        .map_err(|e| anyhow::anyhow!("BUZZ_GITHUB_API_URL: {e}"))?;
+    let enrollment = Enrollment::new(github, Arc::new(SecretsManagerStore::new().await));
     let client = kube::Client::try_default()
         .await
         .context("build in-cluster Kubernetes client")?;
     let developers = config.len();
-    let manager = Arc::new(Manager::new(keys, config, client).with_sandbox_defaults(defaults));
+    let manager =
+        Arc::new(Manager::new(keys, config, client, enrollment).with_sandbox_defaults(defaults));
     tracing::info!(manager = %manager.keys().public_key(), developers,
         "buzz-sandbox-reaper serve started");
     run(manager, &args.relay_url, auth_tag, crate::shutdown()).await;
@@ -302,18 +310,15 @@ async fn execute(
     (first, request_id, op): (Waiter, String, Op),
     replies: mpsc::Sender<Event>,
 ) {
-    let Job {
-        key,
-        request,
-        target,
-    } = *job;
-    let response = AssertUnwindSafe(provider::run(request, &target))
+    let Job { key, work } = *job;
+    let response = AssertUnwindSafe(work.run(&manager))
         .catch_unwind()
         .await
         .unwrap_or_else(|_| {
-            Response::error("the session manager failed while running the request")
+            response_value(&Response::error(
+                "the session manager failed while running the request",
+            ))
         });
-    let response = response_value(&response);
     tracing::info!(event_id = %first.event, op = op.as_str(), ok = response["ok"].as_bool(),
         code = response["code"].as_str(), "finished a request");
     for waiter in manager.complete(&key, response.clone(), Timestamp::now()) {

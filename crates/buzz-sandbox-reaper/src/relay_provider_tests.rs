@@ -36,14 +36,19 @@ async fn start_manager(
         &json!({"version": 1, "developers": {"dev": {
             "owner_pubkey": keys("33").public_key().to_hex(),
             "namespace": "buzz-agent-staging-dev",
-            "profile_secret_arn": "arn:aws:secretsmanager:us-west-2:000000000000:secret:dev"}}})
+            "profile_secret_arn": "arn:aws:secretsmanager:us-west-2:000000000000:secret:voltage/staging/agents/dev/profile-AbCdEf"}}})
         .to_string(),
     )
     .unwrap();
     let cluster = sandbox_fake::Shared::default();
     let manager = Arc::new(
-        Manager::new(manager_keys.clone(), config, sandbox_fake::client(&cluster))
-            .with_sandbox_defaults(sandbox_defaults(Some(&defaults())).unwrap()),
+        Manager::new(
+            manager_keys.clone(),
+            config,
+            sandbox_fake::client(&cluster),
+            crate::enroll::tests::offline(Default::default()),
+        )
+        .with_sandbox_defaults(sandbox_defaults(Some(&defaults())).unwrap()),
     );
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let url = relay.url.clone();
