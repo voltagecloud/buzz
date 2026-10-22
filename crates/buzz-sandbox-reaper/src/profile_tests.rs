@@ -38,6 +38,8 @@ fn accepts_a_complete_profile() {
     // Both subscriptions, for Codex and Claude Code in parallel.
     value["models"] = json!({"codex_access_token": "at-x", "claude_oauth_token": "t"});
     validate(&value).unwrap();
+    value["models"] = json!({"openrouter_api_key": "sk-or-x", "anthropic_api_key": "k"});
+    validate(&value).unwrap();
 }
 
 #[test]

@@ -69,11 +69,13 @@ fn the_form_builds_a_profile_matching_profile_py() {
     let mut subscriptions = no_models;
     subscriptions.set(Field::CodexAccessToken, "at-fixtureCodexToken".into());
     subscriptions.set(Field::ClaudeOauthToken, "sk-ant-oat01-fixture".into());
+    subscriptions.set(Field::OpenrouterApiKey, "sk-or-fixture".into());
     assert_eq!(
         profile(&subscriptions, OWNER).unwrap()["models"],
         json!({
             "codex_access_token": "at-fixtureCodexToken",
             "claude_oauth_token": "sk-ant-oat01-fixture",
+            "openrouter_api_key": "sk-or-fixture",
         })
     );
 }

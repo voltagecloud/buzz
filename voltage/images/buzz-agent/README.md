@@ -127,6 +127,7 @@ Credentials are excluded from checkpoints. Profile access through IRSA still nee
 | `codex_access_token` | ChatGPT Business or Enterprise seat | `CODEX_ACCESS_TOKEN` |
 | `anthropic_api_key` | Anthropic API billing | `ANTHROPIC_API_KEY` |
 | `claude_oauth_token` | Claude subscription seat | `CLAUDE_CODE_OAUTH_TOKEN` |
+| `openrouter_api_key` | OpenRouter billing | `OPENROUTER_API_KEY`; `BUZZ_AGENT_PROVIDER=openrouter` unless the agent sets one |
 
 To use both subscriptions in parallel, enroll `codex_access_token` and `claude_oauth_token` together. Neither has a refresh token, so any number of Sandboxes can use them at once.
 - **Codex:** a workspace owner allows [Codex access tokens](https://learn.chatgpt.com/docs/enterprise/access-tokens); the developer creates one (`at-…`) at `chatgpt.com/admin/access-tokens`, within the workspace's expiry limit. Re-enroll before it expires.
@@ -134,7 +135,8 @@ To use both subscriptions in parallel, enroll `codex_access_token` and `claude_o
 
 A profile can contain `openai_api_key` or `codex_access_token`, not both: Codex reads the access token first, so mixing them would hide which account runs.
 A profile can contain `anthropic_api_key` or `claude_oauth_token`, not both. Claude Code prefers an API key, so mixing them would bill the API silently.
-The bootstrap refuses an inherited `OPENAI_API_KEY`, `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or `CLAUDE_CODE_OAUTH_TOKEN`.
+`openrouter_api_key` serves the Buzz agent runtime (`buzz-agent`), which can run any OpenRouter model: set the agent's model to an OpenRouter model ID such as `qwen/qwen3-coder`.
+The bootstrap refuses an inherited `OPENAI_API_KEY`, `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, or `OPENROUTER_API_KEY`.
 
 Keep the API keys and the Codex access token out of `models` to use the Codex setup gate for manual model-account enrollment; the gate refuses them.
 `claude_oauth_token` is not an API key, so a profile with it can still use the gate.

@@ -419,4 +419,14 @@ fn the_launch_follows_the_desktops_policy() {
     assert_eq!(goose.launch.policy_env["GOOSE_MODE"], "auto");
     assert_eq!(goose.launch.policy_env["BUZZ_ACP_MODEL"], "opus");
     assert!(goose.env.contains_key("ANTHROPIC_MODEL"));
+
+    // The Buzz agent reads its startup model, such as an OpenRouter model ID, itself.
+    config.runtime = "buzz-agent".into();
+    config.model = "qwen/qwen3-coder".into();
+    let buzz = config.spec("Ada", None);
+    assert_eq!(
+        buzz.launch.policy_env["BUZZ_AGENT_MODEL"],
+        "qwen/qwen3-coder"
+    );
+    assert!(!buzz.launch.policy_env.contains_key("BUZZ_ACP_MODEL"));
 }

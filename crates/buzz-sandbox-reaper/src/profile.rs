@@ -23,6 +23,7 @@ const MODEL_FIELDS: &[&str] = &[
     "codex_access_token",
     "anthropic_api_key",
     "claude_oauth_token",
+    "openrouter_api_key",
 ];
 
 /// Why a profile was refused: one of `profile.py`'s messages.

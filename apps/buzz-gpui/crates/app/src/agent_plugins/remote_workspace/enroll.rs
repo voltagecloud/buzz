@@ -34,10 +34,11 @@ pub enum Field {
     ClaudeOauthToken,
     OpenaiApiKey,
     AnthropicApiKey,
+    OpenrouterApiKey,
 }
 
 impl Field {
-    pub const ALL: [Field; 12] = [
+    pub const ALL: [Field; 13] = [
         Field::Developer,
         Field::GitName,
         Field::GitEmail,
@@ -50,6 +51,7 @@ impl Field {
         Field::ClaudeOauthToken,
         Field::OpenaiApiKey,
         Field::AnthropicApiKey,
+        Field::OpenrouterApiKey,
     ];
 
     /// Masked, and cleared once the form is sent.
@@ -62,6 +64,7 @@ impl Field {
                 | Field::OpenaiApiKey
                 | Field::AnthropicApiKey
                 | Field::ClaudeOauthToken
+                | Field::OpenrouterApiKey
         )
     }
 
@@ -79,6 +82,7 @@ impl Field {
             Field::OpenaiApiKey => "OpenAI API key",
             Field::AnthropicApiKey => "Anthropic API key",
             Field::ClaudeOauthToken => "Claude subscription token",
+            Field::OpenrouterApiKey => "OpenRouter API key",
         }
     }
 
@@ -89,6 +93,7 @@ impl Field {
             Field::CodexAccessToken => Some("codex_access_token"),
             Field::AnthropicApiKey => Some("anthropic_api_key"),
             Field::ClaudeOauthToken => Some("claude_oauth_token"),
+            Field::OpenrouterApiKey => Some("openrouter_api_key"),
             _ => None,
         }
     }
@@ -223,6 +228,7 @@ pub fn validate(profile: &Value) -> Result<(), String> {
         "codex_access_token",
         "anthropic_api_key",
         "claude_oauth_token",
+        "openrouter_api_key",
     ];
     require(
         models

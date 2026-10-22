@@ -128,21 +128,26 @@ if mode in ('manual-gate', 'gate-api-key'):
     print('PASS: rotated shared profile with a Claude subscription token reaches manual account-login gate')
     raise SystemExit(0)
 expected = {'OPENAI_API_KEY':'synthetic-profile-openai', 'ANTHROPIC_API_KEY':'synthetic-profile-anthropic',
-            'CLAUDE_CODE_OAUTH_TOKEN':None, 'SCCACHE_WEBDAV_PASSWORD':'synthetic-profile-depot', 'BUZZ_GIT_IDENTITY':'user'}
+            'CLAUDE_CODE_OAUTH_TOKEN':None, 'OPENROUTER_API_KEY':None, 'BUZZ_AGENT_PROVIDER':None,
+            'SCCACHE_WEBDAV_PASSWORD':'synthetic-profile-depot', 'BUZZ_GIT_IDENTITY':'user'}
 if mode == 'claude-oauth':
     rotate({'openai_api_key':'synthetic-profile-openai', 'claude_oauth_token':'synthetic-profile-claude-oauth'})
     expected.update(ANTHROPIC_API_KEY=None, CLAUDE_CODE_OAUTH_TOKEN='synthetic-profile-claude-oauth')
 if mode == 'subscriptions':
-    # Both subscriptions in one profile, for Codex and Claude Code in parallel.
-    rotate({'codex_access_token':'at-synthetic-profile-codex', 'claude_oauth_token':'synthetic-profile-claude-oauth'})
+    # Both subscriptions in one profile, for Codex and Claude Code in parallel, and
+    # OpenRouter for the Buzz agent runtime.
+    rotate({'codex_access_token':'at-synthetic-profile-codex', 'claude_oauth_token':'synthetic-profile-claude-oauth',
+            'openrouter_api_key':'synthetic-profile-openrouter'})
     expected.update(OPENAI_API_KEY=None, ANTHROPIC_API_KEY=None, CODEX_ACCESS_TOKEN='at-synthetic-profile-codex',
-                    CLAUDE_CODE_OAUTH_TOKEN='synthetic-profile-claude-oauth')
+                    CLAUDE_CODE_OAUTH_TOKEN='synthetic-profile-claude-oauth',
+                    OPENROUTER_API_KEY='synthetic-profile-openrouter', BUZZ_AGENT_PROVIDER='openrouter')
 if mode == 'no-depot':
     # An unreadable Depot credential turns the remote cache off; the session still starts.
     # Earlier modes rotated the shared fixture profile, so restore its original models.
     rotate({'openai_api_key':'synthetic-profile-openai', 'anthropic_api_key':'synthetic-profile-anthropic'})
     expected.update(SCCACHE_WEBDAV_PASSWORD=None)
 if mode == 'inherited-codex': env['CODEX_ACCESS_TOKEN'] = 'at-synthetic-unselected-account'
+if mode == 'inherited-openrouter': env['OPENROUTER_API_KEY'] = 'synthetic-unselected-account'
 if mode == 'wrong-owner': env['BUZZ_ACP_AGENT_OWNER'] = 'b'*64
 if mode == 'wrong-developer': env['BUZZ_DEVELOPER_ID'] = 'bob'
 if mode == 'mixed-model': env['OPENAI_API_KEY'] = 'synthetic-unselected-account'
@@ -223,7 +228,7 @@ def main():
         receipt = json.loads(result.stdout)
         print('PASS: one developer enrollment; wrong GitHub actor cannot replace it', flush=True)
         modes = ['valid']*5 + ['wrong-owner', 'wrong-developer', 'mixed-model', 'inherited-claude',
-                               'inherited-codex', 'symlink', 'missing', 'gate-api-key', 'claude-oauth',
+                               'inherited-codex', 'inherited-openrouter', 'symlink', 'missing', 'gate-api-key', 'claude-oauth',
                                'subscriptions', 'no-depot', 'manual-gate']
         for mode in modes:
             result = subprocess.run([*base, '-e', 'BUZZ_DEVELOPER_PROFILE_ARN='+receipt['arn'],

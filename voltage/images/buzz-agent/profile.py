@@ -14,12 +14,13 @@ import tomllib
 MAX_BYTES = 65536
 DIRECTORY = Path('/home/agent/.config/buzz-agent')
 FIELDS = {'version', 'developer', 'owner_pubkey', 'git', 'github', 'via', 'models'}
-MODEL_FIELDS = {'openai_api_key', 'codex_access_token', 'anthropic_api_key', 'claude_oauth_token'}
+MODEL_FIELDS = {'openai_api_key', 'codex_access_token', 'anthropic_api_key', 'claude_oauth_token',
+                'openrouter_api_key'}
 # The Codex device-login gate refuses these: billed API keys and a Codex access token.
-API_KEY_FIELDS = {'openai_api_key', 'codex_access_token', 'anthropic_api_key'}
+API_KEY_FIELDS = {'openai_api_key', 'codex_access_token', 'anthropic_api_key', 'openrouter_api_key'}
 # Inherited values would override or mix with the profile's selected accounts.
 INHERITED_MODEL_VARIABLES = ('OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_ACCESS_TOKEN', 'ANTHROPIC_API_KEY',
-                             'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN')
+                             'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'OPENROUTER_API_KEY')
 # The shared Depot cache credential: the via profile's `depot` service, read from the vault.
 DEPOT_SERVICE = 'depot'
 
@@ -205,6 +206,11 @@ def bootstrap():
         env['CODEX_ACCESS_TOKEN'] = profile['models']['codex_access_token']
     if 'anthropic_api_key' in profile['models']:
         env['ANTHROPIC_API_KEY'] = profile['models']['anthropic_api_key']
+    if 'openrouter_api_key' in profile['models']:
+        # The Buzz agent runtime routes any OpenRouter model; an agent's own
+        # BUZZ_AGENT_PROVIDER still wins.
+        env['OPENROUTER_API_KEY'] = profile['models']['openrouter_api_key']
+        env.setdefault('BUZZ_AGENT_PROVIDER', 'openrouter')
     # The Codex setup session cannot use the Claude token, and its gate refuses CLAUDE_* variables.
     if 'claude_oauth_token' in profile['models'] and not setup_mode:
         env['CLAUDE_CODE_OAUTH_TOKEN'] = profile['models']['claude_oauth_token']
