@@ -138,3 +138,14 @@ fn the_forwarded_payload_keeps_only_the_managers_fields() {
     assert_eq!(payload["agent"], raw["agent"]);
     assert_eq!(payload["request_id"], "r-1");
 }
+
+#[test]
+fn a_stop_waits_at_most_two_minutes() {
+    let long = Duration::from_secs(600);
+    assert_eq!(time_limit(Op::Stop, long), STOP_WITHIN);
+    assert_eq!(
+        time_limit(Op::Stop, Duration::from_secs(30)),
+        Duration::from_secs(30)
+    );
+    assert_eq!(time_limit(Op::Deploy, long), long);
+}
