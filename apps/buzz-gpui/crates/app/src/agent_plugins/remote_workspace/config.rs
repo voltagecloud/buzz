@@ -9,6 +9,22 @@ use std::collections::BTreeMap;
 /// relay, to run each thread's Sandbox: a developer needs only their Buzz key.
 pub const RELAY: &str = "relay";
 
+/// Voltage's staging Sandbox manager, which every Remote workspace agent asks
+/// (cd `charts/buzz-sandbox-manager`). Its key is public; rotating it needs a
+/// new build.
+pub const MANAGER_PUBKEY: &str = "1881c0c6186c81c00e607f9dcd9b6c655c49cd9a0227054e764a78e6829d31fd";
+
+/// The effort levels Settings offers, applied as the session's
+/// `thought_level` option; a level the model lacks leaves its default.
+pub const EFFORTS: &[(&str, &str)] = &[
+    ("", "Harness default"),
+    ("low", "Low"),
+    ("medium", "Medium"),
+    ("high", "High"),
+    ("xhigh", "Extra high"),
+    ("max", "Max"),
+];
+
 /// What the relay provider takes; the manager decides the rest.
 const RELAY_FIELDS: &[&str] = &["relay_url", "manager_pubkey", "sandbox", "timeout_seconds"];
 
@@ -20,6 +36,8 @@ pub struct Runtime {
     command: &'static str,
     args: &'static [&'static str],
     default_env: &'static [(&'static str, &'static str)],
+    /// How Settings explains the Model field for this harness.
+    pub model_help: &'static str,
 }
 
 pub const RUNTIMES: &[Runtime] = &[
@@ -29,6 +47,7 @@ pub const RUNTIMES: &[Runtime] = &[
         command: "claude-agent-acp",
         args: &[],
         default_env: &[],
+        model_help: "A Claude model ID, such as claude-opus-5-5. Empty uses Claude Code's default.",
     },
     Runtime {
         id: "codex",
@@ -36,13 +55,7 @@ pub const RUNTIMES: &[Runtime] = &[
         command: "codex-acp",
         args: &[],
         default_env: &[],
-    },
-    Runtime {
-        id: "goose",
-        label: "Goose",
-        command: "goose",
-        args: &["acp"],
-        default_env: &[("GOOSE_MODE", "auto")],
+        model_help: "An OpenAI model ID, as Codex's /model lists it. Empty uses Codex's default.",
     },
     Runtime {
         id: "buzz-agent",
@@ -50,6 +63,7 @@ pub const RUNTIMES: &[Runtime] = &[
         command: "buzz-agent",
         args: &[],
         default_env: &[("MCP_HOOK_SERVERS", "*")],
+        model_help: "Required. With an OpenRouter key, an OpenRouter model ID such as qwen/qwen3-coder.",
     },
 ];
 
@@ -65,6 +79,10 @@ pub struct Config {
     pub runtime: String,
     /// Empty uses the harness's default.
     pub model: String,
+    /// One of [`EFFORTS`]; empty uses the model's default.
+    pub effort: String,
+    /// Fast mode, on models that offer it.
+    pub fast: bool,
     pub instructions: String,
     pub parallelism: u32,
 }
@@ -77,6 +95,8 @@ impl Default for Config {
             env: BTreeMap::new(),
             runtime: RUNTIMES[0].id.into(),
             model: String::new(),
+            effort: String::new(),
+            fast: false,
             instructions: String::new(),
             parallelism: 1,
         }
@@ -112,6 +132,10 @@ impl Config {
             env,
             runtime,
             model: text("model").unwrap_or_default(),
+            effort: text("effort")
+                .filter(|effort| EFFORTS.iter().any(|(id, _)| id == effort))
+                .unwrap_or_default(),
+            fast: value.get("fast").and_then(Value::as_bool).unwrap_or(false),
             instructions: text("instructions").unwrap_or_default(),
             parallelism: value
                 .get("parallelism")
@@ -129,6 +153,8 @@ impl Config {
             "env": self.env,
             "runtime": self.runtime,
             "model": self.model,
+            "effort": self.effort,
+            "fast": self.fast,
             "instructions": self.instructions,
             "parallelism": self.parallelism,
         })
@@ -189,6 +215,13 @@ impl Config {
                 _ => "BUZZ_ACP_MODEL",
             };
             set(key, self.model.trim().into());
+        }
+        // buzz-acp applies both as session options when the model offers them.
+        if !self.effort.is_empty() {
+            set("BUZZ_ACP_EFFORT_LEVEL", self.effort.clone());
+        }
+        if self.fast {
+            set("BUZZ_ACP_FAST_MODE", "on".into());
         }
         let title: String = name.chars().filter(|c| !c.is_control()).collect();
         if !title.trim().is_empty() {

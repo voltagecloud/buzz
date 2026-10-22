@@ -9,6 +9,7 @@ mod enroll;
 mod enroll_form;
 mod recovery;
 mod settings;
+mod signing;
 
 use crate::agent_activity::local::WorkOutcome;
 use crate::agents2::runtime::HostLink;

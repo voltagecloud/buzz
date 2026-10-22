@@ -2,7 +2,7 @@
 //! manager stores, sent as the signed-in owner. Its tokens are masked,
 //! cleared once sent, and never saved.
 
-use super::enroll::{self, Field, Outcome, Values};
+use super::enroll::{Field, Outcome, Values};
 use crate::agent_plugins::tabs::field;
 use crate::community::{AppState, IdentityState};
 use buzz_identity::Identity;
@@ -22,8 +22,9 @@ pub struct EnrollForm {
 }
 
 impl EnrollForm {
-    /// `developer` prefills the developer ID.
-    pub fn new(developer: &str, window: &mut Window, cx: &mut App) -> Self {
+    /// The Git email starts as this device's `git config --global user.email`.
+    pub fn new(window: &mut Window, cx: &mut App) -> Self {
+        let email = local_git_email();
         let inputs = Field::ALL
             .into_iter()
             .filter(|field| *field != Field::ViaProfile)
@@ -31,8 +32,12 @@ impl EnrollForm {
                 let state = cx.new(|cx| {
                     let state = InputState::new(window, cx).masked(field.secret());
                     match field {
-                        Field::Developer => state.default_value(developer.to_owned()),
-                        Field::AnthropicApiKey | Field::ClaudeOauthToken | Field::OpenaiApiKey => {
+                        Field::GitEmail => state
+                            .placeholder("A verified email on your GitHub account")
+                            .default_value(email.clone()),
+                        Field::CodexAccessToken => state.placeholder("Optional · at-…"),
+                        Field::ClaudeOauthToken => state.placeholder("Optional · sk-ant-oat01-…"),
+                        Field::OpenaiApiKey | Field::AnthropicApiKey | Field::OpenrouterApiKey => {
                             state.placeholder("Optional")
                         }
                         _ => state,
@@ -74,18 +79,12 @@ impl EnrollForm {
             .update(cx, |state, cx| state.set_value(text, window, cx));
     }
 
-    /// Takes the profile for `owner` out of the form, leaving its tokens
-    /// cleared whether or not it is valid.
-    pub fn submit(
-        &self,
-        owner: &str,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Result<serde_json::Value, String> {
+    /// Takes the form's values to send, leaving its tokens cleared.
+    pub fn submit(&self, window: &mut Window, cx: &mut App) -> Values {
         let mut values = self.values(cx);
         let sent = values.submit();
         self.write(&values, window, cx);
-        enroll::profile(&sent, owner)
+        sent
     }
 
     pub fn render(&self, owner: Option<&str>, disabled: bool, c: &Colors) -> Div {
@@ -131,8 +130,10 @@ impl EnrollForm {
             .gap(space::S4)
             .child(div().text_label_sm().child("Enroll profile"))
             .child(div().text_body_sm().text_color(c.text_subtle).child(
-                "The Sandbox manager stores this profile for your Sandboxes. Sent encrypted \
-                     to the manager and signed as you; tokens are never saved here.",
+                "Once per developer: every one of your Remote workspace agents uses it. Enrolling \
+                     creates a signing key for your agents' commits and adds it to your GitHub \
+                     account. Sent encrypted to the Sandbox manager and signed as you; tokens \
+                     are never saved here.",
             ))
             .child(field(
                 "Buzz owner",
@@ -142,9 +143,7 @@ impl EnrollForm {
                 None,
                 c,
             ))
-            .child(row(&[Field::Developer]))
-            .child(row(&[Field::GitName, Field::GitEmail, Field::SigningKey]))
-            .child(row(&[Field::GithubLogin, Field::GithubToken]))
+            .child(row(&[Field::GithubToken, Field::GitEmail]))
             .child(field(
                 Field::ViaProfile.label(),
                 TextArea::new(&self.via)
@@ -164,6 +163,20 @@ impl EnrollForm {
             ]))
             .children(status)
     }
+}
+
+/// `git config --global user.email` on this device, or empty.
+fn local_git_email() -> String {
+    std::process::Command::new("git")
+        .args(["config", "--global", "user.email"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|email| email.trim().to_owned())
+        .unwrap_or_default()
 }
 
 /// The signed-in owner.

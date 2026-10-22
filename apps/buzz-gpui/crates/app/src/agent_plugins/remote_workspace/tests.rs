@@ -1,5 +1,5 @@
 use super::config::Config;
-use super::settings::{Draft, parse, relay_fields};
+use super::settings::{Draft, parse};
 use super::*;
 use crate::agents2::attention::{Channels, EventData, EventWatch, TimerWatch};
 use crate::agents2::runtime::{AgentAttention, AgentHandle, CancelSource, Working, always_current};
@@ -305,20 +305,35 @@ fn validation_follows_each_providers_schema() {
     }
 }
 
+/// Settings asks the agent's community and the build's manager, whatever
+/// the saved config names, and saves effort and fast mode.
 #[test]
-fn the_relay_field_starts_as_the_agents_community() {
+fn settings_use_the_community_and_the_builds_manager() {
+    let saved = Config::read(&config());
+    let draft = Draft {
+        effort: "xhigh",
+        fast: true,
+        ..relay_draft("wss://community.example", super::config::MANAGER_PUBKEY)
+    };
+    let config = parse(&saved, draft).unwrap();
     assert_eq!(
-        relay_fields(&Config::default(), "wss://community.example"),
-        ("wss://community.example".into(), String::new())
+        config.provider_config,
+        json!({
+            "relay_url": "wss://community.example",
+            "manager_pubkey": super::config::MANAGER_PUBKEY,
+            "sandbox": true,
+        })
     );
-    let saved = Config::read(&json!({
-        "provider": "relay",
-        "provider_config": {"relay_url": RELAY, "manager_pubkey": MANAGER},
-    }));
-    assert_eq!(
-        relay_fields(&saved, "wss://community.example"),
-        (RELAY.into(), MANAGER.into())
-    );
+    assert_eq!((config.effort.as_str(), config.fast), ("xhigh", true));
+    let spec = config.spec("Ada", None);
+    assert_eq!(spec.launch.policy_env["BUZZ_ACP_EFFORT_LEVEL"], "xhigh");
+    assert_eq!(spec.launch.policy_env["BUZZ_ACP_FAST_MODE"], "on");
+    // Defaults leave both to the harness; an unknown effort reads as the default.
+    let plain = Config::read(&json!({"effort": "turbo", "fast": "yes"}));
+    assert_eq!((plain.effort.as_str(), plain.fast), ("", false));
+    let spec = plain.spec("Ada", None);
+    assert!(!spec.launch.policy_env.contains_key("BUZZ_ACP_EFFORT_LEVEL"));
+    assert!(!spec.launch.policy_env.contains_key("BUZZ_ACP_FAST_MODE"));
 }
 
 #[tokio::test]
@@ -377,12 +392,11 @@ fn the_launch_follows_the_desktops_policy() {
         vec!["BUZZ_CHECKPOINT_PREFIX"]
     );
 
-    config.runtime = "goose".into();
-    let goose = config.spec("Ada", None);
-    assert_eq!(goose.launch.args, vec!["acp"]);
-    assert_eq!(goose.launch.policy_env["GOOSE_MODE"], "auto");
-    assert_eq!(goose.launch.policy_env["BUZZ_ACP_MODEL"], "opus");
-    assert!(goose.env.contains_key("ANTHROPIC_MODEL"));
+    config.runtime = "codex".into();
+    let codex = config.spec("Ada", None);
+    assert_eq!(codex.launch.command, "codex-acp");
+    assert_eq!(codex.launch.policy_env["BUZZ_ACP_MODEL"], "opus");
+    assert!(codex.env.contains_key("ANTHROPIC_MODEL"));
 
     // The Buzz agent reads its startup model, such as an OpenRouter model ID, itself.
     config.runtime = "buzz-agent".into();
