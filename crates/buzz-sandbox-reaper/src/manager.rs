@@ -18,6 +18,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use crate::config::{is_dns_label, is_owner, CONFIG_VERSION};
+use crate::enroll::{self, Enrollment};
 
 /// How long received event ids and finished responses are kept.
 pub const REPLAY_WINDOW_SECS: u64 = 600;
@@ -41,8 +42,20 @@ const _: () = assert!(REPLAY_WINDOW_SECS > buzz_session_control::EXPIRATION_SECS
 /// namespace each one's requests may touch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagerConfig {
-    /// Owner pubkey to its developer namespace.
-    namespaces: HashMap<PublicKey, String>,
+    /// Owner pubkey to its developer.
+    developers: HashMap<PublicKey, Developer>,
+}
+
+/// One configured developer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Developer {
+    /// The Terraform `developers` key.
+    pub id: String,
+    pub namespace: String,
+    /// The secret `enroll` writes the developer's profile to.
+    pub profile_secret_arn: String,
+    /// The secret's region, from its ARN.
+    pub region: String,
 }
 
 #[derive(Deserialize)]
@@ -61,8 +74,7 @@ struct DeveloperEntry {
     /// The developer's Buzz owner pubkey (64 lowercase hex).
     owner_pubkey: String,
     namespace: String,
-    /// Where `enroll` will write the developer's profile. Validated now,
-    /// used once enrollment lands.
+    /// Where `enroll` writes the developer's profile.
     profile_secret_arn: String,
 }
 
@@ -91,8 +103,28 @@ fn is_developer_id(id: &str) -> bool {
     id.len() <= 32 && is_dns_label(id)
 }
 
-fn is_secret_arn(arn: &str) -> bool {
-    arn.starts_with("arn:") && arn.contains(":secretsmanager:")
+/// `profile.py`'s `secret_region`: the region of a profile secret that
+/// belongs to `developer`, `arn:aws:secretsmanager:<region>:<account>:secret:
+/// voltage/staging/agents/<developer>/profile-<6 letters or digits>`. Checked
+/// at load, so one developer's owner can never reach another's secret.
+fn profile_secret_region<'a>(arn: &'a str, developer: &str) -> Option<&'a str> {
+    let (region, rest) = arn
+        .strip_prefix("arn:aws:secretsmanager:")?
+        .split_once(':')?;
+    let (account, name) = rest.split_once(":secret:")?;
+    let suffix = name
+        .strip_prefix("voltage/staging/agents/")?
+        .strip_prefix(developer)?
+        .strip_prefix("/profile-")?;
+    let valid = !region.is_empty()
+        && region
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && account.len() == 12
+        && account.bytes().all(|b| b.is_ascii_digit())
+        && suffix.len() == 6
+        && suffix.bytes().all(|b| b.is_ascii_alphanumeric());
+    valid.then_some(region)
 }
 
 impl ManagerConfig {
@@ -110,7 +142,7 @@ impl ManagerConfig {
         if file.developers.is_empty() {
             return Err(ManagerConfigError::NoDevelopers);
         }
-        let mut namespaces = HashMap::new();
+        let mut developers = HashMap::new();
         for (id, developer) in file.developers {
             let invalid = |field| ManagerConfigError::InvalidField {
                 developer: id.clone(),
@@ -126,24 +158,30 @@ impl ManagerConfig {
             if !is_dns_label(&developer.namespace) {
                 return Err(invalid("namespace"));
             }
-            if !is_secret_arn(&developer.profile_secret_arn) {
-                return Err(invalid("profile_secret_arn"));
-            }
-            if namespaces.insert(owner, developer.namespace).is_some() {
+            let region = profile_secret_region(&developer.profile_secret_arn, &id)
+                .ok_or_else(|| invalid("profile_secret_arn"))?
+                .to_string();
+            let entry = Developer {
+                id: id.clone(),
+                namespace: developer.namespace,
+                profile_secret_arn: developer.profile_secret_arn,
+                region,
+            };
+            if developers.insert(owner, entry).is_some() {
                 return Err(ManagerConfigError::DuplicateOwner { developer: id });
             }
         }
-        Ok(Self { namespaces })
+        Ok(Self { developers })
     }
 
-    /// The namespace of the developer whose owner key is `owner`.
-    pub fn namespace(&self, owner: &PublicKey) -> Option<&str> {
-        self.namespaces.get(owner).map(String::as_str)
+    /// The developer whose owner key is `owner`.
+    pub fn developer(&self, owner: &PublicKey) -> Option<&Developer> {
+        self.developers.get(owner)
     }
 
     /// How many developers the manager serves.
     pub fn len(&self) -> usize {
-        self.namespaces.len()
+        self.developers.len()
     }
 }
 
@@ -164,8 +202,32 @@ pub struct RequestKey {
 /// An authorized request ready to run.
 pub struct Job {
     pub key: RequestKey,
-    pub request: Request,
-    pub target: Target,
+    pub work: Work,
+}
+
+/// What a job runs.
+pub enum Work {
+    /// A provider protocol request, against the owner's namespace.
+    Provider { request: Request, target: Target },
+    /// Steps 5 and 6 of enrollment: the GitHub login check and the write.
+    Enroll {
+        developer: Developer,
+        profile: serde_json::Value,
+    },
+}
+
+impl Work {
+    /// Run to the `done` response.
+    pub async fn run(self, manager: &Manager) -> serde_json::Value {
+        match self {
+            Work::Provider { request, target } => {
+                response_value(&provider::run(request, &target).await)
+            }
+            Work::Enroll { developer, profile } => {
+                manager.enrollment.run(&developer, profile).await
+            }
+        }
+    }
 }
 
 /// What to do with one received event.
@@ -204,6 +266,7 @@ pub struct Manager {
     client: kube::Client,
     /// `provider_config` fields set on every request (`--sandbox-provider-config`).
     defaults: serde_json::Map<String, serde_json::Value>,
+    enrollment: Enrollment,
     state: Mutex<State>,
 }
 
@@ -232,7 +295,7 @@ enum Progress {
     },
 }
 
-fn refusal(code: ErrorCode, message: &str) -> serde_json::Value {
+pub(crate) fn refusal(code: ErrorCode, message: &str) -> serde_json::Value {
     response_value(&Response::failed(ProviderError::refused(code, message)))
 }
 
@@ -252,12 +315,18 @@ fn op_matches(op: Op, request: &Request) -> bool {
 }
 
 impl Manager {
-    pub fn new(keys: Keys, config: ManagerConfig, client: kube::Client) -> Self {
+    pub fn new(
+        keys: Keys,
+        config: ManagerConfig,
+        client: kube::Client,
+        enrollment: Enrollment,
+    ) -> Self {
         Self {
             keys,
             config,
             client,
             defaults: serde_json::Map::new(),
+            enrollment,
             state: Mutex::default(),
         }
     }
@@ -303,18 +372,35 @@ impl Manager {
             Ok(owner) => owner,
             Err((code, message)) => return refused(code, message),
         };
-        let Some(namespace) = self.config.namespace(&owner) else {
+        let Some(developer) = self.config.developer(&owner) else {
             return refused(
                 ErrorCode::UnauthorizedOwner,
                 "the request's owner is not a developer this manager serves",
             );
         };
-        // 3. The payload acts for the signer.
-        let request = if op == Op::Enroll {
-            None
+        // 3. The payload acts for the signer: its agent key, or for `enroll`
+        // a valid profile of the signing owner's developer.
+        let work = if op == Op::Enroll {
+            match enroll::admit_profile(&opened.request.payload, &owner, developer) {
+                Ok(profile) => Work::Enroll {
+                    developer: developer.clone(),
+                    profile,
+                },
+                Err((code, message)) => return refused(code, message),
+            }
         } else {
             match self.payload(&opened) {
-                Ok(request) => Some(request),
+                // 6. The namespace comes from the verified owner, never the request.
+                Ok(request) => Work::Provider {
+                    request,
+                    target: Target::Managed {
+                        client: self.client.clone(),
+                        namespace: developer.namespace.clone(),
+                        agent: opened.signer,
+                        owner,
+                        defaults: self.defaults.clone(),
+                    },
+                },
                 Err(response) => return answer(response),
             }
         };
@@ -338,12 +424,6 @@ impl Manager {
             return refused(ErrorCode::ManagerBusy, "the session manager is busy; retry");
         }
         state.seen.insert(opened.event_id, now);
-        let Some(request) = request else {
-            return refused(
-                ErrorCode::UnsupportedOp,
-                "this session manager does not support enroll yet",
-            );
-        };
         // Idempotency by request_id, scoped to the signer.
         let key = RequestKey {
             signer: opened.signer,
@@ -383,23 +463,11 @@ impl Manager {
                 progress: Progress::Running { waiters: vec![to] },
             },
         );
-        // 6. The namespace comes from the verified owner, never the request.
-        let target = Target::Managed {
-            client: self.client.clone(),
-            namespace: namespace.to_string(),
-            agent: opened.signer,
-            owner,
-            defaults: self.defaults.clone(),
-        };
         Admission::Start {
             to,
             request_id: key.request_id.clone(),
             op,
-            job: Box::new(Job {
-                key,
-                request,
-                target,
-            }),
+            job: Box::new(Job { key, work }),
         }
     }
 

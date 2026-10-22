@@ -11,7 +11,8 @@ fn keys(byte: &str) -> Keys {
     Keys::parse(&byte.repeat(32)).unwrap()
 }
 
-/// The manager, the configured developer's agent and owner, and strangers.
+/// The manager, developer `dev`'s agent and owner, the owner of
+/// `another-dev` (a stranger to `dev`), and an unconfigured key.
 fn manager_keys() -> Keys {
     keys("11")
 }
@@ -33,9 +34,13 @@ fn now() -> Timestamp {
 }
 
 fn manager() -> Manager {
-    let config = ManagerConfig::parse(&config_json(&[("dev", &owner())]).to_string()).unwrap();
+    let config = ManagerConfig::parse(
+        &config_json(&[("dev", &owner()), ("another-dev", &stranger())]).to_string(),
+    )
+    .unwrap();
     let client = buzz_backend_kubernetes::sandbox_fake::client(&Default::default());
-    Manager::new(manager_keys(), config, client)
+    let enrollment = crate::enroll::tests::offline(Default::default());
+    Manager::new(manager_keys(), config, client, enrollment)
 }
 
 /// One attestation per owner, agent and conditions: signing is randomized,
@@ -138,16 +143,19 @@ async fn an_attested_fresh_deploy_starts_in_the_owners_namespace() {
         (to.requester, to.event, request_id.as_str(), op),
         (agent().public_key(), event.id, "r-1", Op::Deploy)
     );
-    assert!(matches!(job.request, Request::Deploy(_)));
     // Step 6: the payload's namespace is ignored.
-    let Target::Managed {
-        namespace,
-        agent: target_agent,
-        owner: target_owner,
-        ..
-    } = job.target
+    let Work::Provider {
+        request: Request::Deploy(_),
+        target:
+            Target::Managed {
+                namespace,
+                agent: target_agent,
+                owner: target_owner,
+                ..
+            },
+    } = job.work
     else {
-        panic!("not a managed target");
+        panic!("not a managed deploy");
     };
     assert_eq!(namespace, NAMESPACE);
     assert_eq!(target_agent, agent().public_key());
@@ -196,7 +204,10 @@ async fn requests_without_a_configured_owners_attestation_are_refused() {
     let manager = manager();
     let cases = [
         (None, "no attestation"),
-        (Some(tag(&stranger(), &agent(), "")), "unconfigured owner"),
+        (
+            Some(tag(&other_agent(), &agent(), "")),
+            "unconfigured owner",
+        ),
         (Some(tag(&owner(), &other_agent(), "")), "another agent's"),
         (Some(tag(&owner(), &agent(), "created_at<1")), "expired"),
         (
@@ -266,28 +277,87 @@ async fn a_replayed_event_is_refused() {
     assert_eq!(outcome(&manager.admit(&event, now())), "replayed_request");
 }
 
-/// Step 7: enrollment is signed by the owner key itself.
-#[tokio::test]
-async fn enroll_must_be_signed_by_a_configured_owner() {
-    let manager = manager();
-    let enroll = |signer: Keys, auth: Option<String>| Sent {
+fn enroll(signer: Keys, auth: Option<String>, profile: Value) -> Sent {
+    Sent {
         signer,
         op: Op::Enroll,
-        payload: json!({"profile": {}}),
+        payload: json!({"profile": profile}),
         auth,
         ..Sent::deploy()
-    };
+    }
+}
+
+/// A valid profile of developer `id` owned by `owner`.
+fn profile(id: &str, owner: &Keys) -> Value {
+    crate::profile::tests::valid(id, &owner.public_key().to_hex())
+}
+
+/// Step 7 and enrollment steps 1 to 4: signed by a configured owner key
+/// itself, for that owner and its own developer, with a valid profile.
+/// Each refusal has its own code.
+#[tokio::test]
+async fn enroll_is_refused_unless_the_profile_is_the_signing_owners() {
+    let manager = manager();
+    let mine = || profile("dev", &owner());
+    let mut invalid = mine();
+    invalid["github"]["login"] = json!("-not-a-login");
     let cases = [
         (
-            enroll(agent(), Some(tag(&owner(), &agent(), ""))),
+            enroll(agent(), Some(tag(&owner(), &agent(), "")), mine()),
             "signer_mismatch",
         ),
-        (enroll(stranger(), None), "unauthorized_owner"),
-        (enroll(owner(), None), "unsupported_op"),
+        (enroll(other_agent(), None, mine()), "unauthorized_owner"),
+        (
+            enroll(owner(), None, profile("dev", &stranger())),
+            "profile_owner_mismatch",
+        ),
+        // The other developer's ID, so its ARN: refused, nothing runs.
+        (
+            enroll(owner(), None, profile("another-dev", &owner())),
+            "profile_developer_mismatch",
+        ),
+        (enroll(owner(), None, invalid), "invalid_profile"),
+        (
+            Sent {
+                payload: json!({"profile": mine(), "extra": true}),
+                ..enroll(owner(), None, mine())
+            },
+            "invalid_profile",
+        ),
+        (enroll(owner(), None, mine()), "start"),
     ];
     for (sent, expected) in cases {
         assert_eq!(admit(&manager, &sent), expected);
     }
+    // The refusal is the image's message, which names no value.
+    let mut incomplete = mine();
+    incomplete.as_object_mut().unwrap().remove("depot");
+    let invalid = manager.admit(&enroll(owner(), None, incomplete).event(), now());
+    let Admission::Done { response, .. } = invalid else {
+        panic!("not refused");
+    };
+    assert_eq!(
+        response["error"],
+        "Profile fields are incomplete or unsupported"
+    );
+}
+
+/// An accepted enroll targets the signing owner's developer, so its ARN.
+#[tokio::test]
+async fn enroll_runs_for_the_signing_owners_developer() {
+    let manager = manager();
+    let sent = enroll(stranger(), None, profile("another-dev", &stranger()));
+    let Admission::Start { job, .. } = manager.admit(&sent.event(), now()) else {
+        panic!("not started");
+    };
+    let Work::Enroll { developer, profile } = job.work else {
+        panic!("not an enrollment");
+    };
+    assert_eq!(developer.id, "another-dev");
+    assert!(developer
+        .profile_secret_arn
+        .ends_with("/agents/another-dev/profile-AbCdEf"));
+    assert_eq!(profile["developer"], "another-dev");
 }
 
 /// An unknown envelope version or op is refused with its request id.
@@ -468,12 +538,28 @@ fn manager_config_maps_each_owner_to_its_namespace() {
     )
     .unwrap();
     assert_eq!(config.len(), 2);
-    assert_eq!(config.namespace(&owner().public_key()), Some(NAMESPACE));
     assert_eq!(
-        config.namespace(&stranger().public_key()),
+        config.developer(&owner().public_key()).unwrap().region,
+        "us-west-2"
+    );
+    assert_eq!(
+        config
+            .developer(&owner().public_key())
+            .map(|d| d.namespace.as_str()),
+        Some(NAMESPACE)
+    );
+    assert_eq!(
+        config
+            .developer(&stranger().public_key())
+            .map(|d| d.namespace.as_str()),
         Some("buzz-agent-staging-another-dev")
     );
-    assert_eq!(config.namespace(&agent().public_key()), None);
+    assert_eq!(
+        config
+            .developer(&agent().public_key())
+            .map(|d| d.namespace.as_str()),
+        None
+    );
 }
 
 #[test]
@@ -525,6 +611,17 @@ fn manager_config_refuses_each_invalid_field_and_names_it() {
         (
             "/developers/dev/profile_secret_arn",
             json!("voltage/staging"),
+            invalid("dev", "profile_secret_arn"),
+        ),
+        // Another developer's secret, so `dev`'s owner could never write it.
+        (
+            "/developers/dev/profile_secret_arn",
+            json!("arn:aws:secretsmanager:us-west-2:000000000000:secret:voltage/staging/agents/devx/profile-AbCdEf"),
+            invalid("dev", "profile_secret_arn"),
+        ),
+        (
+            "/developers/dev/profile_secret_arn",
+            json!("arn:aws:secretsmanager:us-west-2:000000000000:secret:voltage/staging/agents/dev/profile-AbCdE"),
             invalid("dev", "profile_secret_arn"),
         ),
         (
