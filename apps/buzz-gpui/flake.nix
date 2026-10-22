@@ -76,6 +76,32 @@
             sourceRoot=.
           '';
         };
+        # The Sandbox providers that buzz-gpui-voltage's host runs, from the
+        # root workspace: buzz-backend-kubernetes (a session on the user's
+        # cluster) and buzz-backend-relay (a session through the Sandbox
+        # manager). Building one root crate loads every root member.
+        providersArgs = {
+          pname = "buzz-sandbox-providers";
+          inherit version;
+          src = pkgs.lib.cleanSourceWith {
+            src = ../..;
+            filter = path: type:
+              let
+                rel = pkgs.lib.removePrefix (toString ../.. + "/") (toString path);
+                under = dir: rel == dir || pkgs.lib.hasPrefix (dir + "/") rel;
+                above = dir: pkgs.lib.hasPrefix (rel + "/") dir;
+                kept = [ "Cargo.toml" "Cargo.lock" ".cargo" "crates" "examples/countdown-bot" ];
+              in
+              sourceFilter path type && builtins.any (dir: under dir || above dir) kept;
+          };
+          cargoExtraArgs = "--locked -p buzz-backend-kubernetes -p buzz-backend-relay";
+          doCheck = false;
+          nativeBuildInputs = with pkgs; [ pkg-config cmake perl protobuf ];
+          buildInputs = with pkgs; [ openssl ];
+        };
+        providers = craneLib.buildPackage (providersArgs // {
+          cargoArtifacts = craneLib.buildDepsOnly providersArgs;
+        });
         buzzdArgs = {
           pname = "buzzd";
           inherit version src;
@@ -152,7 +178,7 @@
         # The app in the layout the .deb installs (crates/app/Cargo.toml):
         # the binary finds its plugins in ../share/buzz-gpui/plugins and
         # the Node that runs them in ../lib/buzz-gpui/node.
-        gpuiPackage = { pname, features ? [ ] }:
+        gpuiPackage = { pname, features ? [ ], sandboxProviders ? null }:
           let
             cargoFeatures = pkgs.lib.optionalString (features != [ ])
               " --features ${pkgs.lib.concatStringsSep "," features}";
@@ -188,6 +214,9 @@
                 install -Dm644 assets/icons/buzz-$size.png \
                   $out/share/icons/hicolor/''${size}x''${size}/apps/buzz-gpui.png
               done
+            '' + pkgs.lib.optionalString (sandboxProviders != null) ''
+              # The host finds providers beside its executable first.
+              ln -s ${sandboxProviders}/bin/buzz-backend-* $out/bin/
             '';
             passthru = { inherit plugins; };
             meta = {
@@ -209,12 +238,15 @@
         packages.default = self.packages.${system}.buzzd;
 
         packages.buzz-gpui = gpuiPackage { pname = "buzz-gpui"; };
-        # Voltage's build: remote workspaces (Kubernetes Sandboxes) through the
-        # buzz-backend-kubernetes provider, found on PATH or in ~/.local/bin.
+        # Voltage's build: remote workspaces (Kubernetes Sandboxes), with the
+        # buzz-backend-kubernetes and buzz-backend-relay providers beside the
+        # app.
         packages.buzz-gpui-voltage = gpuiPackage {
           pname = "buzz-gpui-voltage";
           features = [ "voltage-sandbox" ];
+          sandboxProviders = providers;
         };
+        packages.buzz-sandbox-providers = providers;
 
         devShells.default = pkgs.mkShell {
           # The Rust toolchain buzzd is built with, so local and CI checks match.
