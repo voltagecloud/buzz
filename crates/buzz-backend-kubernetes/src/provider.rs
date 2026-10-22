@@ -12,6 +12,8 @@ use crate::{client, cluster, config, env, identity, naming, reconcile, sandbox};
 const RELAY_MESH_PROVIDER: &str = "relay-mesh";
 
 /// Where an operation gets its cluster client and namespace.
+// One `Target` exists per request, so boxing `Managed` would save nothing.
+#[allow(clippy::large_enum_variant)]
 pub enum Target {
     /// The caller's kubeconfig (`provider_config.context`) and
     /// `provider_config.namespace`, as the desktop runs this provider.
@@ -29,6 +31,10 @@ pub enum Target {
         /// `provider_config` fields the manager sets on every request, such
         /// as `image` and `pod_options`. They replace the request's own.
         defaults: serde_json::Map<String, serde_json::Value>,
+        /// Launch environment the manager sets for the owner's developer, such
+        /// as the profile and checkpoint location. It replaces the request's
+        /// own values for these keys.
+        env: std::collections::BTreeMap<String, String>,
     },
 }
 
@@ -70,11 +76,18 @@ impl Target {
             agent,
             owner,
             defaults,
+            env,
             ..
         } = self
         else {
             return Ok(());
         };
+        // The user tier (`launch.env`, or `env_vars` without a launch block),
+        // so the manager's values replace the request's own.
+        match request.agent.launch.as_mut() {
+            Some(launch) => launch.env.extend(env.clone()),
+            None => request.agent.env_vars.extend(env.clone()),
+        }
         let config = request
             .provider_config
             .as_object_mut()
@@ -395,6 +408,7 @@ mod tests {
             agent: agent.public_key(),
             owner: owner.public_key(),
             defaults: serde_json::Map::new(),
+            env: Default::default(),
         }
     }
 
@@ -433,6 +447,48 @@ mod tests {
             error.message,
             "the session manager starts Sandbox sessions only"
         );
+    }
+
+    /// The manager's launch environment replaces the request's values for its
+    /// keys, in either user tier, and leaves the developer's other choices,
+    /// such as the model, effort, and fast mode, as the request sent them.
+    #[tokio::test]
+    async fn managed_env_replaces_its_keys_and_keeps_the_rest() {
+        let (agent, owner) = (nostr::Keys::generate(), nostr::Keys::generate());
+        let mut target = managed(&agent, &owner);
+        if let Target::Managed { env, .. } = &mut target {
+            env.insert("BUZZ_CHECKPOINT_PREFIX".into(), "dev/".into());
+            env.insert("BUZZ_DEVELOPER_ID".into(), "dev".into());
+        }
+        let sandbox = serde_json::json!({"sandbox": {"channel_id": uuid::Uuid::new_v4().to_string(),
+            "thread_root": "a".repeat(64)}});
+        let mut launched: wire::DeployRequest = serde_json::from_value(serde_json::json!({
+            "agent": {"relay_url": "wss://r", "private_key_nsec": "nsec1x",
+                "launch": {"command": "claude-agent-acp",
+                    "env": {"BUZZ_CHECKPOINT_PREFIX": "someone-else/", "KEEP": "1"},
+                    "policy_env": {"ANTHROPIC_MODEL": "claude-opus-5-5",
+                        "BUZZ_ACP_EFFORT_LEVEL": "xhigh", "BUZZ_ACP_FAST_MODE": "on"}}},
+            "provider_config": sandbox,
+        }))
+        .unwrap();
+        target.confine(&mut launched).unwrap();
+        let launch = launched.agent.launch.as_ref().unwrap();
+        assert_eq!(launch.env["BUZZ_CHECKPOINT_PREFIX"], "dev/");
+        assert_eq!(launch.env["BUZZ_DEVELOPER_ID"], "dev");
+        assert_eq!(launch.env["KEEP"], "1");
+        assert_eq!(launch.policy_env["ANTHROPIC_MODEL"], "claude-opus-5-5");
+        assert_eq!(launch.policy_env["BUZZ_ACP_EFFORT_LEVEL"], "xhigh");
+        assert_eq!(launch.policy_env["BUZZ_ACP_FAST_MODE"], "on");
+        assert!(launched.agent.env_vars.is_empty());
+        // Without a launch block, the legacy user tier carries them.
+        let mut plain: wire::DeployRequest = serde_json::from_value(serde_json::json!({
+            "agent": {"relay_url": "wss://r", "private_key_nsec": "nsec1x",
+                "env_vars": {"BUZZ_DEVELOPER_ID": "someone-else"}},
+            "provider_config": sandbox,
+        }))
+        .unwrap();
+        target.confine(&mut plain).unwrap();
+        assert_eq!(plain.agent.env_vars["BUZZ_DEVELOPER_ID"], "dev");
     }
 
     /// The manager's defaults replace the request's fields and may not set a

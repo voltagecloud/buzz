@@ -90,7 +90,7 @@ Developer tools and configured MCP servers remain available; the previous text-o
 
 Each developer enrolls one profile from the Buzz app (GPUI), through the Sandbox manager over the relay. Every one of their Sandboxes and workers loads it.
 Terraform creates the empty Secrets Manager secret per developer; the manager writes it, and the developer's `agent-workspace` and `agent-worker` service accounts can only read its exact ARN.
-The manager sets `BUZZ_DEVELOPER_ID` and `BUZZ_DEVELOPER_PROFILE_ARN` in each launch from its developer config, and fills in the profile's `developer` from the signing owner's entry.
+The manager sets `BUZZ_DEVELOPER_ID`, `BUZZ_DEVELOPER_PROFILE_ARN`, `BUZZ_CHECKPOINT_BUCKET`, and `BUZZ_CHECKPOINT_PREFIX` (`<id>/`) in each launch from its developer config, replacing any value the request sends, and fills in the profile's `developer` from the signing owner's entry.
 [profile.example.json](profile.example.json) shows the stored shape.
 
 The bootstrap checks the profile against Buzz's verified owner, then writes Git identity, GitHub, via, the agent signing key, and the vault's Depot credential to private workspace files.

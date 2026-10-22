@@ -217,7 +217,7 @@ fn payload(op: &str, agent: &Keys, owner: &Keys, auth: &str) -> Value {
 async fn deploy_and_stop_run_end_to_end_over_the_relay() {
     let (manager_keys, agent_keys, owner) = (keys("11"), keys("22"), keys("33"));
     let config = ManagerConfig::parse(
-        &json!({"version": 1, "developers": {"dev": {
+        &json!({"version": 1, "checkpoint_bucket": "fixture-checkpoints", "developers": {"dev": {
             "owner_pubkey": owner.public_key().to_hex(),
             "namespace": "buzz-agent-staging-dev",
             "profile_secret_arn": "arn:aws:secretsmanager:us-west-2:000000000000:secret:voltage/staging/agents/dev/profile-AbCdEf"}}})
@@ -350,7 +350,7 @@ async fn enroll_runs_end_to_end_and_its_events_carry_no_profile_value() {
     let (manager_keys, owner) = (keys("11"), keys("33"));
     let arn = "arn:aws:secretsmanager:us-west-2:000000000000:secret:voltage/staging/agents/dev/profile-AbCdEf";
     let config = ManagerConfig::parse(
-        &json!({"version": 1, "developers": {"dev": {"owner_pubkey": owner.public_key().to_hex(),
+        &json!({"version": 1, "checkpoint_bucket": "fixture-checkpoints", "developers": {"dev": {"owner_pubkey": owner.public_key().to_hex(),
             "namespace": "buzz-agent-staging-dev", "profile_secret_arn": arn}}})
         .to_string(),
     )

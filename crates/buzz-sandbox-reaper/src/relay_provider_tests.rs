@@ -33,7 +33,7 @@ async fn start_manager(
     tokio::task::JoinHandle<()>,
 ) {
     let config = ManagerConfig::parse(
-        &json!({"version": 1, "developers": {"dev": {
+        &json!({"version": 1, "checkpoint_bucket": "fixture-checkpoints", "developers": {"dev": {
             "owner_pubkey": keys("33").public_key().to_hex(),
             "namespace": "buzz-agent-staging-dev",
             "profile_secret_arn": "arn:aws:secretsmanager:us-west-2:000000000000:secret:voltage/staging/agents/dev/profile-AbCdEf"}}})

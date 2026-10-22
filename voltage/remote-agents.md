@@ -47,6 +47,7 @@ flowchart LR
 
 - **The Buzz app** sends requests as you. Each request is a Nostr event of kind 24210. Its content is encrypted to the Sandbox manager with NIP-44.
 - **The Sandbox manager** accepts requests only from owner keys in its developer list. It starts a Sandbox in your namespace for each thread.
+- **You choose** the harness, model, effort, and fast mode for each agent. **The manager sets** where your profile and checkpoints are, so a request cannot choose them.
 - **The Sandbox** loads your profile, starts the harness you chose, and replies in the thread as your agent.
 - **The reaper** removes Sandboxes after their sessions end.
 

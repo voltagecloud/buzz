@@ -151,6 +151,7 @@ async fn an_attested_fresh_deploy_starts_in_the_owners_namespace() {
                 namespace,
                 agent: target_agent,
                 owner: target_owner,
+                env,
                 ..
             },
     } = job.work
@@ -158,6 +159,19 @@ async fn an_attested_fresh_deploy_starts_in_the_owners_namespace() {
         panic!("not a managed deploy");
     };
     assert_eq!(namespace, NAMESPACE);
+    // The manager, not the request, says where the profile and checkpoints are.
+    assert_eq!(
+        env,
+        std::collections::BTreeMap::from([
+            ("BUZZ_DEVELOPER_ID".to_string(), "dev".to_string()),
+            (
+                "BUZZ_DEVELOPER_PROFILE_ARN".to_string(),
+                "arn:aws:secretsmanager:us-west-2:000000000000:secret:voltage/staging/agents/dev/profile-AbCdEf".to_string(),
+            ),
+            ("BUZZ_CHECKPOINT_BUCKET".to_string(), "fixture-checkpoints".to_string()),
+            ("BUZZ_CHECKPOINT_PREFIX".to_string(), "dev/".to_string()),
+        ])
+    );
     assert_eq!(target_agent, agent().public_key());
     assert_eq!(target_owner, owner().public_key());
 }
@@ -543,7 +557,7 @@ fn config_json(developers: &[(&str, &Keys)]) -> Value {
             (id.to_string(), entry)
         })
         .collect();
-    json!({"version": 1, "developers": developers})
+    json!({"version": 1, "checkpoint_bucket": "fixture-checkpoints", "developers": developers})
 }
 
 #[test]
@@ -644,6 +658,16 @@ fn manager_config_refuses_each_invalid_field_and_names_it() {
             json!({}),
             Err(ManagerConfigError::NoDevelopers),
         ),
+        (
+            "/checkpoint_bucket",
+            json!("Not_A_Bucket"),
+            Err(ManagerConfigError::InvalidCheckpointBucket),
+        ),
+        (
+            "/checkpoint_bucket",
+            json!("ab"),
+            Err(ManagerConfigError::InvalidCheckpointBucket),
+        ),
     ];
     for (pointer, bad, expected) in cases {
         let mut value = config_json(&[("dev", &owner())]);
@@ -660,6 +684,12 @@ fn manager_config_refuses_each_invalid_field_and_names_it() {
     }
     let mut value = config_json(&[("dev", &owner())]);
     value["developers"]["dev"]["extra"] = json!(true);
+    assert!(matches!(
+        ManagerConfig::parse(&value.to_string()),
+        Err(ManagerConfigError::Malformed(_))
+    ));
+    value = config_json(&[("dev", &owner())]);
+    value.as_object_mut().unwrap().remove("checkpoint_bucket");
     assert!(matches!(
         ManagerConfig::parse(&value.to_string()),
         Err(ManagerConfigError::Malformed(_))
