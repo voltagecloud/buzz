@@ -691,6 +691,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-secretsmanager"
+version = "1.120.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "832dc9d5dbd19c0ac6b24e21ef9f3e553695d0f3928de7134567407b3b7a447d"
+dependencies = [
+ "arc-swap",
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-schema",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 1.4.2",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-sts"
 version = "1.119.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1977,6 +2002,7 @@ dependencies = [
  "anyhow",
  "aws-config",
  "aws-sdk-s3",
+ "aws-sdk-secretsmanager",
  "axum",
  "buzz-backend-kubernetes",
  "buzz-backend-relay",
@@ -1994,6 +2020,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "nostr 0.44.7",
  "proptest",
+ "reqwest 0.13.4",
  "rustls",
  "serde",
  "serde_json",
@@ -2002,9 +2029,11 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.29.0",
  "tokio-util",
+ "toml",
  "tower 0.5.3",
  "tracing",
  "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]
@@ -3118,7 +3147,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccc2776f0c61eca1ca32528f85548abd1a4be8fb53d1b21c013e4f18da1e7090"
 dependencies = [
  "data-encoding",
- "syn 1.0.109",
+ "syn 2.0.117",
 ]
 
 [[package]]

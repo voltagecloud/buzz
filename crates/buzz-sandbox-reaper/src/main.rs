@@ -10,9 +10,11 @@
 //! provider requests, received over the Buzz relay, in their namespaces.
 
 mod config;
+mod enroll;
 mod evidence;
 mod manager;
 mod plan;
+mod profile;
 mod reconcile;
 mod serve;
 mod server;

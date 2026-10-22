@@ -220,7 +220,7 @@ async fn deploy_and_stop_run_end_to_end_over_the_relay() {
         &json!({"version": 1, "developers": {"dev": {
             "owner_pubkey": owner.public_key().to_hex(),
             "namespace": "buzz-agent-staging-dev",
-            "profile_secret_arn": "arn:aws:secretsmanager:us-west-2:000000000000:secret:dev"}}})
+            "profile_secret_arn": "arn:aws:secretsmanager:us-west-2:000000000000:secret:voltage/staging/agents/dev/profile-AbCdEf"}}})
         .to_string(),
     )
     .unwrap();
@@ -229,6 +229,7 @@ async fn deploy_and_stop_run_end_to_end_over_the_relay() {
         manager_keys.clone(),
         config,
         sandbox_fake::client(&cluster),
+        crate::enroll::tests::offline(Default::default()),
     ));
     let mut relay = FakeRelay::start().await;
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
@@ -324,6 +325,118 @@ async fn deploy_and_stop_run_end_to_end_over_the_relay() {
     for event in relay.published_by(&agent_keys.public_key()) {
         let json = serde_json::to_string(&event).unwrap();
         assert!(!json.contains(&nsec) && !json.contains("sk-ant-fixture"));
+    }
+
+    stop.send(()).unwrap();
+    tokio::time::timeout(BOUND, server).await.unwrap().unwrap();
+}
+
+/// Every string in `value`, recursively.
+fn strings(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::String(s) => out.push(s.clone()),
+        Value::Array(items) => items.iter().for_each(|v| strings(v, out)),
+        Value::Object(map) => map.values().for_each(|v| strings(v, out)),
+        _ => {}
+    }
+}
+
+/// `enroll` over the relay: the owner key's request is written to its
+/// developer's secret and answered with the version; a refusal is a `done`
+/// too. No event, in either direction, carries a profile value or a code.
+#[tokio::test]
+async fn enroll_runs_end_to_end_and_its_events_carry_no_profile_value() {
+    use crate::enroll::{tests::FakeStore, Enrollment, GitHub};
+    let (manager_keys, owner) = (keys("11"), keys("33"));
+    let arn = "arn:aws:secretsmanager:us-west-2:000000000000:secret:voltage/staging/agents/dev/profile-AbCdEf";
+    let config = ManagerConfig::parse(
+        &json!({"version": 1, "developers": {"dev": {"owner_pubkey": owner.public_key().to_hex(),
+            "namespace": "buzz-agent-staging-dev", "profile_secret_arn": arn}}})
+        .to_string(),
+    )
+    .unwrap();
+    let github =
+        crate::enroll::tests::fake_github(&[("ghp_fixtureGitHubTokenDoNotLeak", "ada-l")]).await;
+    let written = crate::enroll::tests::Written::default();
+    let enrollment = Enrollment::new(
+        GitHub::new(&github).unwrap(),
+        Arc::new(FakeStore {
+            written: written.clone(),
+            fail: None,
+        }),
+    );
+    let client = sandbox_fake::client(&Default::default());
+    let manager = Arc::new(Manager::new(
+        manager_keys.clone(),
+        config,
+        client,
+        enrollment,
+    ));
+    let mut relay = FakeRelay::start().await;
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let url = relay.url.clone();
+    let server = tokio::spawn(async move {
+        run(manager, &url, None, async {
+            let _ = stopped.await;
+        })
+        .await;
+    });
+    relay.wait_for_subscriber(&manager_keys.public_key()).await;
+    let mut client = Agent::connect(&mut relay, owner.clone(), manager_keys.public_key()).await;
+
+    let profile = crate::profile::tests::valid("dev", &owner.public_key().to_hex());
+    let request = Envelope::new(Op::Enroll, "enroll-1", json!({"profile": profile}));
+    let replies = client.request(&request, None).await;
+    let statuses: Vec<Status> = replies.iter().map(|reply| reply.status).collect();
+    assert_eq!(statuses, [Status::Accepted, Status::Done]);
+    assert_eq!(
+        replies[1].response,
+        Some(json!({"ok": true, "version_id": "version-1"}))
+    );
+    {
+        let written = written.lock().unwrap();
+        assert_eq!(written.len(), 1);
+        assert_eq!(written[0].0, arn);
+        assert_eq!(
+            serde_json::from_str::<Value>(&written[0].2).unwrap(),
+            profile
+        );
+    }
+
+    let mut foreign = profile.clone();
+    foreign["developer"] = json!("someone-else");
+    let request = Envelope::new(Op::Enroll, "enroll-2", json!({"profile": foreign}));
+    let refused = client.request(&request, None).await;
+    assert_eq!(refused.len(), 1);
+    assert_eq!(
+        refused[0].response.as_ref().unwrap()["code"],
+        "profile_developer_mismatch"
+    );
+    assert_eq!(written.lock().unwrap().len(), 1);
+
+    let mut secrets = Vec::new();
+    strings(&profile, &mut secrets);
+    secrets.retain(|value| value.len() >= 5 && *value != owner.public_key().to_hex());
+    secrets.extend(
+        [
+            "version-1",
+            "profile_developer_mismatch",
+            "enroll-1",
+            "enroll",
+        ]
+        .map(String::from),
+    );
+    let mut events = relay.published_by(&owner.public_key());
+    events.extend(relay.published_by(&manager_keys.public_key()));
+    assert_eq!(events.len(), 5);
+    for event in events {
+        let json = serde_json::to_string(&event).unwrap();
+        for secret in &secrets {
+            assert!(
+                !json.contains(secret.as_str()),
+                "{secret} visible in {json}"
+            );
+        }
     }
 
     stop.send(()).unwrap();

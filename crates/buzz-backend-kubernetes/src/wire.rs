@@ -231,6 +231,17 @@ pub enum ErrorCode {
     UnsupportedOp,
     /// The manager does not support the request's envelope version.
     UnsupportedVersion,
+    // Enrollment refusals (§Relay transport).
+    /// The profile's `owner_pubkey` is not the key that signed `enroll`.
+    ProfileOwnerMismatch,
+    /// The profile's `developer` is not the signing owner's developer ID.
+    ProfileDeveloperMismatch,
+    /// The profile fails the image's profile validation.
+    InvalidProfile,
+    /// GitHub does not report the profile's `github.login` for its token.
+    GithubLoginMismatch,
+    /// The profile could not be written to the developer's secret.
+    ProfileStoreFailed,
     /// Client-side: the manager did not accept the request within 30 s.
     ManagerUnavailable,
     /// Client-side: the manager accepted the request but did not finish it
