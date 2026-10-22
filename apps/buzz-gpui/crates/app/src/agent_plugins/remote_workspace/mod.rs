@@ -23,10 +23,9 @@ use gpui_kit::*;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Registered as `voltage.remote-workspace/kubernetes`: the key never
-/// changes, though Sandboxes now always start through the Sandbox manager.
+/// Registered as `voltage.remote-workspace/sandbox`.
 pub const PLUGIN: &str = "voltage.remote-workspace";
-pub const TYPE_ID: &str = "kubernetes";
+pub const TYPE_ID: &str = "sandbox";
 
 /// Over the host's 10 minutes to start a session, under the 30-minute
 /// limit.

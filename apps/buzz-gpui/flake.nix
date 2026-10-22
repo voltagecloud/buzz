@@ -76,10 +76,9 @@
             sourceRoot=.
           '';
         };
-        # The Sandbox providers that buzz-gpui-voltage's host runs, from the
-        # root workspace: buzz-backend-kubernetes (a session on the user's
-        # cluster) and buzz-backend-relay (a session through the Sandbox
-        # manager). Building one root crate loads every root member.
+        # The Sandbox provider that buzz-gpui-voltage's host runs, from the
+        # root workspace: buzz-backend-relay, which asks the Sandbox manager
+        # over the relay. Building one root crate loads every root member.
         providersArgs = {
           pname = "buzz-sandbox-providers";
           inherit version;
@@ -94,7 +93,7 @@
               in
               sourceFilter path type && builtins.any (dir: under dir || above dir) kept;
           };
-          cargoExtraArgs = "--locked -p buzz-backend-kubernetes -p buzz-backend-relay";
+          cargoExtraArgs = "--locked -p buzz-backend-relay";
           doCheck = false;
           nativeBuildInputs = with pkgs; [ pkg-config cmake perl protobuf ];
           buildInputs = with pkgs; [ openssl ];
@@ -238,9 +237,8 @@
         packages.default = self.packages.${system}.buzzd;
 
         packages.buzz-gpui = gpuiPackage { pname = "buzz-gpui"; };
-        # Voltage's build: remote workspaces (Kubernetes Sandboxes), with the
-        # buzz-backend-kubernetes and buzz-backend-relay providers beside the
-        # app.
+        # Voltage's build: remote workspaces (Kubernetes Sandboxes through the
+        # Sandbox manager), with the buzz-backend-relay provider beside the app.
         packages.buzz-gpui-voltage = gpuiPackage {
           pname = "buzz-gpui-voltage";
           features = [ "voltage-sandbox" ];

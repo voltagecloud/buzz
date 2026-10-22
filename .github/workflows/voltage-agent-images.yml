@@ -253,7 +253,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -O test-native-agent.py "$IMAGE"
-          for test in policy setup accounts checkpoint checkpoint-storage restore gate worker cache; do
+          for test in policy accounts checkpoint checkpoint-storage restore gate worker cache; do
             echo "==> test-$test.py"
             python3 "test-$test.py" "$IMAGE"
           done

@@ -85,11 +85,8 @@ COPY --chmod=0644 voltage/images/buzz-agent/subagents.md /etc/buzz-agent/subagen
 COPY --chmod=0755 voltage/images/buzz-agent/heavy-bin/ /opt/buzz-heavy/bin/
 COPY --chmod=0755 voltage/images/buzz-agent/gh.sh /usr/local/bin/gh
 COPY --chmod=0755 voltage/images/buzz-agent/via.sh /usr/local/bin/via
-COPY --chmod=0755 voltage/images/buzz-agent/gpg.sh /usr/local/bin/buzz-gpg
 COPY --chmod=0755 voltage/images/buzz-agent/entrypoint.sh /usr/local/bin/sprig-entrypoint
-COPY --chmod=0755 voltage/images/buzz-agent/setup.js /usr/local/bin/buzz-agent-setup
-RUN ln -s /usr/local/bin/buzz-agent-setup /usr/local/bin/buzz-setup-complete \
-    && ln -s /usr/local/bin/buzz-heavy /usr/local/bin/buzz-agent-gate \
+RUN ln -s /usr/local/bin/buzz-heavy /usr/local/bin/buzz-agent-gate \
     && for name in buzz-acp buzz-agent buzz-dev-mcp rg tree buzz git-credential-nostr git-sign-nostr; do \
         ln -s sprig "/usr/local/bin/$name"; \
     done

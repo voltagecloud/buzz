@@ -85,7 +85,6 @@ voltage/
 !voltage/images/buzz-agent/package.json
 !voltage/images/buzz-agent/package-lock.json
 !voltage/images/buzz-agent/entrypoint.sh
-!voltage/images/buzz-agent/setup.js
 !voltage/images/buzz-agent/account.py
 !voltage/images/buzz-agent/profile.py
 !voltage/images/buzz-agent/cache.py
@@ -93,7 +92,6 @@ voltage/
 !voltage/images/buzz-agent/checkpoint-gitleaks.toml
 !voltage/images/buzz-agent/gh.sh
 !voltage/images/buzz-agent/via.sh
-!voltage/images/buzz-agent/gpg.sh
 !voltage/images/buzz-agent/heavy.py
 !voltage/images/buzz-agent/heavy-bin/
 !voltage/images/buzz-agent/worker.py

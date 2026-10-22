@@ -32,7 +32,6 @@ bash test-image.sh buzz-agent:local
 bash test-harness.sh buzz-agent:local
 python3 -O test-native-agent.py buzz-agent:local
 python3 test-policy.py buzz-agent:local
-python3 test-setup.py buzz-agent:local
 python3 test-accounts.py buzz-agent:local
 python3 test-checkpoint.py buzz-agent:local
 python3 test-checkpoint-storage.py buzz-agent:local
@@ -56,7 +55,7 @@ Alloy retains sanitized events in Loki; workspace deletion must not delete the c
 
 The provider supplies `BUZZ_SANDBOX_POD_UID` through the downward API and binds its Secret to `BUZZ_SANDBOX_INITIAL_POD_UID`.
 If these UIDs differ, the entrypoint refuses startup. A replacement Pod requires explicit workspace recovery.
-New sessions load the developer's current account profile; interactive model logins still require separate enrollment.
+New sessions load the developer's current account profile.
 Checkpoints use the developer's S3 prefix and service account from Terraform.
 The harness stops adapter processes before invoking `buzz-agent-checkpoint save`, including cancellation during startup.
 A failed save retains the Sandbox for recovery; do not delete its workspace.
@@ -89,35 +88,14 @@ Developer tools and configured MCP servers remain available; the previous text-o
 
 ## Developer accounts
 
-Enroll GitHub, development `via`, and model accounts once per developer. Each of their five Sandboxes loads the same owner-bound profile.
-The Depot cache credential is shared through the development vault, not enrolled; see [Depot build cache](#depot-build-cache).
-Terraform creates the empty Secrets Manager secret and grants the developer's service account read-only access to its exact ARN.
+Each developer enrolls one profile from the Buzz app (GPUI), through the Sandbox manager over the relay. Every one of their Sandboxes and workers loads it.
+Terraform creates the empty Secrets Manager secret per developer; the manager writes it, and the developer's `agent-workspace` and `agent-worker` service accounts can only read its exact ARN.
+The manager sets `BUZZ_DEVELOPER_ID` and `BUZZ_DEVELOPER_PROFILE_ARN` in each launch from its developer config, and fills in the profile's `developer` from the signing owner's entry.
+[profile.example.json](profile.example.json) shows the stored shape.
 
-On the developer workstation, copy [profile.example.json](profile.example.json) to a private file outside the repository.
-Set mode `0600`, replace the placeholders, and supply the approved development via configuration as the `via.profile` string.
-Use an AWS profile with `secretsmanager:PutSecretValue` permission for the developer's profile ARN.
-Run with Python 3.11+, AWS CLI, GitHub CLI, and 1Password CLI installed:
-
-```bash
-AWS_PROFILE=tee8z python3 voltage/images/buzz-agent/profile.py enroll \
-  --arn '<profile_arn from Terraform>' \
-  --file /private/path/developer-profile.json
-```
-
-The helper verifies the GitHub login and 1Password service account before publishing. It prints only the developer ID and secret version.
-Remove the local profile file after enrollment. Never paste its contents into Buzz, Git, Terraform, tickets, or logs.
-
-Configure these public values in each agent's Buzz launch environment:
-
-```text
-BUZZ_DEVELOPER_ID=tee8z
-BUZZ_DEVELOPER_PROFILE_ARN=<profile_arn from Terraform>
-```
-
-Use that developer's `agent-workspace` service account. The bootstrap checks the profile against Buzz's verified owner before writing credentials.
-It configures Git identity, GitHub, via, and the vault's Depot credential in private workspace files. Missing profiles, owner mismatches, and unsafe paths refuse startup.
-Re-enrollment publishes a new version for new sessions. Running sessions retain their current credentials; revoke upstream tokens when required.
-Credentials are excluded from checkpoints. Profile access through IRSA still needs staging validation; the local test uses a Secrets Manager emulator.
+The bootstrap checks the profile against Buzz's verified owner, then writes Git identity, GitHub, via, the agent signing key, and the vault's Depot credential to private workspace files.
+Missing profiles, owner mismatches, and unsafe paths refuse startup. A new enrollment takes effect for new sessions; running sessions keep their credentials, so revoke upstream tokens when required.
+Credentials are excluded from checkpoints. The image test uses a Secrets Manager emulator.
 
 `models` accepts these optional credentials:
 
@@ -137,36 +115,15 @@ A profile can contain `openai_api_key` or `codex_access_token`, not both: Codex 
 A profile can contain `anthropic_api_key` or `claude_oauth_token`, not both. Claude Code prefers an API key, so mixing them would bill the API silently.
 `openrouter_api_key` serves the Buzz agent runtime (`buzz-agent`), which can run any OpenRouter model: set the agent's model to an OpenRouter model ID such as `qwen/qwen3-coder`.
 The bootstrap refuses an inherited `OPENAI_API_KEY`, `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, or `OPENROUTER_API_KEY`.
-
-Keep the API keys and the Codex access token out of `models` to use the Codex setup gate for manual model-account enrollment; the gate refuses them.
-`claude_oauth_token` is not an API key, so a profile with it can still use the gate.
-The gate session runs Codex only, so the bootstrap does not export the Claude token into it. Other Sandboxes that load the same profile receive it.
 Model credentials stay in the harness environment and are never written to workspace files. Tools that the agent runs inherit them.
 The checkpoint secret scan also refuses Claude subscription tokens.
-Do not clone one rotating Codex login cache across concurrent Sandboxes; [OpenAI's account-cache guidance](https://learn.chatgpt.com/docs/auth/ci-cd-auth) requires separate runners or serialized use.
 
-Commits are signed with an agent-only SSH key, `git.ssh_signing_key` in the profile: one OpenSSH Ed25519 private key.
+### Commit signing
+
+Every commit and tag is signed with an agent-only SSH key, `git.ssh_signing_key` in the profile: one OpenSSH Ed25519 private key.
 The GPUI enroll form generates it with `ssh-keygen` and registers its public half on the developer's GitHub account as a signing key, so commits show as Verified with the developer's verified Git email.
-The bootstrap writes it to `.config/buzz-agent/ssh-signing-key` (mode `0600`, excluded from checkpoints) and configures `gpg.format ssh` with `commit.gpgsign` and `tag.gpgsign`.
+The bootstrap writes it to `.config/buzz-agent/ssh-signing-key` (mode `0600`, excluded from checkpoints), and `buzz-agent-account init` configures `gpg.format ssh` with `commit.gpgsign` and `tag.gpgsign`. Without the key, Git refuses to commit.
 The developer's own GPG key never leaves their device. Revoke agent signing by deleting that key under GitHub → Settings → SSH and GPG keys; enrolling again creates a new one.
-
-For manual enrollment or troubleshooting in an existing Sandbox:
-
-Set `BUZZ_GIT_IDENTITY=user`, `BUZZ_GIT_NAME`, `BUZZ_GIT_EMAIL`, and `BUZZ_GIT_SIGNING_KEY` for the workspace owner. `BUZZ_GIT_SIGNING_FORMAT=ssh` makes `BUZZ_GIT_SIGNING_KEY` the path of an SSH private key; the default, `openpgp`, a key a forwarded GPG agent holds.
-The account helper configures Git to require OpenPGP signatures. `buzz-gpg` uses an available GPG agent without starting one.
-Remote signing transport still requires validation; no private key is embedded or exported by this image.
-
-From an interactive terminal in the selected Sandbox:
-
-```bash
-buzz-agent-account github --github-user tee8z
-buzz-agent-account via
-buzz-agent-account status
-```
-
-The helpers accept credentials through hidden terminal input and store them in private workspace files.
-GitHub enrollment checks the selected login. `via` uses the developer's development-vault service account and public service profile.
-Deleting the workspace removes local copies; upstream revocation remains separate.
 
 ### Depot build cache
 
@@ -182,9 +139,7 @@ secrets.token = "op://Buzz Agents Dev/Depot/credential"
 ```
 
 Without the service, or when the vault read fails, the session starts without the remote cache and logs `Depot cache unavailable`.
-To enroll a different token by hand in an existing Sandbox, run `buzz-agent-account depot --organization <organization-id>`.
 The harness and its tools inherit the cache configuration.
-For a separate interactive shell, use `buzz-agent-cache bash` after enrollment.
 The image pins Depot CLI and sccache; each repository selects its Turborepo version.
 Rust uses sccache's WebDAV backend, Turborepo uses `TURBO_API`, and Go 1.24+ uses `depot gocache`.
 Credentials stay in private runtime files and are excluded from workspace checkpoints.
@@ -203,18 +158,6 @@ python3 voltage/images/buzz-agent/test-depot.py buzz-agent:local \
 
 This builds a unique fixture in two fresh containers. The first must upload; the second must report a remote hit without cache errors.
 The test prints only counts and elapsed time. It does not persist credentials outside the disposable containers.
-
-### Codex setup gate
-
-The provider supplies `BUZZ_SETUP_MODE=codex-device-v1`, the agent public key, Pod UID, generation, image digest, random nonce, and setup deadline.
-The gate validates the runtime configuration and waits for owner enrollment before starting Buzz.
-After enrollment, invoke `buzz-setup-complete` with this public binding on stdin:
-
-```json
-{"version":1,"agent_pubkey":"<key>","pod_uid":"<uid>","generation":"<generation>","image_digest":"sha256:<digest>"}
-```
-
-The helper consumes a private, one-use acknowledgement. Timeout or termination leaves the session for explicit cleanup.
 
 ## Publish to staging
 

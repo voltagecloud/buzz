@@ -321,57 +321,6 @@ fn verify_live(sandbox: &DynamicObject, fingerprints: &Fingerprints) -> Result<(
     Ok(())
 }
 
-fn configure_setup(
-    cfg: &mut ProviderConfig,
-    identity: &naming::AgentIdentity,
-    env: &mut BTreeMap<String, String>,
-) -> Result<(), String> {
-    let Some(mode) = env.get("BUZZ_SETUP_MODE") else {
-        return Ok(());
-    };
-    if mode != "codex-device-v1"
-        || env.get("BUZZ_ACP_AGENT_COMMAND").map(String::as_str) != Some("codex-acp")
-        || env.get("BUZZ_ACP_PERMISSION_MODE").map(String::as_str) != Some("agent-full-access")
-    {
-        return Err(
-            "Sandbox account setup requires codex-device-v1, codex-acp, and agent-full-access"
-                .into(),
-        );
-    }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| "could not establish account setup time")?
-        .as_secs();
-    let (_, digest) = cfg
-        .image
-        .as_str()
-        .rsplit_once('@')
-        .ok_or("image digest is missing")?;
-    // The image acknowledges this exact Pod/agent/image generation. The Pod UID
-    // comes from the downward API, overriding any caller-supplied environment.
-    cfg.pod_options.setup_pending = true;
-    env.remove("BUZZ_SETUP_POD_UID");
-    env.extend([
-        (
-            "BUZZ_SETUP_AGENT_PUBKEY".into(),
-            identity.pubkey_hex().into(),
-        ),
-        ("BUZZ_SETUP_IMAGE_DIGEST".into(), digest.into()),
-        (
-            "BUZZ_SETUP_NONCE".into(),
-            uuid::Uuid::new_v4().simple().to_string(),
-        ),
-        ("BUZZ_SETUP_DEADLINE".into(), (now + 900).to_string()),
-        ("CODEX_HOME".into(), "/home/agent/.codex".into()),
-        (
-            "CODEX_CONFIG".into(),
-            r#"{"cli_auth_credentials_store":"file"}"#.into(),
-        ),
-        ("NO_BROWSER".into(), "1".into()),
-    ]);
-    Ok(())
-}
-
 /// Per-deploy handles and invariants.
 struct Session<'a> {
     sandboxes: Api<DynamicObject>,
@@ -417,9 +366,6 @@ pub async fn deploy(
     owner: &str,
     mut env: BTreeMap<String, String>,
 ) -> Result<String, ProviderError> {
-    let mut effective_cfg = cfg.clone();
-    configure_setup(&mut effective_cfg, identity, &mut env)?;
-    let cfg = &effective_cfg;
     if cfg.pod_options.active_deadline_seconds.is_none() {
         return Err("Sandbox requires pod_options.active_deadline_seconds".into());
     }
