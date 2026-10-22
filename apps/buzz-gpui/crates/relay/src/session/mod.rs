@@ -19,6 +19,7 @@ mod activity;
 mod admins;
 mod canvas;
 mod channels;
+mod control;
 mod delivery;
 mod disk;
 mod feedback;

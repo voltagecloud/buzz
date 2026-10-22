@@ -44,9 +44,9 @@
         sourceFilter = path: type:
           let base = baseNameOf path; in
           !(builtins.elem base [ "target" "target-deb" "dist" ".test-relay" ".claude" "docs" ]);
-        # The workspace path-depends on ../../crates/buzz-remote-sessions, so
-        # the source is the repository root with only this workspace and that
-        # crate kept; builds run from apps/buzz-gpui.
+        # The workspace path-depends on crates outside it, so the source is
+        # the repository root with only this workspace and those crates kept;
+        # builds run from apps/buzz-gpui.
         src = pkgs.lib.cleanSourceWith {
           src = ../..;
           filter = path: type:
@@ -54,7 +54,17 @@
               rel = pkgs.lib.removePrefix (toString ../.. + "/") (toString path);
               under = dir: rel == dir || pkgs.lib.hasPrefix (dir + "/") rel;
               above = dir: pkgs.lib.hasPrefix (rel + "/") dir;
-              kept = [ "apps/buzz-gpui" "crates/buzz-remote-sessions" ];
+              # buzz-session-control (remote workspace enrollment) and the
+              # root-workspace crates it builds on inherit from the root
+              # Cargo.toml.
+              kept = [
+                "apps/buzz-gpui"
+                "crates/buzz-remote-sessions"
+                "Cargo.toml"
+                "crates/buzz-session-control"
+                "crates/buzz-core"
+                "crates/buzz-sdk"
+              ];
             in
             sourceFilter path type && builtins.any (dir: under dir || above dir) kept;
         };
