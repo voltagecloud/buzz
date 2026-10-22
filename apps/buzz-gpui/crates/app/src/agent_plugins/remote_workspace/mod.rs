@@ -70,6 +70,24 @@ impl AgentType for RemoteWorkspace {
         true
     }
 
+    /// The instructions become the Sandbox harness's system prompt. A local
+    /// workspace has no meaning in a Sandbox, so it stays behind.
+    fn adopt(&self, carry: &buzz_host::api::Carry, saved: serde_json::Value) -> serde_json::Value {
+        let mut config = Config::read(&saved);
+        if let Some(instructions) = &carry.instructions {
+            config.instructions = instructions.clone();
+        }
+        config.value()
+    }
+
+    fn carry(&self, saved: &serde_json::Value) -> buzz_host::api::Carry {
+        buzz_host::api::Carry {
+            instructions: Some(Config::read(saved).instructions)
+                .filter(|text| !text.trim().is_empty()),
+            workspace: None,
+        }
+    }
+
     fn summary(&self, agent: &crate::agents2::Agent) -> Option<String> {
         let config = Config::read(&agent.config);
         let text = |name: &str| config.provider_config.get(name)?.as_str();
