@@ -430,3 +430,24 @@ fn the_launch_follows_the_desktops_policy() {
     );
     assert!(!buzz.launch.policy_env.contains_key("BUZZ_ACP_MODEL"));
 }
+
+/// Changing an agent's type to or from a Remote workspace keeps its
+/// instructions, as the harness types do; a local workspace stays behind.
+#[test]
+fn instructions_carry_across_a_type_change() {
+    let carry = buzz_host::api::Carry {
+        instructions: Some("You are Bifrost.".into()),
+        workspace: Some("~/src".into()),
+    };
+    let adopted = RemoteWorkspace.adopt(&carry, Config::default().value());
+    assert_eq!(Config::read(&adopted).instructions, "You are Bifrost.");
+    let kept = RemoteWorkspace.carry(&adopted);
+    assert_eq!(kept.instructions.as_deref(), Some("You are Bifrost."));
+    assert_eq!(kept.workspace, None);
+    assert_eq!(
+        RemoteWorkspace
+            .carry(&Config::default().value())
+            .instructions,
+        None
+    );
+}
