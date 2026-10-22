@@ -1,5 +1,5 @@
 use super::config::Config;
-use super::settings::parse;
+use super::settings::{Draft, parse, relay_fields};
 use super::*;
 use crate::agents2::attention::{Channels, EventData, EventWatch, TimerWatch};
 use crate::agents2::runtime::{AgentAttention, AgentHandle, CancelSource, Working, always_current};
@@ -227,8 +227,16 @@ async fn watches_timers_and_strangers_start_nothing() {
 #[test]
 fn settings_refuse_a_bad_provider_config() {
     let saved = Config::read(&config());
-    let parsed =
-        |provider_config: &str, env: &str| parse(&saved, "codex", "", provider_config, env, "");
+    let parsed = |provider_config: &str, env: &str| {
+        let draft = Draft {
+            provider: "kubernetes",
+            runtime: "codex",
+            provider_config,
+            env,
+            ..Default::default()
+        };
+        parse(&saved, draft)
+    };
     let config = parsed(r#"{"namespace": "agents", "sandbox": false}"#, "{}").unwrap();
     assert_eq!(config.provider_config["sandbox"], true);
     assert_eq!(config.runtime, "codex");
@@ -255,6 +263,125 @@ fn settings_refuse_a_bad_provider_config() {
             "{provider_config} {env}"
         );
     }
+}
+
+const MANAGER: &str = "5be7aa6bbcf1e8a4b4b4bd0b2a2a0e0c3fa4a4b7f5a1d1cb6d1d2e7f9c0a1b2c";
+
+/// A relay draft for `relay` and `manager`.
+fn relay_draft<'a>(relay: &'a str, manager: &'a str) -> Draft<'a> {
+    Draft {
+        provider: "relay",
+        runtime: "claude",
+        relay_url: relay,
+        manager_pubkey: manager,
+        env: "{}",
+        ..Default::default()
+    }
+}
+
+#[test]
+fn settings_take_the_relay_provider_by_its_relay_and_manager_only() {
+    let saved = Config::read(&config());
+    let config = parse(&saved, relay_draft(" wss://relay.example ", MANAGER)).unwrap();
+    assert_eq!(config.provider, "relay");
+    assert_eq!(
+        config.provider_config,
+        json!({"relay_url": RELAY, "manager_pubkey": MANAGER, "sandbox": true})
+    );
+    // The Kubernetes JSON is not read for the relay provider.
+    let draft = Draft {
+        provider_config: "{",
+        ..relay_draft(RELAY, MANAGER)
+    };
+    assert!(parse(&saved, draft).is_ok());
+    let (upper, long) = (MANAGER.to_uppercase(), format!("{MANAGER}0"));
+    for (relay, manager) in [
+        ("https://relay.example", MANAGER),
+        ("wss://", MANAGER),
+        ("", MANAGER),
+        (RELAY, ""),
+        (RELAY, upper.as_str()),
+        (RELAY, &MANAGER[1..]),
+        (RELAY, long.as_str()),
+    ] {
+        assert!(
+            parse(&saved, relay_draft(relay, manager)).is_err(),
+            "{relay} {manager}"
+        );
+    }
+}
+
+#[test]
+fn validation_follows_each_providers_schema() {
+    let relay = |provider_config: serde_json::Value| {
+        Config::read(&json!({"provider": "relay", "provider_config": provider_config}))
+    };
+    let base = json!({"relay_url": RELAY, "manager_pubkey": MANAGER});
+    assert!(relay(base.clone()).validate().is_ok());
+    let mut timed = base.clone();
+    timed["timeout_seconds"] = json!(900);
+    assert!(relay(timed.clone()).validate().is_ok());
+    for (key, value) in [
+        ("timeout_seconds", json!(901)),
+        ("timeout_seconds", json!(0)),
+        ("namespace", json!("agents")),
+        ("image", json!("buzz-agent")),
+    ] {
+        let mut config = base.clone();
+        config[key] = value;
+        assert!(relay(config).validate().is_err(), "{key}");
+    }
+    // Kubernetes keeps its own config; the relay's fields are no help there.
+    let kubernetes = Config::read(&json!({"provider": "kubernetes", "provider_config": base}));
+    assert!(kubernetes.validate().is_ok());
+    let other = Config::read(&json!({"provider": "docker", "provider_config": {}}));
+    assert!(other.validate().is_err());
+    let ids: Vec<_> = super::config::PROVIDERS.iter().map(|(id, _)| *id).collect();
+    assert_eq!(ids, buzz_remote_sessions::THREAD_PROVIDERS);
+}
+
+#[test]
+fn the_relay_field_starts_as_the_agents_community() {
+    let kubernetes = Config::read(&config());
+    assert_eq!(
+        relay_fields(&kubernetes, "wss://community.example"),
+        ("wss://community.example".into(), String::new())
+    );
+    let saved = Config::read(&json!({
+        "provider": "relay",
+        "provider_config": {"relay_url": RELAY, "manager_pubkey": MANAGER},
+    }));
+    assert_eq!(
+        relay_fields(&saved, "wss://community.example"),
+        (RELAY.into(), MANAGER.into())
+    );
+}
+
+#[tokio::test]
+async fn a_relay_mention_starts_its_session_through_the_host() {
+    let (link, sent) = host().await;
+    let mut delivery = delivery(
+        Trigger::Mention {
+            event: mention(&"c".repeat(64)),
+        },
+        link,
+    );
+    delivery.config = json!({
+        "provider": "relay",
+        "provider_config": {"relay_url": RELAY, "manager_pubkey": MANAGER},
+    });
+    let started = deliver(delivery, RELAY.into()).await.unwrap();
+    assert!(matches!(started, Some((_, Ok(())))), "{started:?}");
+    let [SandboxRequest::Start { session, .. }] = &sent.lock().unwrap()[..] else {
+        panic!("expected one Start");
+    };
+    assert_eq!(session.spec.provider, "relay");
+    let config: serde_json::Value =
+        serde_json::from_str(&session.spec.provider_config_json).unwrap();
+    assert_eq!(
+        config,
+        json!({"relay_url": RELAY, "manager_pubkey": MANAGER, "sandbox": true})
+    );
 }
 
 #[test]
