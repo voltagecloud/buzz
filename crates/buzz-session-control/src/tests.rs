@@ -170,9 +170,10 @@ fn golden_events_open_to_their_envelopes() {
 
 #[test]
 fn envelopes_round_trip_for_every_op_and_status() {
-    for op in [Op::Info, Op::Deploy, Op::Stop, Op::Enroll] {
+    for op in [Op::Info, Op::Deploy, Op::Stop, Op::Enroll, Op::Profile] {
         let request = Request::new(op, "r-1", json!({"op": op.as_str()}));
-        let auth = (op != Op::Enroll).then(auth_tag);
+        let owner_signed = matches!(op, Op::Enroll | Op::Profile);
+        let auth = (!owner_signed).then(auth_tag);
         let event = build_request(
             &agent(),
             &manager().public_key(),
@@ -184,7 +185,7 @@ fn envelopes_round_trip_for_every_op_and_status() {
         let opened = open_request(&event, &manager()).unwrap();
         assert_eq!(opened.request, request);
         assert_eq!(opened.event_id, event.id);
-        assert_eq!(opened.auth_tag.is_some(), op != Op::Enroll);
+        assert_eq!(opened.auth_tag.is_some(), !owner_signed);
         assert_eq!(opened.expiration, Some(now() + EXPIRATION_SECS));
     }
     let request = request_event(&secret_request());
