@@ -1158,7 +1158,15 @@ async fn submit_event_authed(
         auth_method: crate::handlers::ingest::HttpAuthMethod::Nip98,
     };
 
-    match crate::handlers::ingest::ingest_event(state, tenant, event, auth).await {
+    // Typing indicators are ephemeral: the HTTP bridge fans them out as a
+    // WebSocket does, without storing them, so agents the Buzz app runs show
+    // typing. Every other ephemeral kind is still refused by ingest.
+    let submitted = if kind_u32 == buzz_core::kind::KIND_TYPING_INDICATOR {
+        crate::handlers::event::publish_http_typing(state, tenant, event, pubkey).await
+    } else {
+        crate::handlers::ingest::ingest_event(state, tenant, event, auth).await
+    };
+    match submitted {
         Ok(result) => {
             let response = Json(serde_json::json!({
                 "event_id": result.event_id,
@@ -7419,6 +7427,114 @@ pub(crate) mod postgres_tests {
     /// Discriminating: restoring `status = 400u16` in bridge.rs's `Rejected` logging
     /// arm causes the CAS `status=409` assertion to fail while the 400 control
     /// continues to pass — the test is split so the regression direction is unambiguous.
+    /// Typing indicators (kind:20002) over the bridge are fanned out like a
+    /// WebSocket ephemeral event and never stored, and get its checks:
+    /// channel access, a channel `h` tag, and the authenticated signer.
+    #[test]
+    #[ignore = "requires Postgres"]
+    fn typing_over_the_bridge_is_published_not_stored_and_gated() {
+        use buzz_core::kind::KIND_TYPING_INDICATOR;
+        use buzz_db::channel::{ChannelType, ChannelVisibility};
+        use uuid::Uuid;
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current_thread runtime");
+        let state = rt
+            .block_on(bridge_handler_test_state())
+            .expect("local Postgres not reachable — start Postgres on 127.0.0.1:5432 before running ignored bridge handler tests");
+
+        let creator = Keys::generate();
+        let (host, community, open, private) = rt.block_on(async {
+            let h = format!("typing-{}.local", Uuid::new_v4().simple());
+            let community = state
+                .db
+                .ensure_configured_community(&h)
+                .await
+                .expect("ensure community");
+            let mut ids = Vec::new();
+            for visibility in [ChannelVisibility::Open, ChannelVisibility::Private] {
+                let (channel, _) = state
+                    .db
+                    .create_channel_with_id(
+                        community.id,
+                        Uuid::new_v4(),
+                        &format!("typing-{}", Uuid::new_v4().simple()),
+                        ChannelType::Stream,
+                        visibility,
+                        None,
+                        creator.public_key().to_bytes().as_slice(),
+                        None,
+                    )
+                    .await
+                    .expect("create test channel");
+                ids.push(channel.id.to_string());
+            }
+            (h, community.id, ids[0].clone(), ids[1].clone())
+        });
+
+        let agent = Keys::generate();
+        let agent_hex = agent.public_key().to_hex();
+        let typing = |channel: Option<&str>, keys: &Keys| {
+            let mut builder = EventBuilder::new(Kind::Custom(KIND_TYPING_INDICATOR as u16), "");
+            if let Some(channel) = channel {
+                builder = builder.tag(Tag::parse(["h", channel]).expect("h tag"));
+            }
+            builder.sign_with_keys(keys).expect("sign typing")
+        };
+
+        // Open channel: accepted with its id, and not stored.
+        let event = typing(Some(&open), &agent);
+        let body = serde_json::to_vec(&event).expect("serialize");
+        let (status, text) = rt.block_on(post_events_with_body(
+            state.clone(),
+            &host,
+            &agent_hex,
+            &body,
+        ));
+        assert_eq!(status, axum::http::StatusCode::OK, "{text}");
+        let receipt: serde_json::Value = serde_json::from_str(&text).expect("receipt");
+        assert_eq!(receipt["accepted"], true);
+        assert_eq!(receipt["event_id"], event.id.to_hex());
+        let stored = rt
+            .block_on(state.db.get_event_by_id(community, &event.id.to_bytes()))
+            .expect("lookup");
+        assert!(stored.is_none(), "typing must not be stored");
+
+        // A private channel the signer is not a member of.
+        let body = serde_json::to_vec(&typing(Some(&private), &agent)).expect("serialize");
+        let (status, text) = rt.block_on(post_events_with_body(
+            state.clone(),
+            &host,
+            &agent_hex,
+            &body,
+        ));
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{text}");
+        assert!(text.contains("not a channel member"), "{text}");
+
+        // No channel.
+        let body = serde_json::to_vec(&typing(None, &agent)).expect("serialize");
+        let (status, text) = rt.block_on(post_events_with_body(
+            state.clone(),
+            &host,
+            &agent_hex,
+            &body,
+        ));
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{text}");
+        assert!(text.contains("h tag"), "{text}");
+
+        // Signed by a key other than the authenticated one.
+        let body = serde_json::to_vec(&typing(Some(&open), &Keys::generate())).expect("serialize");
+        let (status, _) = rt.block_on(post_events_with_body(
+            state.clone(),
+            &host,
+            &agent_hex,
+            &body,
+        ));
+        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+    }
+
     #[test]
     #[ignore = "requires Postgres"]
     fn canvas_cas_conflict_logs_status_409_not_400() {
