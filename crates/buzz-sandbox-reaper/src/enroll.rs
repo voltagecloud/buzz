@@ -27,10 +27,11 @@ const GITHUB_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_GITHUB_BODY: usize = 256 * 1024;
 
 /// Enrollment steps 2 to 4, in order: the profile names the signing owner
-/// and that owner's developer, and passes `profile.py`'s validation.
-/// A profile without a developer ID gets the signing owner's, so a
+/// and that owner's developer, and has a partial profile's shape
+/// ([`profile::check_partial`]). The merged profile is validated when the
+/// job runs. A profile without a developer ID gets the signing owner's, so a
 /// developer never needs to know the Terraform key they are listed under.
-/// Returns the profile to store, or the refusal.
+/// Returns the profile to merge, or the refusal.
 pub fn admit_profile(
     payload: &Value,
     owner: &PublicKey,
@@ -62,7 +63,7 @@ pub fn admit_profile(
             "the profile's developer is not the signing owner's developer ID",
         ));
     }
-    profile::validate(&profile)
+    profile::check_partial(&profile)
         .map_err(|profile::Invalid(message)| (ErrorCode::InvalidProfile, message))?;
     Ok(profile)
 }
@@ -71,10 +72,26 @@ pub fn admit_profile(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StoreFailed(pub &'static str);
 
-/// Where profiles are written. A trait because Secrets Manager is a real
-/// external boundary: production uses [`SecretsManagerStore`], tests an
+/// The current version of a developer's profile secret.
+pub struct Stored {
+    pub text: Zeroizing<String>,
+    pub version_id: String,
+    /// When the version was written, as RFC 3339.
+    pub created: Option<String>,
+}
+
+/// Where profiles are read and written. A trait because Secrets Manager is a
+/// real external boundary: production uses [`SecretsManagerStore`], tests an
 /// in-memory store.
 pub trait ProfileStore: Send + Sync {
+    /// The current version of the secret `arn` in `region`, or `None` when
+    /// it has no value yet.
+    fn get<'a>(
+        &'a self,
+        arn: &'a str,
+        region: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<Stored>, StoreFailed>> + Send + 'a>>;
+
     /// Write `profile` as the new current version of the secret `arn` in
     /// `region`, and return the version id.
     fn put<'a>(
@@ -85,8 +102,8 @@ pub trait ProfileStore: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<String, StoreFailed>> + Send + 'a>>;
 }
 
-/// Secrets Manager `PutSecretValue` with the ambient credentials (IRSA
-/// in-cluster). It writes no files.
+/// Secrets Manager `GetSecretValue` and `PutSecretValue` with the ambient
+/// credentials (IRSA in-cluster). It writes no files.
 pub struct SecretsManagerStore {
     shared: aws_config::SdkConfig,
 }
@@ -106,7 +123,55 @@ impl SecretsManagerStore {
     }
 }
 
+impl SecretsManagerStore {
+    fn client(&self, region: &str) -> aws_sdk_secretsmanager::Client {
+        let config = aws_sdk_secretsmanager::config::Builder::from(&self.shared)
+            .region(aws_sdk_secretsmanager::config::Region::new(
+                region.to_string(),
+            ))
+            .build();
+        aws_sdk_secretsmanager::Client::from_conf(config)
+    }
+}
+
 impl ProfileStore for SecretsManagerStore {
+    fn get<'a>(
+        &'a self,
+        arn: &'a str,
+        region: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<Stored>, StoreFailed>> + Send + 'a>> {
+        Box::pin(async move {
+            let output = match self
+                .client(region)
+                .get_secret_value()
+                .secret_id(arn)
+                .send()
+                .await
+            {
+                Ok(output) => output,
+                // The secret exists but holds no version until the first enroll.
+                Err(SdkError::ServiceError(service))
+                    if service.err().code() == Some("ResourceNotFoundException") =>
+                {
+                    return Ok(None)
+                }
+                Err(error) => return Err(store_error(error)),
+            };
+            let created = output.created_date().and_then(|at| {
+                at.fmt(aws_sdk_secretsmanager::primitives::DateTimeFormat::DateTime)
+                    .ok()
+            });
+            match (output.secret_string(), output.version_id()) {
+                (Some(text), Some(version_id)) => Ok(Some(Stored {
+                    text: Zeroizing::new(text.to_string()),
+                    version_id: version_id.to_string(),
+                    created,
+                })),
+                _ => Ok(None),
+            }
+        })
+    }
+
     fn put<'a>(
         &'a self,
         arn: &'a str,
@@ -114,12 +179,8 @@ impl ProfileStore for SecretsManagerStore {
         profile: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<String, StoreFailed>> + Send + 'a>> {
         Box::pin(async move {
-            let config = aws_sdk_secretsmanager::config::Builder::from(&self.shared)
-                .region(aws_sdk_secretsmanager::config::Region::new(
-                    region.to_string(),
-                ))
-                .build();
-            let output = aws_sdk_secretsmanager::Client::from_conf(config)
+            let output = self
+                .client(region)
                 .put_secret_value()
                 .secret_id(arn)
                 .secret_string(profile)
@@ -218,36 +279,93 @@ impl Enrollment {
         Self { github, store }
     }
 
-    /// Check the token's GitHub login, then write the profile to the
-    /// developer's secret and answer with the new version id. The profile is
-    /// dropped, and its serialized copy zeroized, before this returns.
-    pub async fn run(&self, developer: &Developer, profile: Value) -> Value {
-        // Both are strings: the profile passed validation at admission.
-        let github = &profile["github"];
-        let token = github["token"].as_str().unwrap_or_default();
-        let login = github["login"].as_str().unwrap_or_default();
-        match self.github.login(token).await {
-            Ok(actual) if actual.eq_ignore_ascii_case(login) => {}
-            Ok(_) => {
-                return refusal(
-                    ErrorCode::GithubLoginMismatch,
-                    "the profile's GitHub token belongs to a different login",
-                )
+    /// The developer's stored profile, parsed. An unreadable stored value
+    /// counts as none, so the next enroll must send a complete profile.
+    async fn stored(&self, developer: &Developer) -> Result<Option<(Value, Stored)>, Value> {
+        match self
+            .store
+            .get(&developer.profile_secret_arn, &developer.region)
+            .await
+        {
+            Ok(Some(stored)) => Ok(serde_json::from_str(&stored.text)
+                .ok()
+                .map(|profile| (profile, stored))),
+            Ok(None) => Ok(None),
+            Err(StoreFailed(label)) => Err(refusal(
+                ErrorCode::ProfileStoreFailed,
+                &format!("could not read the stored profile ({label}); retry"),
+            )),
+        }
+    }
+
+    /// Merge `partial` into the stored profile, validate the result, check a
+    /// new GitHub token's login, then write it and answer with the new
+    /// version id and its [`profile::summary`]. Every profile copy is
+    /// dropped, and the serialized one zeroized, before this returns.
+    pub async fn run(&self, developer: &Developer, partial: Value) -> Value {
+        let stored = match self.stored(developer).await {
+            Ok(stored) => stored.map(|(profile, _)| profile),
+            Err(refused) => return refused,
+        };
+        if stored.is_none()
+            && ["git", "github", "via"]
+                .iter()
+                .any(|f| partial.get(f).is_none())
+        {
+            return refusal(
+                ErrorCode::InvalidProfile,
+                "no profile is on file yet; send the complete profile",
+            );
+        }
+        let new_token = stored.is_none() || partial.get("github").is_some();
+        let profile = profile::merge(stored, partial);
+        if let Err(profile::Invalid(message)) = profile::validate(&profile) {
+            return refusal(ErrorCode::InvalidProfile, message);
+        }
+        if new_token {
+            // Both are strings: the merged profile passed validation.
+            let github = &profile["github"];
+            let token = github["token"].as_str().unwrap_or_default();
+            let login = github["login"].as_str().unwrap_or_default();
+            match self.github.login(token).await {
+                Ok(actual) if actual.eq_ignore_ascii_case(login) => {}
+                Ok(_) => {
+                    return refusal(
+                        ErrorCode::GithubLoginMismatch,
+                        "the profile's GitHub token belongs to a different login",
+                    )
+                }
+                Err(message) => return refusal(ErrorCode::GithubLoginMismatch, message),
             }
-            Err(message) => return refusal(ErrorCode::GithubLoginMismatch, message),
         }
         let text = Zeroizing::new(profile.to_string());
-        drop(profile);
         match self
             .store
             .put(&developer.profile_secret_arn, &developer.region, &text)
             .await
         {
-            Ok(version_id) => serde_json::json!({"ok": true, "version_id": version_id}),
+            Ok(version_id) => {
+                let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                let summary = profile::summary(&profile, &version_id, Some(now));
+                serde_json::json!({"ok": true, "version_id": version_id, "profile": summary})
+            }
             Err(StoreFailed(label)) => refusal(
                 ErrorCode::ProfileStoreFailed,
                 &format!("could not store the profile ({label}); retry"),
             ),
+        }
+    }
+
+    /// The `profile` operation: the stored profile's [`profile::summary`],
+    /// or `null` when none is stored.
+    pub async fn describe(&self, developer: &Developer) -> Value {
+        match self.stored(developer).await {
+            Ok(Some((profile, stored))) => serde_json::json!({
+                "ok": true,
+                "profile": profile::summary(&profile, &stored.version_id, stored.created),
+            }),
+            Ok(None) => serde_json::json!({"ok": true, "profile": null}),
+            Err(refused) => refused,
         }
     }
 }

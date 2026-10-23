@@ -307,14 +307,16 @@ fn profile(id: &str, owner: &Keys) -> Value {
 }
 
 /// Step 7 and enrollment steps 1 to 4: signed by a configured owner key
-/// itself, for that owner and its own developer, with a valid profile.
+/// itself, for that owner and its own developer, with a partial profile's
+/// shape. The merged profile's values are validated when the job runs.
 /// Each refusal has its own code.
 #[tokio::test]
 async fn enroll_is_refused_unless_the_profile_is_the_signing_owners() {
     let manager = manager();
     let mine = || profile("dev", &owner());
+    // A new GitHub token without its login.
     let mut invalid = mine();
-    invalid["github"]["login"] = json!("-not-a-login");
+    invalid["github"].as_object_mut().unwrap().remove("login");
     let mut without_developer = mine();
     without_developer
         .as_object_mut()
@@ -358,9 +360,16 @@ async fn enroll_is_refused_unless_the_profile_is_the_signing_owners() {
             "start"
         );
     }
+    // A partial profile is admitted: its merge runs as the job.
+    let mut partial = mine();
+    partial.as_object_mut().unwrap().remove("via");
+    assert_eq!(
+        admit(&self::manager(), &enroll(owner(), None, partial)),
+        "start"
+    );
     // The refusal is the image's message, which names no value.
     let mut incomplete = mine();
-    incomplete.as_object_mut().unwrap().remove("via");
+    incomplete["via"]["unknown"] = json!("x");
     let invalid = manager.admit(&enroll(owner(), None, incomplete).event(), now());
     let Admission::Done { response, .. } = invalid else {
         panic!("not refused");
@@ -387,6 +396,44 @@ async fn enroll_runs_for_the_signing_owners_developer() {
         .profile_secret_arn
         .ends_with("/agents/another-dev/profile-AbCdEf"));
     assert_eq!(profile["developer"], "another-dev");
+}
+
+/// `profile` is owner-level like `enroll`, carries an empty payload, and
+/// describes the signing owner's developer.
+#[tokio::test]
+async fn profile_runs_only_for_the_signing_owner_with_an_empty_payload() {
+    let profile = |signer: Keys, auth: Option<String>, payload: Value| Sent {
+        signer,
+        op: Op::Profile,
+        payload,
+        auth,
+        ..Sent::deploy()
+    };
+    for (sent, expected) in [
+        (
+            profile(agent(), Some(tag(&owner(), &agent(), "")), json!({})),
+            "signer_mismatch",
+        ),
+        (
+            profile(other_agent(), None, json!({})),
+            "unauthorized_owner",
+        ),
+        (
+            profile(owner(), None, json!({"profile": {}})),
+            "invalid_profile",
+        ),
+    ] {
+        assert_eq!(admit(&manager(), &sent), expected);
+    }
+    let Admission::Start { job, .. } =
+        manager().admit(&profile(owner(), None, json!({})).event(), now())
+    else {
+        panic!("not started");
+    };
+    let Work::Profile { developer } = job.work else {
+        panic!("not a profile request");
+    };
+    assert_eq!(developer.id, "dev");
 }
 
 /// An unknown envelope version or op is refused with its request id.

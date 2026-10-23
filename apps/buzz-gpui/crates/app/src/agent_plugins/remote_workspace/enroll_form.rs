@@ -1,15 +1,17 @@
 //! The Enroll profile form in Settings: the developer profile the Sandbox
-//! manager stores, sent as the signed-in owner. Its tokens are masked,
+//! manager stores, sent as the signed-in owner. It shows what is on file,
+//! and once a profile is, sends only what changes. Its tokens are masked,
 //! cleared once sent, and never saved.
 
-use super::enroll::{Field, Outcome, Values};
+use super::enroll::{Field, OnFile, Outcome, Values};
+use super::settings::SettingsTab;
 use super::signing::Registration;
 use crate::agent_plugins::tabs::field;
 use crate::community::{AppState, IdentityState};
 use buzz_identity::Identity;
 use buzz_relay_client::{RelayOrigin, Session};
 use buzz_ui::{
-    Button, ButtonSize, Colors, Surface, TextArea, TextField, TypeStyled, tokens::space,
+    Button, ButtonSize, Checkbox, Colors, Surface, TextArea, TextField, TypeStyled, tokens::space,
 };
 use gpui_kit::component::input::{InputState, TextareaState};
 use gpui_kit::*;
@@ -24,6 +26,27 @@ pub struct EnrollForm {
     pub status: Option<Result<Outcome, String>>,
     /// How the last enrollment's signing key reached GitHub.
     pub registration: Option<Registration>,
+    /// What the manager holds.
+    pub on_file: OnFile,
+    /// Replace the stored signing key instead of keeping it.
+    pub replace_key: bool,
+    /// Stored model credentials to remove, by models key.
+    pub removed: Vec<&'static str>,
+}
+
+/// The placeholder for `field`, by whether a value is on file.
+fn placeholder(field: Field, held: bool) -> &'static str {
+    if held && field.secret() || held && field == Field::ViaProfile {
+        return "On file · leave blank to keep";
+    }
+    match field {
+        Field::GitEmail => "A verified email on your GitHub account",
+        Field::ViaProfile => "via profile TOML",
+        Field::CodexAccessToken => "Optional · at-…",
+        Field::ClaudeOauthToken => "Optional · sk-ant-oat01-…",
+        Field::OpenaiApiKey | Field::AnthropicApiKey | Field::OpenrouterApiKey => "Optional",
+        _ => "",
+    }
 }
 
 impl EnrollForm {
@@ -35,29 +58,65 @@ impl EnrollForm {
             .filter(|field| *field != Field::ViaProfile)
             .map(|field| {
                 let state = cx.new(|cx| {
-                    let state = InputState::new(window, cx).masked(field.secret());
-                    match field {
-                        Field::GitEmail => state
-                            .placeholder("A verified email on your GitHub account")
-                            .default_value(email.clone()),
-                        Field::CodexAccessToken => state.placeholder("Optional · at-…"),
-                        Field::ClaudeOauthToken => state.placeholder("Optional · sk-ant-oat01-…"),
-                        Field::OpenaiApiKey | Field::AnthropicApiKey | Field::OpenrouterApiKey => {
-                            state.placeholder("Optional")
-                        }
-                        _ => state,
+                    let state = InputState::new(window, cx)
+                        .masked(field.secret())
+                        .placeholder(placeholder(field, false));
+                    if field == Field::GitEmail {
+                        state.default_value(email.clone())
+                    } else {
+                        state
                     }
                 });
                 (field, state)
             })
             .collect();
-        let via = cx.new(|cx| TextareaState::new(window, cx).placeholder("via profile TOML"));
+        let via = cx.new(|cx| {
+            TextareaState::new(window, cx).placeholder(placeholder(Field::ViaProfile, false))
+        });
         Self {
             inputs,
             via,
             sending: false,
             status: None,
             registration: None,
+            on_file: OnFile::Loading,
+            replace_key: false,
+            removed: Vec::new(),
+        }
+    }
+
+    /// Shows what is on file: on-file tokens keep their stored value when
+    /// left blank, and the Git email starts as the stored one.
+    pub fn show_on_file(&mut self, on_file: OnFile, window: &mut Window, cx: &mut App) {
+        let summary = on_file.summary().cloned().unwrap_or_default();
+        let stored = on_file.summary().is_some();
+        for (field, input) in &self.inputs {
+            let held = stored && summary.holds(*field);
+            input.update(cx, |state, cx| {
+                state.set_placeholder(placeholder(*field, held), window, cx);
+                if *field == Field::GitEmail && held {
+                    state.set_value(summary.git.email.clone(), window, cx);
+                }
+            });
+        }
+        let held = stored && summary.holds(Field::ViaProfile);
+        self.via.update(cx, |state, cx| {
+            state.set_placeholder(placeholder(Field::ViaProfile, held), window, cx)
+        });
+        self.removed
+            .retain(|key| summary.models.iter().any(|stored| stored == key));
+        if !summary.git.signing_key {
+            self.replace_key = false;
+        }
+        self.on_file = on_file;
+    }
+
+    /// Marks the stored model credential `key` for removal, or keeps it.
+    pub fn toggle_removed(&mut self, key: &'static str) {
+        if let Some(at) = self.removed.iter().position(|removed| *removed == key) {
+            self.removed.remove(at);
+        } else {
+            self.removed.push(key);
         }
     }
 
@@ -93,7 +152,13 @@ impl EnrollForm {
         sent
     }
 
-    pub fn render(&self, owner: Option<&str>, disabled: bool, c: &Colors) -> Div {
+    pub fn render(
+        &self,
+        owner: Option<&str>,
+        disabled: bool,
+        c: &Colors,
+        cx: &Context<SettingsTab>,
+    ) -> Div {
         let input = |which: Field| {
             let (_, state) = self
                 .inputs
@@ -138,9 +203,13 @@ impl EnrollForm {
             .child(div().text_body_sm().text_color(c.text_subtle).child(
                 "Once per developer: every one of your Remote workspace agents uses it. Enrolling \
                      creates a signing key for your agents' commits; the GitHub CLI (gh) adds it \
-                     to your GitHub account, or the app shows you how. Sent encrypted to the \
-                     Sandbox manager and signed as you; tokens are never saved here.",
+                     to your GitHub account, or the app shows you how. With a profile on file, \
+                     fill in only what changes: a blank field keeps what is stored. Sent \
+                     encrypted to the Sandbox manager and signed as you; tokens are never saved \
+                     here.",
             ))
+            .child(div().text_body_sm().child(self.on_file.text()))
+            .children(self.on_file_controls(disabled, c, cx))
             .child(field(
                 "Buzz owner",
                 div()
@@ -173,6 +242,76 @@ impl EnrollForm {
                     .as_ref()
                     .map(|registration| registration_notice(registration, c)),
             )
+    }
+}
+
+impl EnrollForm {
+    /// Remove or keep each stored model credential, and replace the stored
+    /// signing key.
+    fn on_file_controls(
+        &self,
+        disabled: bool,
+        c: &Colors,
+        cx: &Context<SettingsTab>,
+    ) -> Option<Div> {
+        let summary = self.on_file.summary()?;
+        let removals = summary.model_fields().into_iter().filter_map(|field| {
+            let key = field.model()?;
+            let removing = self.removed.contains(&key);
+            let label = if removing {
+                format!("Keep {}", field.label())
+            } else {
+                format!("Remove {}", field.label())
+            };
+            Some(
+                Button::new(
+                    SharedString::from(format!("remote-workspace-remove-{key}")),
+                    label,
+                )
+                .size(ButtonSize::Sm)
+                .outline()
+                .disabled(disabled)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.enroll.toggle_removed(key);
+                    cx.notify();
+                })),
+            )
+        });
+        let removing = (!self.removed.is_empty()).then(|| {
+            let names: Vec<_> = self
+                .removed
+                .iter()
+                .filter_map(|key| Field::of_model(key))
+                .map(Field::label)
+                .collect();
+            div()
+                .text_body_sm()
+                .text_color(c.text_subtle)
+                .child(format!("Enrolling removes: {}.", names.join(", ")))
+        });
+        let replace = summary.git.signing_key.then(|| {
+            let tab = cx.entity().downgrade();
+            Checkbox::new("remote-workspace-replace-signing-key", self.replace_key)
+                .label("Replace the signing key")
+                .description("Creates a new key for your agents' commits and adds it to GitHub.")
+                .surface(Surface::Floating)
+                .disabled(disabled)
+                .on_change(move |checked, _, cx| {
+                    let _ = tab.update(cx, |this, cx| {
+                        this.enroll.replace_key = checked;
+                        cx.notify();
+                    });
+                })
+        });
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap(space::S2)
+                .child(div().flex().flex_wrap().gap(space::S2).children(removals))
+                .children(removing)
+                .children(replace),
+        )
     }
 }
 

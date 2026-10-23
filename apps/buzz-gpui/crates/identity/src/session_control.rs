@@ -20,7 +20,31 @@ impl Identity {
         created_at: u64,
     ) -> Result<Event, WireError> {
         let payload = serde_json::json!({ "profile": profile });
-        let request = Request::new(Op::Enroll, request_id, payload);
+        self.owner_request(
+            manager,
+            Request::new(Op::Enroll, request_id, payload),
+            created_at,
+        )
+    }
+
+    /// The owner-signed `profile` request: what the developer's stored
+    /// profile holds, naming no value. Encrypted like [`Self::enroll_request`].
+    pub fn profile_request(
+        &self,
+        manager: &PublicKey,
+        request_id: &str,
+        created_at: u64,
+    ) -> Result<Event, WireError> {
+        let request = Request::new(Op::Profile, request_id, serde_json::json!({}));
+        self.owner_request(manager, request, created_at)
+    }
+
+    fn owner_request(
+        &self,
+        manager: &PublicKey,
+        request: Request,
+        created_at: u64,
+    ) -> Result<Event, WireError> {
         let event = control::build_request(
             &self.wire_keys()?,
             &wire_key(manager)?,

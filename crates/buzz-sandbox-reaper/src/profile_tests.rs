@@ -220,3 +220,26 @@ fn python_json_length_matches_json_dumps() {
     let value = json!({"a": [1, true, null], "b": "\n\u{e9}\u{1f600}\u{7f}"});
     assert_eq!(python_json_len(&value), 57);
 }
+
+/// A partial profile may omit any section or key, but not add one, and a
+/// model credential is a string to set or `null` to remove.
+#[test]
+fn a_partial_profile_may_omit_fields_but_not_add_them() {
+    let base = || json!({"version": 1, "owner_pubkey": "a".repeat(64)});
+    assert_eq!(check_partial(&base()), Ok(()));
+    let mut partial = base();
+    partial["models"] = json!({"codex_access_token": "at-x", "claude_oauth_token": null});
+    partial["git"] = json!({"email": "ada@example.com"});
+    assert_eq!(check_partial(&partial), Ok(()));
+    for (pointer, bad, message) in [
+        ("/models", json!({"codex_access_token": 1}), "Unsupported model credential type"),
+        ("/models", json!({"gemini_api_key": "x"}), "Unsupported model credential type"),
+        ("/git", json!({"signing": "x"}), "Profile fields are incomplete or unsupported"),
+        ("/github", json!({"token": "ghp_x"}), "A GitHub token needs its login"),
+        ("/version", json!(2), "Unsupported profile version"),
+    ] {
+        let mut partial = base();
+        partial[&pointer[1..]] = bad;
+        assert_eq!(check_partial(&partial), Err(Invalid(message)), "{pointer}");
+    }
+}

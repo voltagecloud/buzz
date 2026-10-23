@@ -51,6 +51,9 @@ pub enum Op {
     Stop,
     /// Store a developer's agent profile. Signed by the owner key itself.
     Enroll,
+    /// Describe the developer's stored profile, naming no value. Signed by
+    /// the owner key itself.
+    Profile,
 }
 
 impl Op {
@@ -61,11 +64,12 @@ impl Op {
             Op::Deploy => "deploy",
             Op::Stop => "stop",
             Op::Enroll => "enroll",
+            Op::Profile => "profile",
         }
     }
 
     fn parse(value: &str) -> Option<Self> {
-        [Op::Info, Op::Deploy, Op::Stop, Op::Enroll]
+        [Op::Info, Op::Deploy, Op::Stop, Op::Enroll, Op::Profile]
             .into_iter()
             .find(|op| op.as_str() == value)
     }
