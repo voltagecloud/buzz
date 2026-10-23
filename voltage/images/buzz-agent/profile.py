@@ -24,9 +24,21 @@ DEPOT_SERVICE = 'depot'
 SSH_SIGNING_KEY = re.compile(r'-----BEGIN OPENSSH PRIVATE KEY-----\n[A-Za-z0-9+/=\n]{1,4000}-----END OPENSSH PRIVATE KEY-----\n?')
 
 
+class Refused(ValueError):
+    """A refusal whose message is a fixed string, never a value, so startup may print it."""
+
+
 def require(condition, message):
     if not condition:
-        raise ValueError(message)
+        raise Refused(message)
+
+
+# The startup step in progress, named in the refusal so a failed Sandbox says where it stopped.
+STEP = ['starting']
+
+
+def step(name):
+    STEP[0] = name
 
 
 def fields(value, expected):
@@ -139,9 +151,11 @@ def depot(profile):
 def bootstrap():
     developer = os.environ.get('BUZZ_DEVELOPER_ID', '')
     arn = os.environ.get('BUZZ_DEVELOPER_PROFILE_ARN', '')
+    step('reading the profile secret')
     result = aws(arn, developer, 'get-secret-value')
     raw = result['SecretString']
     require(len(raw.encode()) <= MAX_BYTES, 'Profile is too large')
+    step('validating the profile')
     profile = json.loads(raw)
     validate(profile)
     require(profile['developer'] == developer
@@ -160,12 +174,15 @@ def bootstrap():
              'via.toml': profile['via']['profile'],
              'ssh-signing-key': profile['git']['ssh_signing_key'].rstrip('\n') + '\n',
              'profile.json': json.dumps({'developer': developer, 'version_id': result['VersionId']})}
+    step('reading the Depot cache credential')
     cache = depot(profile)
     if cache:
         files.update({'depot-token': cache[1], 'depot.json': json.dumps({'organization': cache[0]})})
+    step('writing credential files')
     for name, value in files.items():
         write_file(DIRECTORY / name, value)
     if 'openai_api_key' in profile['models']:
+        step('signing in to Codex')
         env['OPENAI_API_KEY'] = profile['models']['openai_api_key']
         env['CODEX_HOME'] = '/home/agent/.codex'
         env['CODEX_CONFIG'] = '{"cli_auth_credentials_store":"file"}'
@@ -183,6 +200,7 @@ def bootstrap():
         env.setdefault('BUZZ_AGENT_PROVIDER', 'openrouter')
     if 'claude_oauth_token' in profile['models']:
         env['CLAUDE_CODE_OAUTH_TOKEN'] = profile['models']['claude_oauth_token']
+    step('configuring Git commit signing')
     command('/usr/local/bin/buzz-agent-account', 'init', env=env)
     return env
 
@@ -197,7 +215,7 @@ def restore_checkpoint():
                             stdin=subprocess.DEVNULL, stdout=sys.stderr)
     if result.returncode:
         print('Checkpoint restore failed; refusing to start with an empty workspace', file=sys.stderr)
-        raise ValueError('Checkpoint restore failed')
+        raise Refused('Checkpoint restore failed')
 
 
 SUBAGENT_CREDENTIALS = Path('/var/run/secrets/buzz-subagents')
@@ -224,12 +242,16 @@ def main():
     args = parser.parse_args()
     if args.action == 'work':
         env = bootstrap()
+        step('starting the worker')
         worker = ['/usr/local/bin/buzz-agent-cache', '/usr/local/bin/buzz-agent-worker']
         os.execvpe(worker[0], worker, env)
     else:
         env = bootstrap()
+        step('restoring the checkpoint')
         restore_checkpoint()
+        step('installing the sub-agent guide')
         install_subagent_guide(env)
+        step('starting the harness')
         arguments = args.arguments[1:] if args.arguments[:1] == ['--'] else args.arguments
         harness = ['/usr/local/bin/buzz-agent-cache', '/usr/local/bin/buzz-acp', *arguments]
         os.execvpe(harness[0], harness, env)
@@ -239,6 +261,9 @@ if __name__ == '__main__':
     try:
         os.umask(0o077)
         main()
-    except (ValueError, KeyError, TypeError, OSError, subprocess.TimeoutExpired):
-        print('Developer profile refused; credentials and command output suppressed', file=sys.stderr)
+    except (ValueError, KeyError, TypeError, OSError, subprocess.TimeoutExpired) as error:
+        # Only a fixed refusal message or the error's type: other errors can quote a value.
+        reason = str(error) if type(error) is Refused else type(error).__name__
+        print('Developer profile refused while '+STEP[0]+': '+reason
+              +'; credentials and command output suppressed', file=sys.stderr)
         sys.exit(1)

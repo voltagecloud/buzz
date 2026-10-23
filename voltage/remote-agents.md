@@ -192,14 +192,16 @@ To create it in the web app at [teamvoltage.1password.com](https://teamvoltage.1
 2. Under **Infrastructure Secrets Management**, select **Other**, then **Service Account**.
 3. Enter a name, for example `buzz-agents-<developer-id>`.
 4. Select only the **Buzz Agents Dev** vault, with **Read items**.
-5. Set an expiry, for example 90 days.
+5. Leave the expiry at **Never**. When a developer leaves, delete their service account.
 6. Select **Create Account**. Then select **Save in 1Password**, because the token shows only once.
 
 To create it with the 1Password CLI instead:
 
 ```sh
-op service-account create "buzz-agents-<developer-id>" --expires-in 90d --vault "Buzz Agents Dev:read_items"
+op service-account create "buzz-agents-<developer-id>" --vault "Buzz Agents Dev:read_items"
 ```
+
+Without `--expires-in`, the token does not expire.
 
 To check the token, run this command. The output must show **Buzz Agents Dev** and no other vault.
 
@@ -385,11 +387,13 @@ CAUTION: An agent runs with full tool access in its Sandbox, and it reads untrus
 | *Use a Codex access token (at-...)* | Put an OpenAI API key in **OpenAI API key**, not in **Codex access token**. |
 | *Choose either an OpenAI API key or a Codex access token* | Clear one of the two fields. The same applies to the two Claude fields. |
 | *via profile requires providers and services* | Paste the complete [shared via profile](#shared-via-profile). |
+| `op service-account create` fails with *(403) Forbidden* | You are not a 1Password owner or administrator. Ask one to create the service account and share the token with you through 1Password. |
 | *Could not run ssh-keygen. Install OpenSSH.* | Install OpenSSH, then enroll again. |
 | The app says *gh needs the admin:ssh_signing_key scope* | Run `gh auth refresh -h github.com -s admin:ssh_signing_key`, then enroll again. Or add the key yourself with **Copy key**. |
 | Commits show as **Unverified** on GitHub | Add the signing key on GitHub, and make sure **Git email** is a verified email on your account. |
 | *The Sandbox manager did not answer within 60 seconds.* | Ask an admin. The admin checks `kubectl --context voltage-staging -n buzz-sandbox-manager logs deploy/buzz-sandbox-manager`. |
 | The agent does not reply after 10 minutes | Check that you enrolled. If you did, an admin checks the Sandbox: `kubectl --context voltage-staging -n buzz-agent-staging-<developer-id> get sandboxes,pods`. |
+| The Sandbox log shows *Developer profile refused while …* | The text after *while* names the startup step that failed, and the text after the colon names the reason. Credentials are never printed. Ask an admin, and include that line. |
 
 ## Related
 
