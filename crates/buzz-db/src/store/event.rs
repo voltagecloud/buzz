@@ -5,6 +5,7 @@
 //! Deduplication is application-layer: ON CONFLICT DO NOTHING.
 
 use chrono::{DateTime, Utc};
+use futures_util::TryStreamExt;
 use nostr::Event;
 use sqlx::{PgPool, QueryBuilder, Row};
 use uuid::Uuid;
@@ -257,7 +258,7 @@ pub async fn huddle_started_links(
         crate::observability::WriterOperation::SubscriptionHistory,
     )
     .await?;
-    let rows = sqlx::query(
+    let mut rows = sqlx::query(
         r#"
         SELECT backing.id AS session_id,
                start.channel_id AS parent_channel_id,
@@ -283,12 +284,12 @@ pub async fn huddle_started_links(
     .bind(KIND_HUDDLE_STARTED as i32)
     .bind(ephemeral_channel_ids)
     .bind(HUDDLE_LINK_CONTENT_MAX_BYTES)
-    .fetch_all(&mut *connection)
-    .await?;
+    .fetch(&mut *connection);
 
     // Rows arrive newest first per session; keep each session's newest link.
+    // Streamed, so memory holds the links rather than every candidate start.
     let mut links: Vec<(Uuid, Uuid, Vec<u8>)> = Vec::new();
-    for row in rows {
+    while let Some(row) = rows.try_next().await? {
         let session_id: Uuid = row.try_get("session_id")?;
         if links
             .last()
