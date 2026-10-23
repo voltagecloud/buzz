@@ -4,6 +4,7 @@
 //! manager over its community's relay, with the build's manager key.
 
 use super::config::{Config, EFFORTS, MANAGER_PUBKEY, RUNTIMES};
+use super::enroll::{OnFile, Outcome};
 use super::enroll_form::{self, EnrollForm};
 use crate::agent_plugins::tabs::{
     Picking, choice, field, instructions_field, instructions_state, options, saved_config,
@@ -35,7 +36,7 @@ pub struct SettingsTab {
     fast: bool,
     env: Entity<TextareaState>,
     instructions: Entity<TextareaState>,
-    enroll: EnrollForm,
+    pub(super) enroll: EnrollForm,
     open: Option<Picker>,
     saving: bool,
     error: Option<String>,
@@ -128,7 +129,7 @@ impl SettingsTab {
                 }
             }));
         }
-        Self {
+        let mut tab = Self {
             view,
             runtime: saved.runtime.clone(),
             effort: saved.effort.clone(),
@@ -142,7 +143,9 @@ impl SettingsTab {
             saving: false,
             error: None,
             _subscriptions: subscriptions,
-        }
+        };
+        tab.load_on_file(window, cx);
+        tab
     }
 
     fn reset(&mut self, saved: Config, window: &mut Window, cx: &mut Context<Self>) {
@@ -204,9 +207,47 @@ impl SettingsTab {
 }
 
 impl SettingsTab {
+    /// Asks the Sandbox manager what is on file for the signed-in owner.
+    fn load_on_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let started = (|| {
+            let owner = enroll_form::owner(cx).ok_or("Sign in first.")?;
+            let session = enroll_form::session(&self.view.agent.relay, cx)
+                .ok_or("Join the community at the relay first.")?;
+            Ok::<_, String>((owner, session))
+        })();
+        let (owner, session) = match started {
+            Ok(started) => started,
+            Err(error) => {
+                self.enroll.show_on_file(OnFile::Unknown(error), window, cx);
+                cx.notify();
+                return;
+            }
+        };
+        self.enroll.show_on_file(OnFile::Loading, window, cx);
+        let asked = crate::runtime::Runtime::handle(cx).spawn(super::enroll::on_file(
+            session,
+            owner,
+            MANAGER_PUBKEY.to_owned(),
+        ));
+        cx.spawn_in(window, async move |this, cx| {
+            let on_file = match asked.await {
+                Ok(Ok(Some(summary))) => OnFile::Stored(summary),
+                Ok(Ok(None)) => OnFile::Nothing,
+                Ok(Err(error)) => OnFile::Unknown(error),
+                Err(_) => OnFile::Unknown("The request was cancelled.".into()),
+            };
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.enroll.show_on_file(on_file, window, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     /// Sends the enroll form to the Sandbox manager on the agent's
     /// community, as the signed-in owner. Its tokens are cleared at once,
-    /// sent or not.
+    /// sent or not. With a profile on file, only what changes is sent.
     fn enroll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let relay = self.view.agent.relay.clone();
         let owner = enroll_form::owner(cx);
@@ -233,17 +274,31 @@ impl SettingsTab {
             owner,
             MANAGER_PUBKEY.to_owned(),
             values,
+            self.enroll.on_file.summary().cloned(),
+            self.enroll.replace_key,
+            self.enroll.removed.clone(),
         ));
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let outcome = sent
                 .await
                 .unwrap_or_else(|_| Err("The enrollment was cancelled.".into()));
-            let _ = this.update(cx, |this, cx| {
+            let _ = this.update_in(cx, |this, window, cx| {
                 this.enroll.sending = false;
                 let (status, registration) = match outcome {
                     Ok((outcome, registration)) => (Ok(outcome), registration),
                     Err(error) => (Err(error), None),
                 };
+                if let Ok(Outcome::Enrolled { summary, .. }) = &status {
+                    this.enroll.removed.clear();
+                    this.enroll.replace_key = false;
+                    match summary.clone() {
+                        Some(summary) => {
+                            this.enroll
+                                .show_on_file(OnFile::Stored(summary), window, cx)
+                        }
+                        None => this.load_on_file(window, cx),
+                    }
+                }
                 this.enroll.status = Some(status);
                 this.enroll.registration = registration;
                 cx.notify();
@@ -376,17 +431,33 @@ impl Render for SettingsTab {
             .map(|this| {
                 let sending = self.enroll.sending;
                 let owner = enroll_form::owner(cx).map(|owner| owner.pubkey_hex());
-                this.child(self.enroll.render(owner.as_deref(), sending, &c))
+                let unknown = matches!(self.enroll.on_file, OnFile::Unknown(_));
+                this.child(self.enroll.render(owner.as_deref(), sending, &c, cx))
                     .child(
-                        div().flex().child(
-                            Button::new(
-                                "remote-workspace-enroll",
-                                if sending { "Enrolling…" } else { "Enroll profile" },
+                        div()
+                            .flex()
+                            .gap(space::S2)
+                            .child(
+                                Button::new(
+                                    "remote-workspace-enroll",
+                                    if sending { "Enrolling…" } else { "Enroll profile" },
+                                )
+                                .loading(sending)
+                                .disabled(sending)
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.enroll(window, cx)),
+                                ),
                             )
-                            .loading(sending)
-                            .disabled(sending)
-                            .on_click(cx.listener(|this, _, window, cx| this.enroll(window, cx))),
-                        ),
+                            .when(unknown, |row| {
+                                row.child(
+                                    Button::new("remote-workspace-check-on-file", "Check again")
+                                        .outline()
+                                        .disabled(sending)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.load_on_file(window, cx)
+                                        })),
+                                )
+                            }),
                     )
             })
             .children(

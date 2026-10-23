@@ -1,8 +1,10 @@
 //! Enrolling a developer profile with the Sandbox manager. The owner signs
 //! a kind 24210 `enroll` request carrying the profile `profile.py`
 //! validates, sends it on the community's live socket, and waits for the
-//! `done` reply. Tokens are never saved or logged, and leave the form once
-//! it is sent.
+//! `done` reply. Once a profile is on file, the request carries only what
+//! changes, and the manager merges it; the `profile` request says what is on
+//! file without any value. Tokens are never saved or logged, and leave the
+//! form once it is sent.
 
 use super::signing::{self, GitHubIdentity};
 use buzz_identity::Identity;
@@ -75,8 +77,15 @@ impl Field {
         }
     }
 
+    /// The field filling the models entry `key`.
+    pub fn of_model(key: &str) -> Option<Field> {
+        Field::ALL
+            .into_iter()
+            .find(|field| field.model() == Some(key))
+    }
+
     /// The models entry it fills, for the optional model keys.
-    fn model(self) -> Option<&'static str> {
+    pub fn model(self) -> Option<&'static str> {
         match self {
             Field::OpenaiApiKey => Some("openai_api_key"),
             Field::CodexAccessToken => Some("codex_access_token"),
@@ -117,6 +126,156 @@ impl Values {
     }
 }
 
+/// What the manager holds for this developer: names and flags, never a
+/// credential. The login, name and email are not secret.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+pub struct Summary {
+    pub version_id: String,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+    #[serde(default)]
+    pub git: GitSummary,
+    #[serde(default)]
+    pub github: GitHubSummary,
+    #[serde(default)]
+    pub via: ViaSummary,
+    /// The stored models entries, by key.
+    #[serde(default)]
+    pub models: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+pub struct GitSummary {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub email: String,
+    #[serde(default)]
+    pub signing_key: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+pub struct GitHubSummary {
+    #[serde(default)]
+    pub login: String,
+    #[serde(default)]
+    pub token: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+pub struct ViaSummary {
+    #[serde(default)]
+    pub profile: bool,
+    #[serde(default)]
+    pub op_token: bool,
+}
+
+impl Summary {
+    /// Whether `field` has a stored value.
+    pub fn holds(&self, field: Field) -> bool {
+        match field {
+            Field::GithubToken => self.github.token,
+            Field::GitEmail => !self.git.email.is_empty(),
+            Field::ViaProfile => self.via.profile,
+            Field::OpToken => self.via.op_token,
+            _ => field
+                .model()
+                .is_some_and(|key| self.models.iter().any(|stored| stored == key)),
+        }
+    }
+
+    /// The stored model credentials, as fields, in form order.
+    pub fn model_fields(&self) -> Vec<Field> {
+        Field::ALL
+            .into_iter()
+            .filter(|field| field.model().is_some() && self.holds(*field))
+            .collect()
+    }
+
+    /// One line naming what is on file.
+    pub fn text(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.github.login.is_empty() {
+            parts.push(format!("GitHub @{}", self.github.login));
+        }
+        if !self.git.email.is_empty() {
+            parts.push(format!("Git email {}", self.git.email));
+        }
+        for (held, name) in [
+            (self.git.signing_key, "signing key"),
+            (self.via.profile, "via profile"),
+            (self.via.op_token, "1Password token"),
+        ] {
+            if held {
+                parts.push(name.to_owned());
+            }
+        }
+        parts.extend(
+            self.model_fields()
+                .iter()
+                .map(|field| field.label().to_owned()),
+        );
+        let updated = self
+            .updated_at
+            .as_deref()
+            .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+            .map(|at| {
+                format!(
+                    " Updated {}.",
+                    at.with_timezone(&chrono::Utc).format("%Y-%m-%d %H:%M UTC")
+                )
+            })
+            .unwrap_or_default();
+        format!("On file: {}.{updated}", parts.join(" · "))
+    }
+}
+
+/// What the form knows about the stored profile.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OnFile {
+    Loading,
+    Nothing,
+    Stored(Summary),
+    /// The `profile` request failed, and why: every field is required.
+    Unknown(String),
+}
+
+impl OnFile {
+    pub fn summary(&self) -> Option<&Summary> {
+        match self {
+            OnFile::Stored(summary) => Some(summary),
+            _ => None,
+        }
+    }
+
+    pub fn text(&self) -> String {
+        match self {
+            OnFile::Loading => "Checking what is on file…".into(),
+            OnFile::Nothing => "Nothing enrolled yet.".into(),
+            OnFile::Stored(summary) => summary.text(),
+            OnFile::Unknown(error) => {
+                format!("Could not check what is on file: {error} Enroll the complete profile.")
+            }
+        }
+    }
+}
+
+/// What the `profile` request's `done` response says: the summary, `None`
+/// when nothing is stored, or why not.
+pub fn on_file_reply(response: &Value) -> Result<Option<Summary>, String> {
+    let malformed = || "The Sandbox manager's reply was malformed.".to_string();
+    match response.get("ok").and_then(Value::as_bool) {
+        Some(true) => match response.get("profile") {
+            None | Some(Value::Null) => Ok(None),
+            Some(summary) => serde_json::from_value(summary.clone())
+                .map(Some)
+                .map_err(|_| malformed()),
+        },
+        Some(false) => Err(outcome(response)?.text()),
+        None => Err(malformed()),
+    }
+}
+
 /// The profile `profile.py` validates, for the owner `owner`, or why not.
 /// `github` is the token's account, which names the Git author, and
 /// `signing_key` the agent-only key commits are signed with. The developer
@@ -151,16 +310,73 @@ pub fn profile(
     Ok(profile)
 }
 
+/// What an enrollment over a stored profile changes, beyond the form's text.
+#[derive(Default)]
+pub struct Changes<'a> {
+    /// The new GitHub token's account; `None` keeps the stored token.
+    pub github: Option<&'a GitHubIdentity>,
+    /// A new signing key; `None` keeps the stored one.
+    pub signing_key: Option<&'a str>,
+    /// Stored model credentials to remove, by models key.
+    pub removed: &'a [&'static str],
+}
+
+/// The partial profile the manager merges into the stored one: only the
+/// fields filled in, `null` for each removed model credential, and nothing
+/// for what stays. Each field sent is checked as `profile.py` checks it.
+pub fn partial(values: &Values, owner: &str, changes: Changes) -> Result<Value, String> {
+    let text = |field| values.get(field).trim();
+    let mut git = Map::new();
+    if let Some(github) = changes.github {
+        git.insert("name".into(), github.name.clone().into());
+    }
+    if !text(Field::GitEmail).is_empty() {
+        git.insert("email".into(), text(Field::GitEmail).into());
+    }
+    if let Some(key) = changes.signing_key {
+        git.insert("ssh_signing_key".into(), key.into());
+    }
+    let mut via = Map::new();
+    if !text(Field::ViaProfile).is_empty() {
+        via.insert("profile".into(), values.get(Field::ViaProfile).into());
+    }
+    if !text(Field::OpToken).is_empty() {
+        via.insert("op_token".into(), text(Field::OpToken).into());
+    }
+    let mut models: Map<String, Value> = changes
+        .removed
+        .iter()
+        .map(|key| ((*key).to_owned(), Value::Null))
+        .collect();
+    for field in Field::ALL {
+        if let Some(key) = field.model().filter(|_| !text(field).is_empty()) {
+            models.insert(key.to_owned(), text(field).into());
+        }
+    }
+    let mut profile = json!({"version": 1, "developer": "", "owner_pubkey": owner});
+    for (name, part) in [("git", git), ("via", via), ("models", models)] {
+        if !part.is_empty() {
+            profile[name] = Value::Object(part);
+        }
+    }
+    if let Some(github) = changes.github {
+        profile["github"] = json!({"login": github.login, "token": text(Field::GithubToken)});
+    }
+    if profile
+        .as_object()
+        .is_some_and(|profile| profile.len() == 3)
+    {
+        return Err("Nothing to change: fill in a field, or remove a credential.".into());
+    }
+    validate_partial(&profile)?;
+    Ok(profile)
+}
+
 /// `profile.py`'s size limit, which Secrets Manager sets.
 const MAX_PROFILE_BYTES: usize = 65_536;
 
 /// `profile.py`'s `validate`, with its messages, which name no values.
 pub fn validate(profile: &Value) -> Result<(), String> {
-    let require = |ok: bool, message: &str| if ok { Ok(()) } else { Err(message.to_owned()) };
-    let matches = |value: &Value, pattern: &str| {
-        let pattern = Regex::new(&format!("^(?:{pattern})$")).expect("a valid pattern");
-        value.as_str().is_some_and(|text| pattern.is_match(text))
-    };
     fields(
         profile,
         &[
@@ -173,56 +389,159 @@ pub fn validate(profile: &Value) -> Result<(), String> {
             "models",
         ],
     )?;
+    owner_fields(profile)?;
+    let git = &profile["git"];
+    fields(git, &["name", "email", "ssh_signing_key"])?;
+    git_identity(&git["name"])?;
+    git_identity(&git["email"])?;
+    signing_key(&git["ssh_signing_key"])?;
+    let github = &profile["github"];
+    fields(github, &["login", "token"])?;
+    github_account(github)?;
+    let via = &profile["via"];
+    fields(via, &["profile", "op_token"])?;
+    token(&via["op_token"])?;
+    via_profile(&via["profile"])?;
+    models(&profile["models"])?;
+    size(profile)
+}
+
+/// [`validate`] for a partial profile: its fields are those of a full one,
+/// each optional, and each present one passes the same rule. A `null`
+/// model credential is a removal.
+pub fn validate_partial(profile: &Value) -> Result<(), String> {
+    let only = |value: &Value, allowed: &[&str]| {
+        let ok = value
+            .as_object()
+            .is_some_and(|object| object.keys().all(|key| allowed.contains(&key.as_str())));
+        if ok {
+            Ok(())
+        } else {
+            Err("Profile fields are incomplete or unsupported".to_string())
+        }
+    };
+    only(
+        profile,
+        &[
+            "version",
+            "developer",
+            "owner_pubkey",
+            "git",
+            "github",
+            "via",
+            "models",
+        ],
+    )?;
+    owner_fields(profile)?;
+    if let Some(git) = profile.get("git") {
+        only(git, &["name", "email", "ssh_signing_key"])?;
+        for name in ["name", "email"] {
+            git.get(name).map_or(Ok(()), git_identity)?;
+        }
+        git.get("ssh_signing_key").map_or(Ok(()), signing_key)?;
+    }
+    if let Some(github) = profile.get("github") {
+        fields(github, &["login", "token"])?;
+        github_account(github)?;
+    }
+    if let Some(via) = profile.get("via") {
+        only(via, &["profile", "op_token"])?;
+        via.get("op_token").map_or(Ok(()), token)?;
+        via.get("profile").map_or(Ok(()), via_profile)?;
+    }
+    if let Some(stored) = profile.get("models") {
+        let set: Map<String, Value> = stored
+            .as_object()
+            .ok_or("Unsupported model credential type")?
+            .iter()
+            .filter(|(_, value)| !value.is_null())
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        let model_fields = [
+            "openai_api_key",
+            "codex_access_token",
+            "anthropic_api_key",
+            "claude_oauth_token",
+            "openrouter_api_key",
+        ];
+        let removals_known = stored.as_object().is_some_and(|stored| {
+            stored
+                .keys()
+                .all(|key| model_fields.contains(&key.as_str()))
+        });
+        if !removals_known {
+            return Err("Unsupported model credential type".into());
+        }
+        models(&Value::Object(set))?;
+    }
+    size(profile)
+}
+
+fn require(ok: bool, message: &str) -> Result<(), String> {
+    if ok { Ok(()) } else { Err(message.to_owned()) }
+}
+
+fn matches(value: &Value, pattern: &str) -> bool {
+    let pattern = Regex::new(&format!("^(?:{pattern})$")).expect("a valid pattern");
+    value.as_str().is_some_and(|text| pattern.is_match(text))
+}
+
+fn owner_fields(profile: &Value) -> Result<(), String> {
     require(
         profile["version"] == json!(1),
         "Unsupported profile version",
     )?;
     // Empty until the manager fills in the signing owner's developer ID.
+    let developer = profile.get("developer").unwrap_or(&Value::Null);
     require(
-        profile["developer"] == json!("")
-            || matches(
-                &profile["developer"],
-                "[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?",
-            ),
+        developer.is_null()
+            || *developer == json!("")
+            || matches(developer, "[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?"),
         "Invalid developer ID",
     )?;
     require(
         matches(&profile["owner_pubkey"], "[0-9a-f]{64}"),
         "Invalid Buzz owner",
-    )?;
-    let git = &profile["git"];
-    fields(git, &["name", "email", "ssh_signing_key"])?;
-    for value in [&git["name"], &git["email"]] {
-        let ok = value.as_str().is_some_and(|text| {
-            (1..=256).contains(&text.chars().count()) && !text.chars().any(|c| (c as u32) < 32)
-        });
-        require(ok, "Invalid Git identity")?;
-    }
+    )
+}
+
+fn git_identity(value: &Value) -> Result<(), String> {
+    let ok = value.as_str().is_some_and(|text| {
+        (1..=256).contains(&text.chars().count()) && !text.chars().any(|c| (c as u32) < 32)
+    });
+    require(ok, "Invalid Git identity")
+}
+
+fn signing_key(value: &Value) -> Result<(), String> {
     require(
         matches(
-            &git["ssh_signing_key"],
+            value,
             "-----BEGIN OPENSSH PRIVATE KEY-----\\n[A-Za-z0-9+/=\\n]{1,4000}-----END OPENSSH PRIVATE KEY-----\\n?",
         ),
         "Invalid SSH signing key",
-    )?;
-    let github = &profile["github"];
-    fields(github, &["login", "token"])?;
+    )
+}
+
+fn github_account(github: &Value) -> Result<(), String> {
     require(
         matches(&github["login"], "[a-zA-Z0-9][a-zA-Z0-9-]{0,38}"),
         "Invalid GitHub login",
     )?;
-    token(&github["token"])?;
-    let via = &profile["via"];
-    fields(via, &["profile", "op_token"])?;
-    token(&via["op_token"])?;
-    let config = via["profile"].as_str().ok_or("Invalid via profile")?;
+    token(&github["token"])
+}
+
+fn via_profile(value: &Value) -> Result<(), String> {
+    let config = value.as_str().ok_or("Invalid via profile")?;
     // The parser's error quotes the profile, so it is not shown.
     let config: toml::Table = config.parse().map_err(|_| "Invalid via profile")?;
     require(
         truthy(config.get("services")) && truthy(config.get("providers")),
         "via profile requires providers and services",
-    )?;
-    let models = profile["models"]
+    )
+}
+
+fn models(models: &Value) -> Result<(), String> {
+    let models = models
         .as_object()
         .ok_or("Unsupported model credential type")?;
     let model_fields = [
@@ -256,7 +575,10 @@ pub fn validate(profile: &Value) -> Result<(), String> {
             .get("codex_access_token")
             .is_none_or(|value| value.as_str().is_some_and(|value| value.starts_with("at-"))),
         "Use a Codex access token (at-...)",
-    )?;
+    )
+}
+
+fn size(profile: &Value) -> Result<(), String> {
     require(
         profile.to_string().len() <= MAX_PROFILE_BYTES,
         "Profile exceeds Secrets Manager size limit",
@@ -304,8 +626,12 @@ fn truthy(value: Option<&toml::Value>) -> bool {
 /// How an enrollment ended.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
-    /// The manager stored a new version of the profile.
-    Enrolled { version_id: String },
+    /// The manager stored a new version of the profile, which now holds
+    /// `summary` when the manager says.
+    Enrolled {
+        version_id: String,
+        summary: Option<Summary>,
+    },
     /// The manager refused it with `code`.
     Refused { code: String },
 }
@@ -342,7 +668,9 @@ impl Outcome {
     /// What the form shows.
     pub fn text(&self) -> String {
         match self {
-            Outcome::Enrolled { version_id } => format!("Enrolled. Profile version {version_id}."),
+            Outcome::Enrolled { version_id, .. } => {
+                format!("Enrolled. Profile version {version_id}.")
+            }
             Outcome::Refused { code } => {
                 let reason = REFUSALS
                     .iter()
@@ -364,64 +692,108 @@ pub fn outcome(response: &Value) -> Result<Outcome, String> {
             .map(str::to_owned)
     };
     match response.get("ok").and_then(Value::as_bool) {
-        Some(true) => text("version_id").map(|version_id| Outcome::Enrolled { version_id }),
+        Some(true) => text("version_id").map(|version_id| Outcome::Enrolled {
+            version_id,
+            // A summary the form cannot read leaves it to ask again.
+            summary: response
+                .get("profile")
+                .and_then(|summary| serde_json::from_value(summary.clone()).ok()),
+        }),
         Some(false) => text("code").map(|code| Outcome::Refused { code }),
         None => None,
     }
     .ok_or_else(|| "The Sandbox manager's reply was malformed.".into())
 }
 
-/// The outcome in the `done` reply to `request_id` among `replies`,
+/// The response in the `done` reply to `request_id` among `replies`,
 /// skipping `accepted` and `progress` and whatever `open` refuses.
 pub async fn done<T>(
     mut replies: impl Stream<Item = T> + Unpin,
     request_id: &str,
     open: impl Fn(&T) -> Option<Reply>,
-) -> Result<Outcome, String> {
+) -> Result<Value, String> {
     while let Some(item) = replies.next().await {
         let Some(reply) = open(&item) else {
             continue;
         };
         if reply.request_id == request_id && reply.status == Status::Done {
-            return outcome(reply.response.as_ref().unwrap_or(&Value::Null));
+            return Ok(reply.response.unwrap_or(Value::Null));
         }
     }
     Err("The community connection closed before the Sandbox manager answered.".into())
 }
 
-/// Signs the `enroll` request for `profile` to `manager` as `identity`,
-/// sends it on `session`'s live socket, and waits up to [`TIMEOUT`] for
-/// its `done` reply.
-/// Enrolls the form's `values` as `identity`: reads the GitHub token's
-/// account, creates the agent-only signing key, and sends the profile. Once
-/// the manager stores it, the key's public half goes to that account with the
-/// local `gh`, or back to the developer to add; the token needs no account
+/// Enrolls the form's `values` as `identity`.
+///
+/// With nothing on file, it reads the GitHub token's account, creates the
+/// agent-only signing key, and sends the complete profile. With a profile on
+/// file, it sends only what changes: a blank GitHub token keeps the stored
+/// one, and the stored signing key stays unless `replace_key`. `removed`
+/// names stored model credentials to drop. Once the manager stores a new
+/// signing key, its public half goes to the GitHub account with the local
+/// `gh`, or back to the developer to add; the token needs no account
 /// permission either way.
 pub async fn run(
     session: Arc<Session>,
     identity: Arc<Identity>,
     manager: String,
     values: Values,
+    on_file: Option<Summary>,
+    replace_key: bool,
+    removed: Vec<&'static str>,
 ) -> Result<(Outcome, Option<signing::Registration>), String> {
     let token = values.get(Field::GithubToken).trim().to_owned();
-    if token.is_empty() {
+    let github = if !token.is_empty() {
+        Some(signing::identity(&token).await?)
+    } else if on_file.as_ref().is_some_and(|summary| summary.github.token) {
+        None
+    } else {
         return Err("Enter a GitHub token.".into());
-    }
-    let github = signing::identity(&token).await?;
-    let key = signing::generate(&format!("buzz agents {}", github.login)).await?;
-    let profile = profile(&values, &identity.pubkey_hex(), &github, &key.private)?;
+    };
+    let login = github
+        .as_ref()
+        .map(|github| github.login.clone())
+        .or_else(|| on_file.as_ref().map(|summary| summary.github.login.clone()))
+        .filter(|login| !login.is_empty())
+        .ok_or("Enter a GitHub token.")?;
+    let new_key = replace_key
+        || !on_file
+            .as_ref()
+            .is_some_and(|summary| summary.git.signing_key);
+    let key = if new_key {
+        Some(signing::generate(&format!("buzz agents {login}")).await?)
+    } else {
+        None
+    };
+    let owner = identity.pubkey_hex();
+    let profile = match (&on_file, &github, &key) {
+        (None, Some(github), Some(key)) => profile(&values, &owner, github, &key.private)?,
+        (None, _, _) => return Err("Enter a GitHub token.".into()),
+        (Some(_), _, _) => partial(
+            &values,
+            &owner,
+            Changes {
+                github: github.as_ref(),
+                signing_key: key.as_ref().map(|key| key.private.as_str()),
+                removed: &removed,
+            },
+        )?,
+    };
     let outcome = enroll(session, identity, manager, profile).await?;
-    if !matches!(outcome, Outcome::Enrolled { .. }) {
+    let (Outcome::Enrolled { .. }, Some(key)) = (&outcome, key) else {
         return Ok((outcome, None));
-    }
+    };
     let title = format!(
         "Buzz agents ({})",
         chrono::Utc::now().format("%Y-%m-%d %H:%M UTC")
     );
-    let registration = signing::register(&github.login, &title, &key.public).await;
+    let registration = signing::register(&login, &title, &key.public).await;
     Ok((outcome, Some(registration)))
 }
 
+/// Signs the `enroll` request for `profile` to `manager` as `identity`,
+/// sends it on `session`'s live socket, and waits up to [`TIMEOUT`] for
+/// its `done` reply.
 pub async fn enroll(
     session: Arc<Session>,
     identity: Arc<Identity>,
@@ -430,15 +802,47 @@ pub async fn enroll(
 ) -> Result<Outcome, String> {
     let manager = PublicKey::from_hex(&manager).map_err(|_| "The manager key is not valid.")?;
     let request_id = uuid::Uuid::new_v4().to_string();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs());
     let request = identity
-        .enroll_request(&manager, &request_id, profile, now)
+        .enroll_request(&manager, &request_id, profile, now())
         .map_err(|error| format!("Could not sign the enrollment ({}).", error.label()))?;
     if json!(["EVENT", request]).to_string().len() > MAX_PUBLICATION_FRAME {
         return Err("The profile is too large to send. Shorten the via profile.".into());
     }
+    let response = ask(&session, &identity, &manager, request, &request_id).await?;
+    outcome(&response)
+}
+
+/// What the manager has on file for `identity`'s developer, by the
+/// `profile` request: `None` when nothing is stored.
+pub async fn on_file(
+    session: Arc<Session>,
+    identity: Arc<Identity>,
+    manager: String,
+) -> Result<Option<Summary>, String> {
+    let manager = PublicKey::from_hex(&manager).map_err(|_| "The manager key is not valid.")?;
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let request = identity
+        .profile_request(&manager, &request_id, now())
+        .map_err(|error| format!("Could not sign the request ({}).", error.label()))?;
+    let response = ask(&session, &identity, &manager, request, &request_id).await?;
+    on_file_reply(&response)
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
+}
+
+/// Sends `request` on `session`'s live socket and waits up to [`TIMEOUT`]
+/// for the manager's `done` response to it.
+async fn ask(
+    session: &Session,
+    identity: &Identity,
+    manager: &PublicKey,
+    request: nostr::prelude::Event,
+    request_id: &str,
+) -> Result<Value, String> {
     let filter = json!({
         "kinds": [KIND], "#p": [identity.pubkey_hex()], "#e": [request.id.to_hex()],
     });
@@ -467,9 +871,9 @@ pub async fn enroll(
                 _ => None,
             })
         });
-        done(Box::pin(events), &request_id, |event| {
+        done(Box::pin(events), request_id, |event| {
             identity
-                .open_session_reply(event, &manager, &request.id)
+                .open_session_reply(event, manager, &request.id)
                 .ok()
         })
         .await

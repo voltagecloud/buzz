@@ -227,11 +227,21 @@ async fn the_done_reply_maps_to_enrolled_or_its_refusal() {
             reply.clone()
         })
         .await
+        .and_then(|response| outcome(&response))
     };
     assert_eq!(
         outcome_of(json!({"ok": true, "version_id": "v-2"})).await,
         Ok(Outcome::Enrolled {
-            version_id: "v-2".into()
+            version_id: "v-2".into(),
+            summary: None,
+        })
+    );
+    // The manager's summary of the merged profile comes with it.
+    assert_eq!(
+        outcome_of(json!({"ok": true, "version_id": "v-3", "profile": summary_json()})).await,
+        Ok(Outcome::Enrolled {
+            version_id: "v-3".into(),
+            summary: Some(summary()),
         })
     );
     for (code, _) in REFUSALS {
@@ -309,4 +319,139 @@ fn a_gh_failure_says_what_to_do() {
     ] {
         assert!(signing::gh_failure(stderr).contains(hint), "{stderr}");
     }
+}
+
+/// The manager's summary of a stored profile, as it sends it.
+fn summary_json() -> Value {
+    json!({
+        "version_id": "v-1",
+        "updated_at": "2026-10-23T12:00:00Z",
+        "git": {"name": "Tee Eight", "email": "tee@example.com", "signing_key": true},
+        "github": {"login": "tee8z", "token": true},
+        "via": {"profile": true, "op_token": true},
+        "models": ["claude_oauth_token"],
+    })
+}
+
+fn summary() -> Summary {
+    serde_json::from_value(summary_json()).unwrap()
+}
+
+/// With a profile on file, only filled fields are sent, a blank GitHub token
+/// and the signing key are kept, and a removed credential is `null`.
+#[test]
+fn a_change_over_a_stored_profile_sends_only_what_changes() {
+    let mut values = Values::default();
+    values.set(Field::CodexAccessToken, " at-fixtureCodexToken ".into());
+    let sent = partial(
+        &values,
+        OWNER,
+        Changes {
+            removed: &["claude_oauth_token"],
+            ..Changes::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        sent,
+        json!({
+            "version": 1,
+            "developer": "",
+            "owner_pubkey": OWNER,
+            "models": {"codex_access_token": "at-fixtureCodexToken", "claude_oauth_token": null},
+        })
+    );
+    // A new token sends its account and the Git name; a new key is sent too.
+    let mut values = Values::default();
+    values.set(Field::GithubToken, "ghp_fixtureGithubToken".into());
+    let account = github();
+    let sent = partial(
+        &values,
+        OWNER,
+        Changes {
+            github: Some(&account),
+            signing_key: Some(KEY),
+            removed: &[],
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        sent["github"],
+        json!({"login": "tee8z", "token": "ghp_fixtureGithubToken"})
+    );
+    assert_eq!(
+        sent["git"],
+        json!({"name": "Tee Eight", "ssh_signing_key": KEY})
+    );
+    assert!(sent.get("via").is_none() && sent.get("models").is_none());
+    // Nothing filled and nothing removed is not sent.
+    assert_eq!(
+        partial(&Values::default(), OWNER, Changes::default()),
+        Err("Nothing to change: fill in a field, or remove a credential.".into())
+    );
+}
+
+/// Each field a change sends passes `profile.py`'s rule for it.
+#[test]
+fn a_change_is_refused_as_profile_py_refuses_its_fields() {
+    let refused = |field, text: &str| {
+        let mut values = Values::default();
+        values.set(field, text.into());
+        partial(&values, OWNER, Changes::default()).unwrap_err()
+    };
+    assert_eq!(
+        refused(Field::CodexAccessToken, "sk-notAnAccessToken"),
+        "Use a Codex access token (at-...)"
+    );
+    assert_eq!(
+        refused(Field::OpToken, "ops with space"),
+        "Invalid credential"
+    );
+    assert_eq!(
+        refused(Field::ViaProfile, "not = [toml"),
+        "Invalid via profile"
+    );
+    let mut both = Values::default();
+    both.set(Field::OpenaiApiKey, "sk-fixtureOpenaiKey".into());
+    both.set(Field::CodexAccessToken, "at-fixtureCodexToken".into());
+    assert_eq!(
+        partial(&both, OWNER, Changes::default()).unwrap_err(),
+        "Choose either an OpenAI API key or a Codex access token"
+    );
+    assert_eq!(
+        validate_partial(&json!({"version": 1, "owner_pubkey": OWNER,
+            "models": {"gemini_api_key": null}})),
+        Err("Unsupported model credential type".into())
+    );
+}
+
+/// The `profile` reply: the summary, nothing on file, or the refusal.
+#[test]
+fn the_profile_reply_names_what_is_on_file() {
+    assert_eq!(
+        on_file_reply(&json!({"ok": true, "profile": summary_json()})),
+        Ok(Some(summary()))
+    );
+    assert_eq!(
+        on_file_reply(&json!({"ok": true, "profile": null})),
+        Ok(None)
+    );
+    let refused =
+        on_file_reply(&json!({"ok": false, "code": "unauthorized_owner", "error": "No."}));
+    assert!(
+        refused
+            .unwrap_err()
+            .starts_with("Refused (unauthorized_owner). ")
+    );
+    assert!(on_file_reply(&json!("done")).is_err());
+    let summary = summary();
+    assert!(summary.holds(Field::GithubToken) && summary.holds(Field::ClaudeOauthToken));
+    assert!(!summary.holds(Field::CodexAccessToken));
+    assert_eq!(summary.model_fields(), [Field::ClaudeOauthToken]);
+    assert_eq!(
+        OnFile::Stored(summary).text(),
+        "On file: GitHub @tee8z · Git email tee@example.com · signing key · via profile · \
+         1Password token · Claude subscription token. Updated 2026-10-23 12:00 UTC."
+    );
+    assert_eq!(OnFile::Nothing.text(), "Nothing enrolled yet.");
 }

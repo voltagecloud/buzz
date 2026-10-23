@@ -20,7 +20,11 @@ impl Identity {
         created_at: u64,
     ) -> Result<Event, WireError> {
         let payload = serde_json::json!({ "profile": profile });
-        self.owner_request(manager, Request::new(Op::Enroll, request_id, payload), created_at)
+        self.owner_request(
+            manager,
+            Request::new(Op::Enroll, request_id, payload),
+            created_at,
+        )
     }
 
     /// The owner-signed `profile` request: what the developer's stored
