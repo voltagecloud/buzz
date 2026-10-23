@@ -1276,6 +1276,10 @@ mod flush_barrier {
             "relay returned 500 Internal Server Error"
         ));
         assert!(!is_permanent_rejection("relay rate-limited: retry in 5s"));
+        // A clock difference clears, so a timestamp refusal is retried.
+        assert!(!is_permanent_rejection(
+            "relay returned 400 Bad Request: invalid: event timestamp too far from server time"
+        ));
         assert!(!is_permanent_rejection(
             "relay returned 403 Forbidden: restricted: not a member"
         ));

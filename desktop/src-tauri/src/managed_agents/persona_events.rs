@@ -527,11 +527,12 @@ fn resign_with_fresh_timestamp(
 
 /// Whether a relay submit error is the relay refusing the event itself
 /// (`invalid:`), which resending the same event cannot change, rather than an
-/// unreachable, rate-limited, or failing relay.
+/// unreachable, rate-limited, or failing relay. A timestamp refusal of an
+/// event signed just before sending means the clocks differ, which clears.
 fn is_permanent_rejection(error: &str) -> bool {
-    error
-        .split_once(": ")
-        .is_some_and(|(_, message)| message.starts_with("invalid:"))
+    error.split_once(": ").is_some_and(|(_, message)| {
+        message.starts_with("invalid:") && !message.contains("timestamp")
+    })
 }
 
 /// Re-sign a retained event at `created_at`, preserving its kind, tags, and
