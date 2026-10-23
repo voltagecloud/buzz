@@ -120,6 +120,11 @@ result = subprocess.run(['sprig-entrypoint', 'auth-methods', '--agent-command', 
 require('synthetic-profile-' not in result.stdout+result.stderr, 'credential reached output')
 if mode not in ('valid', 'claude-oauth', 'subscriptions', 'no-depot'):
     require(result.returncode != 0 and not Path('/tmp/profile-adapter.ran').exists(), 'invalid profile started a runtime')
+    # The refusal names the step that failed, so a failed Sandbox can be diagnosed from its log.
+    steps = {'wrong-owner': 'while validating the profile: Developer profile owner does not match',
+             'missing': 'while reading the profile secret: ',
+             'symlink': 'while writing credential files: Unsafe credential directory'}
+    require(mode not in steps or steps[mode] in result.stderr, 'refusal does not name the failed step')
     print('PASS: refused '+mode)
 else:
     require(result.returncode == 0 and Path('/tmp/profile-adapter.ran').exists(), 'runtime bootstrap failed')

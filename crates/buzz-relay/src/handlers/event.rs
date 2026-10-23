@@ -1041,6 +1041,85 @@ async fn handle_ephemeral_event(
     Ok(())
 }
 
+/// A typing indicator (kind:20002) submitted over the HTTP bridge, which the
+/// Buzz app uses to publish as an agent it runs. It gets the checks and the
+/// fan-out of a WebSocket ephemeral event, and like one it is never stored:
+/// the signer is the authenticated key, the signature verifies, the signer
+/// may write, the community is not fenced, and the signer is a member of the
+/// channel its `h` tag names.
+pub(crate) async fn publish_http_typing(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    event: Event,
+    auth_pubkey: nostr::PublicKey,
+) -> Result<super::ingest::IngestResult, IngestError> {
+    if event.pubkey != auth_pubkey {
+        return Err(IngestError::AuthFailed(
+            "invalid: event pubkey does not match authenticated identity".into(),
+        ));
+    }
+    let checked = event.clone();
+    match tokio::task::spawn_blocking(move || verify_event(&checked)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return Err(IngestError::Rejected(format!("invalid: {e}"))),
+        Err(_) => return Err(IngestError::Internal("error: internal error".to_string())),
+    }
+    super::ingest::enforce_write_restriction(
+        state,
+        tenant,
+        buzz_core::kind::KIND_TYPING_INDICATOR,
+        &auth_pubkey,
+    )
+    .await?;
+    match buzz_deletion::store(&state.db)
+        .is_serving_active(tenant.community())
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(IngestError::Rejected(
+                "restricted: community writes are fenced".into(),
+            ))
+        }
+        Err(error) => {
+            warn!(%error, "failed to check typing-event community lifecycle");
+            return Err(IngestError::Internal("error: internal server error".into()));
+        }
+    }
+    let channel = super::ingest::extract_channel_id(&event).ok_or_else(|| {
+        IngestError::Rejected("invalid: a typing indicator needs a channel h tag".into())
+    })?;
+    super::ingest::check_channel_membership(
+        tenant,
+        state,
+        channel,
+        auth_pubkey.to_bytes().as_ref(),
+        None,
+    )
+    .await
+    .map_err(IngestError::Rejected)?;
+
+    let event_id = event.id.to_hex();
+    state.mark_local_event(tenant.community(), &event.id);
+    if let Err(e) = state
+        .pubsub
+        .publish_event(tenant, EventTopic::Channel(channel), &event)
+        .await
+    {
+        state
+            .local_event_ids
+            .invalidate(&(tenant.community(), event.id.to_bytes()));
+        warn!(event_id = %event_id, "Typing publish failed: {e}");
+    }
+    let stored_event = StoredEvent::new(event, Some(channel));
+    fan_out_event_to_local_subscribers(state, tenant.community(), &stored_event).await;
+    Ok(super::ingest::IngestResult {
+        event_id,
+        accepted: true,
+        message: String::new(),
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AgentObserverDirection {
     Telemetry,
