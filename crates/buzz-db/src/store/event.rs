@@ -238,7 +238,10 @@ fn huddle_started_content_links(content: &str, ephemeral_channel_id: Uuid) -> bo
 /// The creator constraint matters: a member of some unrelated channel can post
 /// their own kind:48100 event there, but they cannot sign as the creator of the
 /// target ephemeral channel. One set-based query replaces the liveness
-/// endpoint's former session × parent lookup loop. Malformed historical start
+/// endpoint's former session × parent lookup loop. Like the per-link checks,
+/// SQL only narrows candidates to start events that mention the session ID,
+/// and [`huddle_started_content_links`] decides: Postgres 15 cannot test
+/// whether text is valid JSON without raising. Malformed historical start
 /// content is ignored rather than aborting the complete liveness snapshot.
 pub async fn huddle_started_links(
     pool: &PgPool,
@@ -256,18 +259,14 @@ pub async fn huddle_started_links(
     .await?;
     let rows = sqlx::query(
         r#"
-        SELECT DISTINCT ON (backing.id)
-               backing.id AS session_id,
+        SELECT backing.id AS session_id,
                start.channel_id AS parent_channel_id,
-               backing.created_by
+               backing.created_by,
+               start.content
         FROM events start
         JOIN channels backing
           ON backing.community_id = start.community_id
-         AND backing.id::text = CASE
-             WHEN start.content IS JSON OBJECT
-             THEN (start.content::json ->> 'ephemeral_channel_id')
-             ELSE NULL
-         END
+         AND start.content ILIKE '%' || backing.id::text || '%'
          AND backing.deleted_at IS NULL
         WHERE start.deleted_at IS NULL
           AND start.community_id = $1
@@ -287,15 +286,26 @@ pub async fn huddle_started_links(
     .fetch_all(&mut *connection)
     .await?;
 
-    rows.into_iter()
-        .map(|row| {
-            Ok((
-                row.try_get("session_id")?,
+    // Rows arrive newest first per session; keep each session's newest link.
+    let mut links: Vec<(Uuid, Uuid, Vec<u8>)> = Vec::new();
+    for row in rows {
+        let session_id: Uuid = row.try_get("session_id")?;
+        if links
+            .last()
+            .is_some_and(|(linked, _, _)| *linked == session_id)
+        {
+            continue;
+        }
+        let content: String = row.try_get("content")?;
+        if huddle_started_content_links(&content, session_id) {
+            links.push((
+                session_id,
                 row.try_get("parent_channel_id")?,
                 row.try_get("created_by")?,
-            ))
-        })
-        .collect()
+            ));
+        }
+    }
+    Ok(links)
 }
 
 /// Return whether a creator-signed huddle-start event links a parent channel
@@ -3636,9 +3646,12 @@ mod postgres_tests {
         let session = make_test_channel(&pool, community_uuid, Some(60)).await;
         let creator = vec![7_u8; 32];
 
+        // The newest start mentions the session but is not JSON, and must not
+        // hide the older valid link.
         for (index, content) in [
             "not-json".to_owned(),
             serde_json::json!({ "ephemeral_channel_id": session }).to_string(),
+            format!("{{\"ephemeral_channel_id\":\"{session}\""),
         ]
         .into_iter()
         .enumerate()
