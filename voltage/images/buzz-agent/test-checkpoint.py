@@ -106,12 +106,34 @@ with tempfile.TemporaryDirectory() as temp:
     git(clone,'config','user.name','Checkpoint Fixture')
     git(clone,'config','user.email','fixture@example.invalid')
     checkpoint.pack(workspace,root/'upstream.tar.gz')
-    (clone/'values.yaml').write_text(token+'github_token_2 = "ghp_'+'Zy9Xw8Vu7Ts6Rq5Po4Nm3Lk2Ji1Hg0Fe9Dc8'+'"\n')
+    # Editing other lines of a file that holds an upstream credential is allowed,
+    # and the checkpoint restores.
+    (clone/'values.yaml').write_text(token+'replicas: 2\n')
+    checkpoint.pack(workspace,root/'upstream-edited.tar.gz')
+    checkpoint.restore(root/'upstream-edited.tar.gz',root/'restored-upstream')
+    assert (root/'restored-upstream/clone/values.yaml').read_text() == token+'replicas: 2\n'
+    leaked = token+'replicas: 2\ngithub_token_2 = "ghp_'+'Zy9Xw8Vu7Ts6Rq5Po4Nm3Lk2Ji1Hg0Fe9Dc8'+'"\n'
+    (clone/'values.yaml').write_text(leaked)
     try:
         checkpoint.pack(workspace,root/'edited.tar.gz')
         raise AssertionError('secret scanner admitted a credential added to a tracked file')
     except ValueError:
         pass
+    # Restore applies the same scope: an archive whose files add a credential
+    # is refused, and leaves no destination behind.
+    forged = root/'forged'
+    with tarfile.open(root/'upstream-edited.tar.gz') as archive:
+        archive.extractall(forged, filter='data')
+    index = [r['path'] for r in json.loads((forged/'snapshot/manifest.json').read_text())['repositories']].index('clone')
+    (forged/'snapshot/repositories'/str(index)/'files/values.yaml').write_text(leaked)
+    with tarfile.open(root/'forged.tar.gz','w:gz') as archive:
+        archive.add(forged/'snapshot',arcname='snapshot')
+    try:
+        checkpoint.restore(root/'forged.tar.gz',root/'restored-forged')
+        raise AssertionError('restore admitted a credential the archive added')
+    except ValueError:
+        pass
+    assert not (root/'restored-forged').exists()
     git(clone,'commit','-am','chore: commit a credential locally')
     try:
         checkpoint.pack(workspace,root/'committed.tar.gz')
@@ -124,7 +146,7 @@ with tempfile.TemporaryDirectory() as temp:
     assert cli.returncode == 11 and 'while scanning for secrets' in cli.stderr, cli.returncode
     git(clone,'reset','-q','--hard','origin/main')
     checkpoint.pack(workspace,root/'reset.tar.gz')
-    print('PASS: credentials already on the remote are allowed; one in an edited file or unpushed commit is refused with the scan step')
+    print('PASS: credentials already on the remote are allowed and restore; one added in a file, an unpushed commit or an archive is refused with the scan step')
 
     (root/'private').write_text('outside workspace')
     (repo/'escape').symlink_to(root/'private')

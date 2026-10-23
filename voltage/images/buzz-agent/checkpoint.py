@@ -104,11 +104,30 @@ def scan(directory, *, history=False):
     step(previous)
 
 
-def changed(repo):
-    """Paths whose working-tree content differs from HEAD, and untracked paths."""
-    names = git(repo, 'diff', '--name-only', '--no-renames', '-z', 'HEAD')
-    names += git(repo, 'ls-files', '-z', '--others', '--exclude-standard')
-    return {os.fsdecode(raw) for raw in names.split(b'\0') if raw}
+def review_changes(repo, review):
+    """Write what the working tree adds to HEAD into review, for the secret scan.
+
+    Untracked files are copied whole. A tracked file contributes only its added
+    lines, so a credential already upstream in an edited file is not a finding."""
+    def write(path, content):
+        target = review / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+
+    for raw in git(repo, 'ls-files', '-z', '--others', '--exclude-standard').split(b'\0'):
+        path = safe_path(os.fsdecode(raw)) if raw else None
+        if path and not excluded(path) and (repo / path).is_file() and not (repo / path).is_symlink():
+            write(path, (repo / path).read_bytes())
+    for raw in git(repo, 'diff', '--name-only', '--no-renames', '-z', 'HEAD').split(b'\0'):
+        path = safe_path(os.fsdecode(raw)) if raw else None
+        if not path or excluded(path):
+            continue
+        patch = git(repo, 'diff', '--no-ext-diff', '--no-color', '--no-renames', '-U0',
+                    'HEAD', '--', str(path))
+        hunks = patch.split(b'\n@@', 1)[1] if b'\n@@' in patch else b''
+        added = [line[1:] for line in hunks.split(b'\n') if line.startswith(b'+')]
+        if added:
+            write(path, b'\n'.join(added) + b'\n')
 
 
 def pack(workspace, output):
@@ -119,7 +138,7 @@ def pack(workspace, output):
     with tempfile.TemporaryDirectory(prefix='agent-checkpoint-') as temp, \
             tempfile.TemporaryDirectory(prefix='agent-checkpoint-review-') as review_temp:
         stage = Path(temp)
-        # The files the agent changed, linked from the stage for the secret scan.
+        # What the agent added to each repository, for the secret scan.
         review = Path(review_temp)
         for index, repo in enumerate(repositories(workspace)):
             relative = repo.relative_to(workspace).as_posix()
@@ -132,7 +151,7 @@ def pack(workspace, output):
             destination = stage / 'repositories' / str(index)
             (destination / 'files').mkdir(parents=True)
             scan(repo, history=True)
-            edited = changed(repo)
+            review_changes(repo, review / str(index))
             git(repo, 'bundle', 'create', str(destination / 'history.bundle'), '--all', 'HEAD')
             total += (destination / 'history.bundle').stat().st_size
             names = git(repo, 'ls-files', '-z', '--cached', '--others', '--exclude-standard')
@@ -164,10 +183,6 @@ def pack(workspace, output):
                         raise ValueError('Checkpoint exceeds the 256 MiB source budget')
                     target.write_bytes(content)
                     target.chmod(0o755 if info.st_mode & 0o111 else 0o644)
-                    if str(path) in edited:
-                        linked = review / str(index) / path
-                        linked.parent.mkdir(parents=True, exist_ok=True)
-                        os.link(target, linked)
                 else:
                     raise ValueError('Checkpoint refused a special file')
                 count += 1
@@ -208,8 +223,21 @@ def restore(archive_path, destination):
         manifest = json.loads((stage / 'manifest.json').read_text())
         if manifest.get('version') != 1:
             raise ValueError('Unsupported checkpoint version')
-        scan(stage)
         destination.mkdir(mode=0o700, parents=True)
+        try:
+            restore_repositories(stage, manifest, destination)
+        except BaseException:
+            # The destination is new, so a refused restore leaves nothing behind.
+            shutil.rmtree(destination, ignore_errors=True)
+            raise
+        return manifest
+
+
+def restore_repositories(stage, manifest, destination):
+    with tempfile.TemporaryDirectory(prefix='agent-restore-review-') as review_temp:
+        # The same scope as pack(): what each repository adds to its HEAD.
+        review = Path(review_temp)
+        (review / 'manifest.json').write_text(json.dumps(manifest))
         for index, record in enumerate(manifest['repositories']):
             relative = safe_path(record['path'])
             if excluded(relative):
@@ -234,7 +262,8 @@ def restore(archive_path, destination):
                     if not excluded(path) and (target.is_file() or target.is_symlink()):
                         target.unlink()
             shutil.copytree(source / 'files', repo, dirs_exist_ok=True, symlinks=True)
-        return manifest
+            review_changes(repo, review / str(index))
+        scan(review)
 
 
 def storage():

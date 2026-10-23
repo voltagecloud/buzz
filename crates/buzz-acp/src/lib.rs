@@ -3344,7 +3344,8 @@ async fn run_harness(
             }
         }
 
-        if pool_ready && last_maintenance.elapsed() >= maintenance_interval {
+        let maintenance_due = last_maintenance.elapsed() >= maintenance_interval;
+        if pool_ready && maintenance_due {
             last_maintenance = std::time::Instant::now();
             queue.compact_expired_state();
 
@@ -3388,31 +3389,34 @@ async fn run_harness(
                     typing_channels.insert(scope, thread_tags);
                 }
             }
+        }
 
-            // A turn's save that found its own prompt task still unjoined, or
-            // that fell inside the interval, starts at the first idle tick.
-            if turn_checkpoints.is_pending() {
-                if drain_ready_join_results(
-                    &mut pool,
-                    &mut queue,
-                    config,
-                    &mut heartbeat_in_flight,
-                    &removed_channels,
-                    &mut typing_channels,
-                    &mut crash_history,
-                    &respawn_tx,
-                    &mut respawn_tasks,
-                    observer.clone(),
-                ) == LoopAction::Exit
-                {
-                    break;
-                }
-                turn_checkpoints.at_idle(checkpoint::Busy {
-                    turn_in_flight: queue.has_in_flight() || heartbeat_in_flight,
-                    prompt_tasks: !pool.join_set.is_empty(),
-                    work_queued: queue.has_undispatched_work(),
-                });
+        // A turn's save that found its own prompt task still unjoined, or that
+        // fell inside the interval, starts at the first idle tick. This tick
+        // also runs while a lazy pool sleeps, so the save does not wait for
+        // the next event.
+        if maintenance_due && turn_checkpoints.is_pending() {
+            last_maintenance = std::time::Instant::now();
+            if drain_ready_join_results(
+                &mut pool,
+                &mut queue,
+                config,
+                &mut heartbeat_in_flight,
+                &removed_channels,
+                &mut typing_channels,
+                &mut crash_history,
+                &respawn_tx,
+                &mut respawn_tasks,
+                observer.clone(),
+            ) == LoopAction::Exit
+            {
+                break;
             }
+            turn_checkpoints.at_idle(checkpoint::Busy {
+                turn_in_flight: queue.has_in_flight() || heartbeat_in_flight,
+                prompt_tasks: !pool.join_set.is_empty(),
+                work_queued: queue.has_undispatched_work(),
+            });
         }
 
         // Reap completed respawn handles from the JoinSet. Payloads are
@@ -3433,7 +3437,8 @@ async fn run_harness(
         } else {
             None
         };
-        let maintenance_at = pool_ready.then_some(last_maintenance + maintenance_interval);
+        let maintenance_at = (pool_ready || turn_checkpoints.is_pending())
+            .then_some(last_maintenance + maintenance_interval);
 
         // Borrow result_rx and join_set simultaneously via split-borrow helper.
         pool.retain_held_scopes(|scope| queue.has_pending_scope(scope));
