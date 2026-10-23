@@ -23,6 +23,16 @@ EXCLUDED = {'.git', '.aws', '.ssh', '.gnupg', '.config', '.codex', '.claude',
             'node_modules', 'target', '__pycache__', 'dist', 'build', '.terraform'}
 PRIVATE_NAMES = {'credentials', 'credentials.json', 'auth.json', 'id_rsa', 'id_ed25519',
                  '.npmrc', '.netrc', '.pypirc', '.git-credentials'}
+# buzz-acp discards this helper's output, so the exit code names the failed
+# step (helper_step in crates/buzz-acp/src/checkpoint.rs).
+STEPS = {'reading the checkpoint settings': 10, 'scanning for secrets': 11,
+         'packing the workspace': 12, 'uploading the checkpoint': 13,
+         'restoring the checkpoint': 14}
+STEP = ['packing the workspace']
+
+
+def step(name):
+    STEP[0] = name
 
 
 def run(*args, cwd=None, timeout=60, env=None):
@@ -75,16 +85,30 @@ def public_origin(repo):
 
 
 def scan(directory, *, history=False):
+    """Refuse a credential the agent added: commits not on any remote, or files.
+
+    History and files already on a remote are on the forge, where the agent's
+    token can read them, so the scan leaves them out."""
     # Immutable image configuration prevents workspace allowlists from bypassing
     # the scan. Scanner output can contain secrets even on errors, so suppress it.
+    previous = STEP[0]
+    step('scanning for secrets')
     env = {k: v for k, v in os.environ.items() if not k.startswith('GITLEAKS_')}
     command = ['gitleaks', 'git' if history else 'dir', str(directory),
                '--config', '/opt/agent-tools/checkpoint-gitleaks.toml',
                '--gitleaks-ignore-path', '/dev/null', '--ignore-gitleaks-allow',
                '--no-banner', '--redact', '--timeout', '60']
     if history:
-        command += ['--log-opts=--all HEAD']
+        command += ['--log-opts=--all HEAD --not --remotes']
     run(*command, timeout=65, env=env)
+    step(previous)
+
+
+def changed(repo):
+    """Paths whose working-tree content differs from HEAD, and untracked paths."""
+    names = git(repo, 'diff', '--name-only', '--no-renames', '-z', 'HEAD')
+    names += git(repo, 'ls-files', '-z', '--others', '--exclude-standard')
+    return {os.fsdecode(raw) for raw in names.split(b'\0') if raw}
 
 
 def pack(workspace, output):
@@ -92,8 +116,11 @@ def pack(workspace, output):
     manifest = {'version': 1, 'repositories': []}
     total = 0
     count = 0
-    with tempfile.TemporaryDirectory(prefix='agent-checkpoint-') as temp:
+    with tempfile.TemporaryDirectory(prefix='agent-checkpoint-') as temp, \
+            tempfile.TemporaryDirectory(prefix='agent-checkpoint-review-') as review_temp:
         stage = Path(temp)
+        # The files the agent changed, linked from the stage for the secret scan.
+        review = Path(review_temp)
         for index, repo in enumerate(repositories(workspace)):
             relative = repo.relative_to(workspace).as_posix()
             if relative == '.':
@@ -105,6 +132,7 @@ def pack(workspace, output):
             destination = stage / 'repositories' / str(index)
             (destination / 'files').mkdir(parents=True)
             scan(repo, history=True)
+            edited = changed(repo)
             git(repo, 'bundle', 'create', str(destination / 'history.bundle'), '--all', 'HEAD')
             total += (destination / 'history.bundle').stat().st_size
             names = git(repo, 'ls-files', '-z', '--cached', '--others', '--exclude-standard')
@@ -136,6 +164,10 @@ def pack(workspace, output):
                         raise ValueError('Checkpoint exceeds the 256 MiB source budget')
                     target.write_bytes(content)
                     target.chmod(0o755 if info.st_mode & 0o111 else 0o644)
+                    if str(path) in edited:
+                        linked = review / str(index) / path
+                        linked.parent.mkdir(parents=True, exist_ok=True)
+                        os.link(target, linked)
                 else:
                     raise ValueError('Checkpoint refused a special file')
                 count += 1
@@ -146,7 +178,8 @@ def pack(workspace, output):
         if total > MAX_BYTES:
             raise ValueError('Checkpoint history exceeds the 256 MiB source budget')
         (stage / 'manifest.json').write_text(json.dumps(manifest))
-        scan(stage)
+        shutil.copyfile(stage / 'manifest.json', review / 'manifest.json')
+        scan(review)
         with tarfile.open(output, 'w:gz', dereference=False) as archive:
             archive.add(stage, arcname='snapshot')
     os.chmod(output, 0o600)
@@ -218,10 +251,13 @@ def storage():
 
 
 def save(workspace):
+    step('reading the checkpoint settings')
     bucket, prefix = storage()
     with tempfile.TemporaryDirectory(prefix='agent-upload-') as temp:
         artifact = Path(temp) / 'checkpoint.tar.gz'
+        step('packing the workspace')
         manifest = pack(workspace, artifact)
+        step('uploading the checkpoint')
         checksum = base64.b64encode(digest(artifact)).decode()
         key = prefix + str(uuid.uuid4()) + '.tar.gz'
         run('aws', 's3api', 'put-object', '--bucket', bucket, '--key', key,
@@ -311,6 +347,8 @@ def main():
     parser.add_argument('--destination', type=Path)
     parser.add_argument('--key')
     args = parser.parse_args()
+    if args.action in ('restore', 'recover', 'restore-once'):
+        step('restoring the checkpoint')
     if args.action == 'save':
         result = save(args.workspace)
     elif args.action == 'pack' and args.archive:
@@ -331,5 +369,6 @@ if __name__ == '__main__':
     try:
         main()
     except (ValueError, OSError, subprocess.TimeoutExpired, tarfile.TarError):
-        print('Checkpoint failed; retain the workspace and inspect it before cleanup', file=sys.stderr)
-        sys.exit(1)
+        print('Checkpoint failed while '+STEP[0]+'; retain the workspace and inspect it before cleanup',
+              file=sys.stderr)
+        sys.exit(STEPS[STEP[0]])

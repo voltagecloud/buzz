@@ -46,13 +46,38 @@ impl CheckpointError {
         }
     }
 
+    /// The helper step that failed, from its exit code.
+    fn step(&self) -> Option<&'static str> {
+        match self {
+            Self::ExitStatus(status) => helper_step(status.code()?),
+            _ => None,
+        }
+    }
+
     fn details(&self) -> serde_json::Value {
         let mut details = serde_json::json!({"reason": self.reason()});
         if let Self::ExitStatus(status) = self {
             details["exit_code"] = status.code().into();
         }
+        if let Some(step) = self.step() {
+            details["step"] = step.into();
+        }
         details
     }
+}
+
+/// `buzz-agent-checkpoint` exits with one code per step (`STEPS` in
+/// `voltage/images/buzz-agent/checkpoint.py`), so a failure names its step
+/// without the helper output.
+fn helper_step(code: i32) -> Option<&'static str> {
+    Some(match code {
+        10 => "reading the checkpoint settings",
+        11 => "scanning for secrets",
+        12 => "packing the workspace",
+        13 => "uploading the checkpoint",
+        14 => "restoring the checkpoint",
+        _ => return None,
+    })
 }
 
 /// Only these fields reach activity; anything else the helper adds is ignored.
@@ -127,12 +152,14 @@ type SaveFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 /// sends no SIGTERM, so the save on stop never runs; these bound the loss to
 /// the work since the last one. Saves start only at idle points, one runs at
 /// a time, at most one starts per `interval`, and the save on stop still runs
-/// after the adapters exit.
+/// after the adapters exit. A completed turn whose save cannot start yet stays
+/// pending until [`TurnCheckpoints::at_idle`] finds an idle point.
 pub(crate) struct TurnCheckpoints {
     interval: Duration,
     start: Box<dyn FnMut() -> SaveFuture + Send>,
     last_started: Option<tokio::time::Instant>,
     running: Option<tokio::task::JoinHandle<()>>,
+    pending: bool,
 }
 
 /// What the harness still has in progress when a turn completes.
@@ -174,6 +201,7 @@ impl TurnCheckpoints {
             start,
             last_started: None,
             running: None,
+            pending: false,
         }
     }
 
@@ -184,10 +212,24 @@ impl TurnCheckpoints {
     /// turn that starts while the save runs can still race it, so only the
     /// final save on stop attests the workspace.
     pub(crate) fn after_turn(&mut self, busy: Busy) {
-        if self.interval.is_zero()
-            || busy.any()
-            || self.running.as_ref().is_some_and(|t| !t.is_finished())
-        {
+        if self.interval.is_zero() {
+            return;
+        }
+        self.pending = true;
+        self.at_idle(busy);
+    }
+
+    /// Whether a completed turn still waits for its save.
+    pub(crate) fn is_pending(&self) -> bool {
+        self.pending
+    }
+
+    /// Start the save a completed turn is still waiting for, under the same
+    /// rules as [`TurnCheckpoints::after_turn`]. A turn's result arrives
+    /// before its prompt task is joined, so the save can find the pool busy
+    /// at that turn's own completion.
+    pub(crate) fn at_idle(&mut self, busy: Busy) {
+        if !self.pending || busy.any() || self.running.as_ref().is_some_and(|t| !t.is_finished()) {
             return;
         }
         let now = tokio::time::Instant::now();
@@ -197,6 +239,7 @@ impl TurnCheckpoints {
         {
             return;
         }
+        self.pending = false;
         self.last_started = Some(now);
         self.running = Some(tokio::spawn((self.start)()));
     }
@@ -300,6 +343,7 @@ async fn save_with_command(
         Err(error) => {
             tracing::error!(
                 reason = error.reason(),
+                step = error.step(),
                 "workspace checkpoint failed: {error}"
             );
             emit("checkpoint_failed", error.details());
@@ -428,6 +472,10 @@ mod tests {
             (
                 "exit 3",
                 serde_json::json!({"reason":"exit_status","exit_code":3}),
+            ),
+            (
+                "exit 11",
+                serde_json::json!({"reason":"exit_status","exit_code":11,"step":"scanning for secrets"}),
             ),
             (
                 "printf 'not a receipt'",
@@ -714,12 +762,53 @@ mod tests {
         }
     }
 
+    /// A completed turn whose save could not start saves at the next idle
+    /// point without waiting for another turn, once the interval allows it.
+    #[tokio::test(start_paused = true)]
+    async fn a_deferred_turn_checkpoint_saves_at_the_next_idle_point() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (mut checkpoints, started) = counting(Duration::from_secs(600), Duration::from_secs(1));
+        // The turn's own prompt task is still unjoined when its result arrives.
+        checkpoints.after_turn(Busy {
+            prompt_tasks: true,
+            ..Busy::default()
+        });
+        settle_tasks().await;
+        assert_eq!(started.load(SeqCst), 0);
+        assert!(checkpoints.is_pending());
+        checkpoints.at_idle(Busy::default());
+        settle_tasks().await;
+        assert_eq!(started.load(SeqCst), 1);
+        assert!(!checkpoints.is_pending());
+        // Nothing pending: an idle point does not save.
+        tokio::time::advance(Duration::from_secs(601)).await;
+        checkpoints.at_idle(Busy::default());
+        settle_tasks().await;
+        assert_eq!(started.load(SeqCst), 1);
+        // A turn inside the interval stays pending until the interval ends.
+        checkpoints.after_turn(Busy::default());
+        settle_tasks().await;
+        assert_eq!(started.load(SeqCst), 2);
+        checkpoints.after_turn(Busy::default());
+        checkpoints.at_idle(Busy::default());
+        settle_tasks().await;
+        assert_eq!(started.load(SeqCst), 2);
+        assert!(checkpoints.is_pending());
+        tokio::time::advance(Duration::from_secs(600)).await;
+        settle_tasks().await;
+        checkpoints.at_idle(Busy::default());
+        settle_tasks().await;
+        assert_eq!(started.load(SeqCst), 3);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn zero_interval_disables_turn_checkpoints() {
         let (mut checkpoints, started) = counting(Duration::ZERO, Duration::ZERO);
         checkpoints.after_turn(Busy::default());
+        checkpoints.at_idle(Busy::default());
         settle_tasks().await;
         assert_eq!(started.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(!checkpoints.is_pending());
     }
 
     #[tokio::test(start_paused = true)]

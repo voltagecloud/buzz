@@ -89,6 +89,43 @@ with tempfile.TemporaryDirectory() as temp:
     (repo/'leak.txt').unlink()
     print('PASS: untracked GitHub or Claude credential causes checkpoint refusal')
 
+    # A credential already on the remote does not block the checkpoint; one the
+    # agent adds, in a file or in an unpushed commit, does.
+    token = 'github_token = "ghp_'+'aB3dE6gH9jK2mN5pQ8sT1vW4yZ7cF0iL3oR6'+'"\n'
+    upstream = root/'upstream'
+    upstream.mkdir()
+    git(upstream,'init','-b','main')
+    git(upstream,'config','user.name','Checkpoint Fixture')
+    git(upstream,'config','user.email','fixture@example.invalid')
+    (upstream/'values.yaml').write_text(token)
+    git(upstream,'add','.')
+    git(upstream,'commit','-m','chore: commit a credential upstream')
+    clone = workspace/'clone'
+    subprocess.check_call(['git','clone','-q',str(upstream),str(clone)],stderr=subprocess.DEVNULL)
+    git(clone,'remote','set-url','origin','https://github.com/example/upstream.git')
+    git(clone,'config','user.name','Checkpoint Fixture')
+    git(clone,'config','user.email','fixture@example.invalid')
+    checkpoint.pack(workspace,root/'upstream.tar.gz')
+    (clone/'values.yaml').write_text(token+'github_token_2 = "ghp_'+'Zy9Xw8Vu7Ts6Rq5Po4Nm3Lk2Ji1Hg0Fe9Dc8'+'"\n')
+    try:
+        checkpoint.pack(workspace,root/'edited.tar.gz')
+        raise AssertionError('secret scanner admitted a credential added to a tracked file')
+    except ValueError:
+        pass
+    git(clone,'commit','-am','chore: commit a credential locally')
+    try:
+        checkpoint.pack(workspace,root/'committed.tar.gz')
+        raise AssertionError('secret scanner admitted a credential in an unpushed commit')
+    except ValueError:
+        pass
+    # The exit code names the step, because buzz-acp discards helper output.
+    cli = subprocess.run(['buzz-agent-checkpoint','pack','--workspace',str(workspace),
+                          '--archive',str(root/'cli.tar.gz')],capture_output=True,text=True)
+    assert cli.returncode == 11 and 'while scanning for secrets' in cli.stderr, cli.returncode
+    git(clone,'reset','-q','--hard','origin/main')
+    checkpoint.pack(workspace,root/'reset.tar.gz')
+    print('PASS: credentials already on the remote are allowed; one in an edited file or unpushed commit is refused with the scan step')
+
     (root/'private').write_text('outside workspace')
     (repo/'escape').symlink_to(root/'private')
     try:

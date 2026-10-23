@@ -3388,6 +3388,31 @@ async fn run_harness(
                     typing_channels.insert(scope, thread_tags);
                 }
             }
+
+            // A turn's save that found its own prompt task still unjoined, or
+            // that fell inside the interval, starts at the first idle tick.
+            if turn_checkpoints.is_pending() {
+                if drain_ready_join_results(
+                    &mut pool,
+                    &mut queue,
+                    config,
+                    &mut heartbeat_in_flight,
+                    &removed_channels,
+                    &mut typing_channels,
+                    &mut crash_history,
+                    &respawn_tx,
+                    &mut respawn_tasks,
+                    observer.clone(),
+                ) == LoopAction::Exit
+                {
+                    break;
+                }
+                turn_checkpoints.at_idle(checkpoint::Busy {
+                    turn_in_flight: queue.has_in_flight() || heartbeat_in_flight,
+                    prompt_tasks: !pool.join_set.is_empty(),
+                    work_queued: queue.has_undispatched_work(),
+                });
+            }
         }
 
         // Reap completed respawn handles from the JoinSet. Payloads are
