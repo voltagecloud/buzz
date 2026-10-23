@@ -253,7 +253,7 @@ Every agent asks the Voltage Sandbox manager on its community, so there is nothi
 
 ### 4. Enroll your profile
 
-Do this once, on any of your Remote workspace agents. Enroll again only to change a credential.
+Do this once, on any of your Remote workspace agents. To change a credential later, see [Change one credential](#change-one-credential).
 
 | Field | Value |
 |---|---|
@@ -274,6 +274,18 @@ Select **Enroll profile**. The app shows **Enrolled. Profile version …**, then
 The app finds your GitHub login and name from the token. The manager finds your developer ID from your Buzz identity.
 
 To stop your agents from signing commits as you, delete the **Buzz agents** key under **Settings → SSH and GPG keys** on GitHub.
+
+#### Change one credential
+
+The enroll form shows what is **On file**: your GitHub login, Git email, and the credentials you enrolled, by name only. It never shows a credential value.
+
+1. Fill in only the fields to change. A field marked **On file · leave blank to keep** keeps its stored value.
+2. To remove a stored model credential, select **Remove** next to it.
+3. Select **Enroll profile**.
+
+You need a GitHub token only to change it. The signing key stays the same, unless you select **Replace the signing key**. Then the app adds the new key to GitHub, as in the first enrollment.
+
+Entering a Codex access token replaces a stored OpenAI API key, and entering a Claude subscription token replaces a stored Anthropic API key. The same applies the other way round, because an agent can use only one of each pair.
 
 ### 5. Start a session
 

@@ -1857,10 +1857,10 @@ subscribers and never stores it. No stored fallback kind exists.
 
 | Event | Signer | Clear-text tags | Encrypted content (NIP-44 v2) |
 | --- | --- | --- | --- |
-| Request | agent key (`private_key_nsec`); owner key for `enroll` | `["p", <manager>]`, the owner's NIP-OA `auth` tag (not on `enroll`), `expiration` | `{"v":1,"op","request_id","payload"}`, to the manager |
+| Request | agent key (`private_key_nsec`); owner key for `enroll` and `profile` | `["p", <manager>]`, the owner's NIP-OA `auth` tag (not on `enroll` or `profile`), `expiration` | `{"v":1,"op","request_id","payload"}`, to the manager |
 | Reply | manager key | `["p", <requester>]`, `["e", <request event id>]`, `expiration` | `{"v":1,"request_id","status","response"}`, to the requester |
 
-- `op` is `info`, `deploy`, `stop` or `enroll`. Recovery is a `deploy` with
+- `op` is `info`, `deploy`, `stop`, `enroll` or `profile`. Recovery is a `deploy` with
   `provider_config.sandbox.recovery`, as in the stdin protocol.
 - `payload` is the provider protocol request, the same JSON as the stdin
   request, including `op`. `response` is the provider protocol response,
@@ -1927,7 +1927,8 @@ authorizes each request in this order:
 6. The namespace is the verified owner's developer namespace from the
    configuration file. It replaces `provider_config.namespace`, and the verified agent and owner
    replace `identity_policy`. The manager runs Sandbox sessions only.
-7. `enroll` is signed by the owner key itself, without an `auth` tag.
+7. `enroll` and `profile` are signed by the owner key itself, without an
+   `auth` tag.
 
 Then the manager replies `accepted` and runs the request in-process with
 its own in-cluster credentials (`provider::run`), and replies `done` with the
@@ -2011,25 +2012,58 @@ because its debug logs quote whole relay frames.
 needs Secrets Manager access to enroll. The Buzz app signs it with the
 owner key itself, with no `auth` tag. The payload is `{"profile": <object>}`,
 where the profile is the schema `voltage/images/buzz-agent/profile.py`
-validates. After the authorization steps above, the manager checks, in
-order:
+validates, or part of it. A partial profile always carries `version` and
+`owner_pubkey`. Any section (`git`, `github`, `via`, `models`), and any key
+in a section, may be left out, and the stored value is kept. In `models`, a
+string sets a credential and `null` removes it. Setting one of an exclusive
+pair (`openai_api_key` and `codex_access_token`, or `anthropic_api_key` and
+`claude_oauth_token`) removes the other. A `github` section carries both
+`login` and `token`.
+
+After the authorization steps above, the manager checks, in order:
 
 1. The signer is a configured developer's `owner_pubkey`
    (`unauthorized_owner`).
 2. The profile's `owner_pubkey` is the signer (`profile_owner_mismatch`).
 3. The profile's `developer` is that developer's ID
    (`profile_developer_mismatch`).
-4. The profile passes the port of `profile.py`'s `validate()`
-   (`crates/buzz-sandbox-reaper/src/profile.rs`, `invalid_profile`).
-5. `GET <BUZZ_GITHUB_API_URL>/user` with the profile's GitHub token reports
-   the profile's `github.login`, ignoring case (`github_login_mismatch`).
+4. The profile has a partial profile's shape (`invalid_profile`).
 
-Then it calls `secretsmanager:PutSecretValue` on the developer's
-`profile_secret_arn` with the profile JSON, using the ambient AWS
-credentials (IRSA), and replies `done` with `{"ok":true,"version_id":"<id>"}`.
-A failed write is `profile_store_failed`. Replies, logs and refusal
-messages never contain a profile value; the serialized profile is zeroized
-after the write. Neither the check nor the write uses the filesystem.
+Then, as the request's job, the manager:
+
+1. Reads the stored profile with `secretsmanager:GetSecretValue`. With
+   nothing stored, the profile must be complete (`invalid_profile`).
+2. Merges the profile into the stored one.
+3. Checks that the merged profile passes the port of `profile.py`'s
+   `validate()` (`crates/buzz-sandbox-reaper/src/profile.rs`,
+   `invalid_profile`).
+4. If the request carries a `github` section, or nothing is stored, checks
+   that `GET <BUZZ_GITHUB_API_URL>/user` with the token reports
+   `github.login`, ignoring case (`github_login_mismatch`).
+5. Calls `secretsmanager:PutSecretValue` on the developer's
+   `profile_secret_arn` with the merged profile JSON, using the ambient AWS
+   credentials (IRSA).
+
+It replies `done` with `{"ok":true,"version_id":"<id>","profile":<summary>}`.
+A failed read or write is `profile_store_failed`.
+
+**Profile summary.** `profile`, with the payload `{}`, replies
+`{"ok":true,"profile":<summary>}`, or `"profile":null` when nothing is
+stored. The summary is:
+
+```json
+{"version_id": "<id>", "updated_at": "<RFC 3339>",
+ "git": {"name": "<name>", "email": "<email>", "signing_key": true},
+ "github": {"login": "<login>", "token": true},
+ "via": {"profile": true, "op_token": true},
+ "models": ["claude_oauth_token"]}
+```
+
+It names the GitHub login and the Git identity, and only whether each
+credential is present. Replies are encrypted to the owner. Replies, logs and
+refusal messages never contain a credential; the serialized profile is
+zeroized after the write. Neither the merge nor the write uses the
+filesystem.
 The manager does not check the 1Password token (`op whoami`); the image
 still refuses a profile it cannot load. A profile with an empty `developer`
 gets the signing owner's developer ID before validation, so the client need

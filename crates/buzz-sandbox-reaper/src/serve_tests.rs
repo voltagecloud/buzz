@@ -389,10 +389,10 @@ async fn enroll_runs_end_to_end_and_its_events_carry_no_profile_value() {
     let replies = client.request(&request, None).await;
     let statuses: Vec<Status> = replies.iter().map(|reply| reply.status).collect();
     assert_eq!(statuses, [Status::Accepted, Status::Done]);
-    assert_eq!(
-        replies[1].response,
-        Some(json!({"ok": true, "version_id": "version-1"}))
-    );
+    let response = replies[1].response.as_ref().unwrap();
+    assert_eq!(response["ok"], true);
+    assert_eq!(response["version_id"], "version-1");
+    assert_eq!(response["profile"]["github"]["login"], "ada-l");
     {
         let written = written.lock().unwrap();
         assert_eq!(written.len(), 1);

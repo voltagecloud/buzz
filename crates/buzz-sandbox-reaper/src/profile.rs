@@ -226,6 +226,130 @@ fn python_string_len(value: &str) -> usize {
         .sum::<usize>()
 }
 
+/// The sections of a profile and the keys each holds.
+const SECTIONS: &[(&str, &[&str])] = &[
+    ("git", &["name", "email", "ssh_signing_key"]),
+    ("github", &["login", "token"]),
+    ("via", &["profile", "op_token"]),
+];
+
+/// Model credentials a profile may hold only one of, each with its other.
+const EXCLUSIVE_MODELS: &[(&str, &str)] = &[
+    ("openai_api_key", "codex_access_token"),
+    ("anthropic_api_key", "claude_oauth_token"),
+];
+
+/// The shape of a partial profile `enroll` merges into the stored one:
+/// `profile.py`'s fields, each optional, with `null` removing a model
+/// credential. [`validate`] checks the merged profile's values.
+pub fn check_partial(profile: &Value) -> Result<(), Invalid> {
+    const INCOMPLETE: &str = "Profile fields are incomplete or unsupported";
+    let top = profile.as_object().ok_or(Invalid(INCOMPLETE))?;
+    require(top.keys().all(|k| FIELDS.contains(&k.as_str())), INCOMPLETE)?;
+    let version = top.get("version").unwrap_or(&Value::Null);
+    require(
+        (version.is_u64() || version.is_i64()) && version.as_i64() == Some(1),
+        "Unsupported profile version",
+    )?;
+    for (section, keys) in SECTIONS {
+        if let Some(value) = top.get(*section) {
+            let map = value.as_object().ok_or(Invalid(INCOMPLETE))?;
+            require(map.keys().all(|k| keys.contains(&k.as_str())), INCOMPLETE)?;
+        }
+    }
+    // A new token is checked against its login, so the two travel together.
+    if let Some(github) = top.get("github") {
+        require(
+            github.get("login").is_some() && github.get("token").is_some(),
+            "A GitHub token needs its login",
+        )?;
+    }
+    if let Some(models) = top.get("models") {
+        let ok = models.as_object().is_some_and(|models| {
+            models.iter().all(|(key, value)| {
+                MODEL_FIELDS.contains(&key.as_str()) && (value.is_string() || value.is_null())
+            })
+        });
+        require(ok, "Unsupported model credential type")?;
+    }
+    Ok(())
+}
+
+/// `partial` over `stored`: a field `partial` names replaces the stored one,
+/// and any other is kept. In `models`, `null` removes a credential, and
+/// setting one of an exclusive pair removes the other.
+pub fn merge(stored: Option<Value>, partial: Value) -> Value {
+    let mut merged = stored
+        .filter(Value::is_object)
+        .unwrap_or_else(|| Value::Object(Map::new()));
+    let Value::Object(partial) = partial else {
+        return merged;
+    };
+    for (field, value) in partial {
+        let section = SECTIONS.iter().any(|(name, _)| *name == field);
+        if !section && field != "models" {
+            merged[&field] = value;
+            continue;
+        }
+        if !merged[&field].is_object() {
+            merged[&field] = Value::Object(Map::new());
+        }
+        let (Some(target), Value::Object(values)) = (merged[&field].as_object_mut(), value) else {
+            continue;
+        };
+        for (key, value) in values {
+            if field != "models" {
+                target.insert(key, value);
+            } else if value.is_null() {
+                target.remove(&key);
+            } else {
+                for (one, other) in EXCLUSIVE_MODELS {
+                    if key == *one {
+                        target.remove(*other);
+                    } else if key == *other {
+                        target.remove(*one);
+                    }
+                }
+                target.insert(key, value);
+            }
+        }
+    }
+    // A profile may hold no model credentials.
+    if !merged["models"].is_object() {
+        merged["models"] = Value::Object(Map::new());
+    }
+    merged
+}
+
+/// What `profile` holds, for its owner: the GitHub login and Git identity,
+/// and which credentials are present. It names no credential value.
+pub fn summary(profile: &Value, version_id: &str, updated_at: Option<String>) -> Value {
+    let present = |pointer: &str| {
+        profile
+            .pointer(pointer)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty())
+    };
+    let text = |pointer: &str| profile.pointer(pointer).cloned().unwrap_or(Value::Null);
+    let mut models: Vec<&String> = profile["models"]
+        .as_object()
+        .map(|models| models.keys().collect())
+        .unwrap_or_default();
+    models.sort();
+    serde_json::json!({
+        "version_id": version_id,
+        "updated_at": updated_at,
+        "git": {
+            "name": text("/git/name"),
+            "email": text("/git/email"),
+            "signing_key": present("/git/ssh_signing_key"),
+        },
+        "github": {"login": text("/github/login"), "token": present("/github/token")},
+        "via": {"profile": present("/via/profile"), "op_token": present("/via/op_token")},
+        "models": models,
+    })
+}
+
 #[cfg(test)]
 #[path = "profile_tests.rs"]
 pub(crate) mod tests;

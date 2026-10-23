@@ -254,11 +254,14 @@ pub struct Job {
 pub enum Work {
     /// A provider protocol request, against the owner's namespace.
     Provider { request: Request, target: Target },
-    /// Steps 5 and 6 of enrollment: the GitHub login check and the write.
+    /// Steps 5 and 6 of enrollment: the merge, the GitHub login check and
+    /// the write.
     Enroll {
         developer: Developer,
         profile: serde_json::Value,
     },
+    /// The `profile` operation: describe the developer's stored profile.
+    Profile { developer: Developer },
 }
 
 impl Work {
@@ -271,6 +274,7 @@ impl Work {
             Work::Enroll { developer, profile } => {
                 manager.enrollment.run(&developer, profile).await
             }
+            Work::Profile { developer } => manager.enrollment.describe(&developer).await,
         }
     }
 }
@@ -433,6 +437,13 @@ impl Manager {
                 },
                 Err((code, message)) => return refused(code, message),
             }
+        } else if op == Op::Profile {
+            if opened.request.payload != serde_json::json!({}) {
+                return refused(ErrorCode::InvalidProfile, "the profile payload must be {}");
+            }
+            Work::Profile {
+                developer: developer.clone(),
+            }
         } else {
             match self.payload(&opened) {
                 // 6. The namespace comes from the verified owner, never the request.
@@ -568,12 +579,12 @@ impl Manager {
 
     /// Steps 2 and 7: the verified owner.
     fn owner(&self, opened: &OpenedRequest) -> Result<PublicKey, (ErrorCode, &'static str)> {
-        if opened.request.op == Op::Enroll {
-            // Enrollment is owner-level: an agent key's attestation is not enough.
+        if matches!(opened.request.op, Op::Enroll | Op::Profile) {
+            // The profile is owner-level: an agent key's attestation is not enough.
             if opened.auth_tag.is_some() {
                 return Err((
                     ErrorCode::SignerMismatch,
-                    "enroll must be signed by the owner key itself",
+                    "enroll and profile must be signed by the owner key itself",
                 ));
             }
             return Ok(opened.signer);
