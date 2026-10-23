@@ -531,6 +531,29 @@ pub fn mark_synced(
     Ok(())
 }
 
+/// Drop a pending event the relay refused for good.
+///
+/// Compare-and-delete, like [`mark_synced`]: a newer version upserted at the
+/// same coordinate since the flush read it is kept and publishes on its own.
+pub fn discard_pending(
+    conn: &Connection,
+    kind: u32,
+    pubkey: &str,
+    d_tag: &str,
+    created_at: i64,
+    content: &str,
+) -> Result<(), String> {
+    conn.execute(
+        "DELETE FROM persona_events
+         WHERE kind = ?1 AND pubkey = ?2 AND d_tag = ?3
+           AND created_at = ?4 AND content = ?5",
+        params![kind, pubkey, d_tag, created_at, content],
+    )
+    .map_err(|e| format!("failed to discard refused event: {e}"))?;
+
+    Ok(())
+}
+
 /// Delete a retained event by its coordinate.
 ///
 /// Called from the synchronous, lock-held delete-persona command body so the

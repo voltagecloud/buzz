@@ -340,8 +340,8 @@ pub(crate) async fn flush_pending_events_at(
     owner_keys: &nostr::Keys,
 ) -> Result<u32, String> {
     use crate::managed_agents::retention::{
-        deferred_behind_failed_tombstone, get_pending_sync, get_retained_event, mark_synced,
-        open_retention_db,
+        deferred_behind_failed_tombstone, discard_pending, get_pending_sync, get_retained_event,
+        mark_synced, open_retention_db,
     };
     use nostr::JsonUtil;
 
@@ -408,15 +408,15 @@ pub(crate) async fn flush_pending_events_at(
         // A boundary publish the relay still rejects self-heals: the submit
         // error below re-queues it for the next sweep.
         const RELAY_ACCEPT_WINDOW_SECS: i64 = 900;
+        let now = nostr::Timestamp::now().as_secs() as i64;
         let event = if current.kind == 5 {
-            let now = nostr::Timestamp::now().as_secs() as i64;
             if current.created_at - now > RELAY_ACCEPT_WINDOW_SECS {
                 // Its replacement must keep deferring behind the unpublished
                 // tombstone so a re-created head is never wiped out of order.
                 failed_tombstones.insert((current.pubkey.clone(), current.d_tag.clone()));
                 continue;
             }
-            redate_tombstone(&event, now.max(current.created_at), owner_keys)?
+            redate_event(&event, now.max(current.created_at), owner_keys)?
         } else if buzz_core_pkg::kind::is_identity_archive_request_kind(current.kind) {
             // NIP-IA requests are freshness-checked by the relay (±120s on
             // `created_at`), so a request retained while the relay was
@@ -426,7 +426,20 @@ pub(crate) async fn flush_pending_events_at(
             // original `created_at`/`content`, which are untouched.
             resign_with_fresh_timestamp(&event, state)?
         } else {
-            event
+            // A head the relay refused or never received is still this owner's
+            // current state, but its signed `created_at` ages out of the ±900s
+            // window and every later sweep would be refused. Re-date a stale
+            // head to `now`; one dated past the window (a monotonic bump over a
+            // skewed head) waits for the clock rather than being refused.
+            let signed_at = event.created_at.as_secs() as i64;
+            if signed_at - now > RELAY_ACCEPT_WINDOW_SECS {
+                continue;
+            }
+            if now - signed_at > RELAY_ACCEPT_WINDOW_SECS {
+                redate_event(&event, now, owner_keys)?
+            } else {
+                event
+            }
         };
 
         // Bound the relay await: the admission gate can wait up to 300s and the
@@ -445,11 +458,33 @@ pub(crate) async fn flush_pending_events_at(
             ),
         )
         .await;
-        if !matches!(submit, Ok(Ok(_))) {
-            if current.kind == 5 {
-                failed_tombstones.insert((current.pubkey.clone(), current.d_tag.clone()));
+        match submit {
+            Ok(Ok(_)) => {}
+            // An archive request the relay refuses as invalid (for example, an
+            // agent that never published a profile has nothing to archive) is
+            // refused again on every sweep, so it is dropped, not retried.
+            Ok(Err(error))
+                if buzz_core_pkg::kind::is_identity_archive_request_kind(current.kind)
+                    && is_permanent_rejection(&error) =>
+            {
+                eprintln!("buzz-desktop: event-flush: dropped a refused archive request: {error}");
+                let conn = open_retention_db(db_path)?;
+                discard_pending(
+                    &conn,
+                    current.kind,
+                    &current.pubkey,
+                    &current.d_tag,
+                    current.created_at,
+                    &current.content,
+                )?;
+                continue;
             }
-            continue; // relay unreachable, rejected, or timed out — stays pending
+            _ => {
+                if current.kind == 5 {
+                    failed_tombstones.insert((current.pubkey.clone(), current.d_tag.clone()));
+                }
+                continue; // relay unreachable, rejected, or timed out — stays pending
+            }
         }
 
         let conn = open_retention_db(db_path)?;
@@ -490,8 +525,19 @@ fn resign_with_fresh_timestamp(
         .map_err(|e| format!("failed to re-sign retained event: {e}"))
 }
 
-/// Re-sign a retained kind:5 tombstone at `created_at`, preserving its `a`-tag
-/// coordinate and (empty) content.
+/// Whether a relay submit error is the relay refusing the event itself
+/// (`invalid:`), which resending the same event cannot change, rather than an
+/// unreachable, rate-limited, or failing relay. A timestamp refusal of an
+/// event signed just before sending means the clocks differ, which clears.
+fn is_permanent_rejection(error: &str) -> bool {
+    error.split_once(": ").is_some_and(|(_, message)| {
+        message.starts_with("invalid:") && !message.contains("timestamp")
+    })
+}
+
+/// Re-sign a retained event at `created_at`, preserving its kind, tags, and
+/// content. For a kind:5 tombstone, that keeps its `a`-tag coordinate and
+/// (empty) content.
 ///
 /// The flush loop chooses `created_at` in `[floor, now+900]` so the deletion
 /// both dominates the head it retracts (NIP-09 `created_at <=` soft-delete) and
@@ -499,16 +545,17 @@ fn resign_with_fresh_timestamp(
 /// keeps the event authored by the same identity that owns the coordinate; the
 /// `mark_synced` compare-and-clear below still keys on the retained row's
 /// untouched `created_at`/`content`, so a concurrent edit is never masked.
-fn redate_tombstone(
+fn redate_event(
     event: &nostr::Event,
     created_at: i64,
     owner_keys: &nostr::Keys,
 ) -> Result<nostr::Event, String> {
     nostr::EventBuilder::new(event.kind, event.content.clone())
         .tags(event.tags.iter().cloned())
+        .allow_self_tagging()
         .custom_created_at(nostr::Timestamp::from(created_at as u64))
         .sign_with_keys(owner_keys)
-        .map_err(|e| format!("failed to re-sign tombstone: {e}"))
+        .map_err(|e| format!("failed to re-sign retained event: {e}"))
 }
 
 /// SHA-256 (lowercase hex) of a persona's canonical content JSON.

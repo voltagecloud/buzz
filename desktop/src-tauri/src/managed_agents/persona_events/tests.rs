@@ -943,26 +943,30 @@ mod flush_barrier {
     /// Stub relay: `POST /events` rejects kind:5 with HTTP 500, accepts
     /// everything else. Returns the HTTP base URL.
     async fn spawn_stub_relay() -> String {
-        use axum::{http::StatusCode, routing::post, Router};
+        use axum::{http::StatusCode, routing::post};
 
-        let app = Router::new().route(
-            "/events",
-            post(|body: String| async move {
-                let event: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
-                if event.get("kind").and_then(serde_json::Value::as_u64) == Some(5) {
-                    return (StatusCode::INTERNAL_SERVER_ERROR, String::new());
-                }
-                (
-                    StatusCode::OK,
-                    serde_json::json!({
-                        "event_id": event.get("id").and_then(serde_json::Value::as_str).unwrap_or(""),
-                        "accepted": true,
-                        "message": ""
-                    })
-                    .to_string(),
-                )
-            }),
-        );
+        serve_events(post(|body: String| async move {
+            let event: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            if event.get("kind").and_then(serde_json::Value::as_u64) == Some(5) {
+                return (StatusCode::INTERNAL_SERVER_ERROR, String::new());
+            }
+            (
+                StatusCode::OK,
+                serde_json::json!({
+                    "event_id": event.get("id").and_then(serde_json::Value::as_str).unwrap_or(""),
+                    "accepted": true,
+                    "message": ""
+                })
+                .to_string(),
+            )
+        }))
+        .await
+    }
+
+    /// Serves `route` as the stub relay's `POST /events`. Returns the HTTP
+    /// base URL.
+    async fn serve_events(route: axum::routing::MethodRouter) -> String {
+        let app = axum::Router::new().route("/events", route);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind stub relay");
@@ -1098,5 +1102,186 @@ mod flush_barrier {
             !row(KIND_PERSONA, "unrelated").pending_sync,
             "unrelated row marked synced"
         );
+    }
+
+    /// Stub relay with the real relay's refusals: `invalid:` for an event
+    /// outside the ±900s window and for every archive request (as for an agent
+    /// with no profile). Counts requests. Returns the HTTP base URL.
+    async fn spawn_refusing_relay(
+        requests: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> String {
+        use axum::{http::StatusCode, routing::post};
+
+        serve_events(post(move |body: String| {
+                let requests = requests.clone();
+                async move {
+                    requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let event: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+                    let now = nostr::Timestamp::now().as_secs() as i64;
+                    let created_at = event
+                        .get("created_at")
+                        .and_then(serde_json::Value::as_i64)
+                        .unwrap_or(0);
+                    let refusal = if (created_at - now).abs() > 900 {
+                        Some("invalid: event timestamp too far from server time")
+                    } else if event.get("kind").and_then(serde_json::Value::as_u64)
+                        == Some(u64::from(buzz_core_pkg::kind::KIND_IA_ARCHIVE_REQUEST))
+                    {
+                        Some("invalid: target has no live kind:0 profile")
+                    } else {
+                        None
+                    };
+                    if let Some(error) = refusal {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            serde_json::json!({ "error": error }).to_string(),
+                        );
+                    }
+                    (
+                        StatusCode::OK,
+                        serde_json::json!({
+                            "event_id": event.get("id").and_then(serde_json::Value::as_str).unwrap_or(""),
+                            "accepted": true,
+                            "message": ""
+                        })
+                        .to_string(),
+                    )
+                }
+            }))
+        .await
+    }
+
+    fn persona_at(d_tag: &str, created_at: i64) -> nostr::EventBuilder {
+        EventBuilder::new(Kind::Custom(KIND_PERSONA as u16), "{}")
+            .tags(vec![Tag::parse(["d", d_tag]).unwrap()])
+            .custom_created_at(nostr::Timestamp::from(created_at as u64))
+    }
+
+    /// A pending head signed long ago is re-dated and accepted, instead of
+    /// being refused as stale on every sweep; one dated far ahead is held
+    /// back without a request until the clock reaches it.
+    #[tokio::test]
+    async fn stale_head_is_redated_and_future_head_waits() {
+        let keys = nostr::Keys::generate();
+        let pubkey = keys.public_key().to_hex();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("retention.db");
+        let now = nostr::Timestamp::now().as_secs() as i64;
+        {
+            let conn = open_retention_db(&db_path).expect("open db");
+            retain_signed(
+                &conn,
+                &keys,
+                KIND_PERSONA,
+                "stale",
+                persona_at("stale", now - 86_400),
+                now - 86_400,
+            );
+            retain_signed(
+                &conn,
+                &keys,
+                KIND_PERSONA,
+                "ahead",
+                persona_at("ahead", now + 3_600),
+                now + 3_600,
+            );
+        }
+
+        let state = build_app_state();
+        *state.keys.lock().unwrap() = keys;
+        let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        *state.relay_url_override.lock().unwrap() =
+            Some(spawn_refusing_relay(requests.clone()).await);
+
+        let flushed = flush_pending_events(&db_path, &state).await.expect("flush");
+        assert_eq!(flushed, 1, "the re-dated stale head is accepted");
+        assert_eq!(
+            requests.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the future head is not sent"
+        );
+
+        let conn = open_retention_db(&db_path).expect("reopen db");
+        let row = |d_tag: &str| {
+            get_retained_event(&conn, KIND_PERSONA, &pubkey, d_tag)
+                .unwrap()
+                .unwrap()
+        };
+        assert!(!row("stale").pending_sync, "stale head marked synced");
+        assert!(row("ahead").pending_sync, "future head stays pending");
+    }
+
+    /// An archive request the relay refuses as invalid is dropped, so the
+    /// sweep does not resend it every 30 seconds.
+    #[tokio::test]
+    async fn refused_archive_request_is_dropped() {
+        use buzz_core_pkg::kind::KIND_IA_ARCHIVE_REQUEST;
+
+        let keys = nostr::Keys::generate();
+        let pubkey = keys.public_key().to_hex();
+        let target = nostr::Keys::generate().public_key().to_hex();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("retention.db");
+        {
+            let conn = open_retention_db(&db_path).expect("open db");
+            let request = crate::events::build_archive_identity_request(
+                &target,
+                "agent deleted",
+                Some("retired"),
+                None,
+                None,
+            )
+            .unwrap();
+            let now = nostr::Timestamp::now().as_secs() as i64;
+            retain_signed(&conn, &keys, KIND_IA_ARCHIVE_REQUEST, &target, request, now);
+        }
+
+        let state = build_app_state();
+        *state.keys.lock().unwrap() = keys;
+        let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        *state.relay_url_override.lock().unwrap() =
+            Some(spawn_refusing_relay(requests.clone()).await);
+
+        assert_eq!(
+            flush_pending_events(&db_path, &state).await.expect("flush"),
+            0
+        );
+        assert_eq!(
+            flush_pending_events(&db_path, &state).await.expect("flush"),
+            0
+        );
+        assert_eq!(
+            requests.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the refused request is sent once"
+        );
+        let conn = open_retention_db(&db_path).expect("reopen db");
+        assert!(
+            get_retained_event(&conn, KIND_IA_ARCHIVE_REQUEST, &pubkey, &target)
+                .unwrap()
+                .is_none(),
+            "the refused request is dropped"
+        );
+    }
+
+    #[test]
+    fn only_invalid_refusals_are_permanent() {
+        assert!(is_permanent_rejection(
+            "relay returned 400 Bad Request: invalid: target has no live kind:0 profile"
+        ));
+        assert!(is_permanent_rejection(
+            "relay rejected event: invalid: bad tags"
+        ));
+        assert!(!is_permanent_rejection(
+            "relay returned 500 Internal Server Error"
+        ));
+        assert!(!is_permanent_rejection("relay rate-limited: retry in 5s"));
+        // A clock difference clears, so a timestamp refusal is retried.
+        assert!(!is_permanent_rejection(
+            "relay returned 400 Bad Request: invalid: event timestamp too far from server time"
+        ));
+        assert!(!is_permanent_rejection(
+            "relay returned 403 Forbidden: restricted: not a member"
+        ));
     }
 }
