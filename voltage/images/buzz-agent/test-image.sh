@@ -15,6 +15,8 @@ docker run --rm --entrypoint /bin/bash "$IMAGE" -ceu '
   claude --version
   codex login --help | grep -q -- --device-auth
   claude setup-token --help >/dev/null
+  # Startup appends the sub-agent guide to the harness instructions as this user.
+  test -r /etc/buzz-agent/subagents.md
   ! test -e /home/agent/.codex/auth.json
   ! test -e /home/agent/.claude/.credentials.json
 '

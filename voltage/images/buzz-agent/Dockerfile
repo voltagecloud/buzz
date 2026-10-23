@@ -81,6 +81,9 @@ COPY --chmod=0755 voltage/images/buzz-agent/checkpoint.py /usr/local/bin/buzz-ag
 COPY --chmod=0755 voltage/images/buzz-agent/heavy.py /usr/local/bin/buzz-heavy
 COPY --chmod=0755 voltage/images/buzz-agent/worker.py /usr/local/bin/buzz-agent-worker
 COPY --chmod=0755 voltage/images/buzz-agent/subagent.py /usr/local/bin/buzz-subagent
+# COPY --chmod also sets the mode of a directory it creates, so create this one first:
+# a 0644 /etc/buzz-agent cannot be entered, and every Sandbox with sub-agents failed to start.
+RUN install -d -m 0755 /etc/buzz-agent
 COPY --chmod=0644 voltage/images/buzz-agent/subagents.md /etc/buzz-agent/subagents.md
 COPY --chmod=0755 voltage/images/buzz-agent/heavy-bin/ /opt/buzz-heavy/bin/
 COPY --chmod=0755 voltage/images/buzz-agent/gh.sh /usr/local/bin/gh
