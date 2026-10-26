@@ -54,6 +54,8 @@ pub enum Op {
     /// Describe the developer's stored profile, naming no value. Signed by
     /// the owner key itself.
     Profile,
+    /// Start an already registered agent for an owner-signed channel mention.
+    Start,
 }
 
 impl Op {
@@ -65,13 +67,21 @@ impl Op {
             Op::Stop => "stop",
             Op::Enroll => "enroll",
             Op::Profile => "profile",
+            Op::Start => "start",
         }
     }
 
     fn parse(value: &str) -> Option<Self> {
-        [Op::Info, Op::Deploy, Op::Stop, Op::Enroll, Op::Profile]
-            .into_iter()
-            .find(|op| op.as_str() == value)
+        [
+            Op::Info,
+            Op::Deploy,
+            Op::Stop,
+            Op::Enroll,
+            Op::Profile,
+            Op::Start,
+        ]
+        .into_iter()
+        .find(|op| op.as_str() == value)
     }
 }
 
@@ -306,7 +316,8 @@ pub fn check_created_at(created_at: Timestamp, now: Timestamp) -> Result<(), Wir
 /// Encrypt `request` to `manager` and sign it with `signer`.
 ///
 /// `auth_tag` is the owner's NIP-OA attestation JSON for the signing agent
-/// key (`BUZZ_AUTH_TAG`); `enroll` is signed by the owner and passes `None`.
+/// key (`BUZZ_AUTH_TAG`); `enroll`, `profile`, and `start` are signed by the
+/// owner and pass `None`.
 pub fn build_request(
     signer: &Keys,
     manager: &PublicKey,

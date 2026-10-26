@@ -44,6 +44,7 @@ aws-sdk-secretsmanager = { version = "1", default-features = false, features = [
 reqwest = { workspace = true }
 toml = "1.0"
 zeroize = { workspace = true }
+url = { workspace = true }
 # Same reason as buzz-backend-kubernetes: the process-level CryptoProvider is
 # installed explicitly because the workspace unifies ring and aws-lc-rs.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

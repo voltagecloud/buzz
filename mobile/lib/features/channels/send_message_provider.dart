@@ -1,5 +1,7 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/agents/remote_agent_launch_provider.dart';
+
 import '../../shared/mentions/mention_tags.dart';
 import '../../shared/relay/relay.dart';
 import '../channels/channel_management_provider.dart';
@@ -22,6 +24,9 @@ class SendMessage {
   final void Function(String channelId, String eventId) _completeLocalMessage;
   final void Function(String channelId, String eventId) _removeLocalMessage;
   final bool Function()? _isDeliveryValid;
+  final Future<void> Function(NostrEvent)? _prepareAgentLaunch;
+  final Future<void> Function(NostrEvent)? _acceptAgentLaunch;
+  final Future<void> Function(NostrEvent)? _failAgentLaunch;
 
   SendMessage({
     required SignedEventRelay signedEventRelay,
@@ -35,6 +40,9 @@ class SendMessage {
     completeLocalMessage,
     required void Function(String channelId, String eventId) removeLocalMessage,
     bool Function()? isDeliveryValid,
+    Future<void> Function(NostrEvent)? prepareAgentLaunch,
+    Future<void> Function(NostrEvent)? acceptAgentLaunch,
+    Future<void> Function(NostrEvent)? failAgentLaunch,
   }) : _signedEventRelay = signedEventRelay,
        _fetchMembers = fetchMembers,
        _readUserCache = readUserCache,
@@ -43,7 +51,10 @@ class SendMessage {
            markLocalMessageForAnimation ?? ((_, _) {}),
        _completeLocalMessage = completeLocalMessage,
        _removeLocalMessage = removeLocalMessage,
-       _isDeliveryValid = isDeliveryValid;
+       _isDeliveryValid = isDeliveryValid,
+       _prepareAgentLaunch = prepareAgentLaunch,
+       _acceptAgentLaunch = acceptAgentLaunch,
+       _failAgentLaunch = failAgentLaunch;
 
   /// Send a text message to a channel.
   ///
@@ -119,19 +130,30 @@ class SendMessage {
         kind: EventKind.streamMessage,
         content: content,
         tags: tags,
-        onSigned: (event) {
+        onSigned: (event) async {
           localMessage = event;
           _markLocalMessageForAnimation(channelId, event.id);
           _addLocalMessage(channelId, event);
+          await _prepareAgentLaunch?.call(event);
+          _ensureDeliveryValid();
         },
       );
       final event = localMessage;
-      if (event != null) _completeLocalMessage(channelId, event.id);
+      if (event != null && _isDeliveryValid?.call() != false) {
+        _completeLocalMessage(channelId, event.id);
+      }
     } catch (_) {
       final event = localMessage;
-      if (event != null) _removeLocalMessage(channelId, event.id);
+      if (event != null) {
+        if (_isDeliveryValid?.call() != false) {
+          _removeLocalMessage(channelId, event.id);
+        }
+        await _failAgentLaunch?.call(event);
+      }
       rethrow;
     }
+    final event = localMessage;
+    if (event != null) await _acceptAgentLaunch?.call(event);
   }
 
   /// Resolve every identity that is actually a current member of this DM.
@@ -258,6 +280,7 @@ class SendMessage {
 
 final sendMessageProvider = Provider<SendMessage>((ref) {
   final config = ref.watch(relayConfigProvider);
+  final launches = ref.watch(remoteAgentLaunchesProvider.notifier).queue;
   return SendMessage(
     signedEventRelay: SignedEventRelay(
       session: ref.read(relaySessionProvider.notifier),
@@ -266,6 +289,15 @@ final sendMessageProvider = Provider<SendMessage>((ref) {
     fetchMembers: (channelId) =>
         ref.read(channelMembersProvider(channelId).future),
     readUserCache: () => ref.read(userCacheProvider),
+    prepareAgentLaunch: (event) async {
+      await launches?.prepare(event);
+    },
+    acceptAgentLaunch: (event) async {
+      await launches?.accepted(event);
+    },
+    failAgentLaunch: (event) async {
+      await launches?.failed(event);
+    },
     addLocalMessage: (channelId, event) => ref
         .read(channelMessagesProvider(channelId).notifier)
         .addLocalMessage(event),

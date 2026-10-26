@@ -24,8 +24,14 @@ abstract final class EventKind {
   static const typingIndicator = 20002;
   static const auth = 22242;
   static const agentObserverFrame = 24200;
+
+  /// Encrypted requests and replies for the remote session manager.
+  static const sandboxSessionControl = 24210;
   static const huddleReaction = 24810;
   static const readState = 30078;
+
+  /// Owner-signed managed-agent records, including their runtime type.
+  static const managedAgent = 30177;
   static const eventReminder = 30300;
   static const userStatus = 30315;
   static const dmVisibility = 30622;

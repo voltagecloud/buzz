@@ -185,6 +185,31 @@ impl State {
                 self.secrets.remove(*name);
                 ok(&json!({"apiVersion":"v1","kind":"Status","status":"Success"}))
             }
+            ["api", "v1", "namespaces", _, "secrets", name] if method == Method::PUT => {
+                let Some(prior) = self.secrets.get(*name) else {
+                    return status(404, "NotFound");
+                };
+                let mut secret: Secret = serde_json::from_slice(body).unwrap();
+                if prior["immutable"] == true
+                    || secret.metadata.resource_version.as_deref()
+                        != prior["metadata"]["resourceVersion"].as_str()
+                {
+                    return status(409, "Conflict");
+                }
+                secret.metadata.uid = prior["metadata"]["uid"].as_str().map(str::to_owned);
+                secret.metadata.resource_version = Some(self.next_rv());
+                secret.data.get_or_insert_with(Default::default).extend(
+                    secret
+                        .string_data
+                        .take()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|(key, value)| (key, ByteString(value.into_bytes()))),
+                );
+                let stored = serde_json::to_value(secret).unwrap();
+                self.secrets.insert((*name).into(), stored.clone());
+                ok(&stored)
+            }
             ["api", "v1", "namespaces", _, "secrets", name] => match self.secrets.get(*name) {
                 Some(secret) => ok(secret),
                 None => status(404, "NotFound"),

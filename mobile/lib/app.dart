@@ -12,6 +12,7 @@ import 'package:uuid/uuid.dart';
 
 import 'features/age_gate/age_restriction_page.dart';
 import 'features/age_gate/age_signal_provider.dart';
+import 'shared/agents/remote_agent_launch_provider.dart';
 import 'features/activity/activity_provider.dart';
 import 'features/activity/inbox_local_state_provider.dart';
 import 'features/activity/inbox_read_state.dart';
@@ -353,6 +354,7 @@ class App extends HookConsumerWidget {
       ref.watch(relaySessionProvider);
       ref.watch(observerRelayProvider);
       ref.watch(appLifecycleProvider);
+      ref.watch(remoteAgentLaunchesProvider);
       ref.watch(userStatusCacheProvider);
       if (ref.watch(activeCommunityProvider).value?.pushNotificationsEnabled ==
               true &&

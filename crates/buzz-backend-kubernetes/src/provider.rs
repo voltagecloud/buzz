@@ -62,9 +62,14 @@ pub fn check_managed_defaults(
 /// A provider that forwards the request (`buzz-backend-relay`) runs them
 /// first, so a request that would be refused never leaves the machine.
 pub fn check_sandbox_request(request: &wire::DeployRequest) -> Result<(), wire::ProviderError> {
-    sandbox::Options::parse(&request.provider_config)?
-        .ok_or("the session manager starts Sandbox sessions only")?;
+    check_sandbox_scope(&request.provider_config)?;
     identity::check(request, true)?;
+    Ok(())
+}
+
+/// Validate a concrete channel and thread scope before accepting a managed start.
+pub fn check_sandbox_scope(config: &serde_json::Value) -> Result<(), String> {
+    sandbox::Options::parse(config)?.ok_or("the session manager starts Sandbox sessions only")?;
     Ok(())
 }
 

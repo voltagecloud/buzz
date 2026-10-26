@@ -1857,12 +1857,12 @@ subscribers and never stores it. No stored fallback kind exists.
 
 | Event | Signer | Clear-text tags | Encrypted content (NIP-44 v2) |
 | --- | --- | --- | --- |
-| Request | agent key (`private_key_nsec`); owner key for `enroll` and `profile` | `["p", <manager>]`, the owner's NIP-OA `auth` tag (not on `enroll` or `profile`), `expiration` | `{"v":1,"op","request_id","payload"}`, to the manager |
+| Request | agent key (`private_key_nsec`); owner key for `enroll`, `profile`, and `start` | `["p", <manager>]`, the owner's NIP-OA `auth` tag (agent-signed operations only), `expiration` | `{"v":1,"op","request_id","payload"}`, to the manager |
 | Reply | manager key | `["p", <requester>]`, `["e", <request event id>]`, `expiration` | `{"v":1,"request_id","status","response"}`, to the requester |
 
-- `op` is `info`, `deploy`, `stop`, `enroll` or `profile`. Recovery is a `deploy` with
+- `op` is `info`, `deploy`, `stop`, `enroll`, `profile` or `start`. Recovery is a `deploy` with
   `provider_config.sandbox.recovery`, as in the stdin protocol.
-- `payload` is the provider protocol request, the same JSON as the stdin
+- For `info`, `deploy`, and `stop`, `payload` is the provider protocol request, the same JSON as the stdin
   request, including `op`. `response` is the provider protocol response,
   including its `code` on a refusal.
 - `status` is `accepted`, then optionally `progress`, then `done`. Only
@@ -1916,19 +1916,27 @@ authorizes each request in this order:
 1. The event id and signature verify, and the event passes the parser
    checks above. Otherwise the manager ignores the event: it cannot address
    a reply.
-2. The `auth` tag verifies for the signer at the event's `created_at`
+2. For agent-signed operations, the `auth` tag verifies for the signer at the event's `created_at`
    (`verify_auth_tag_for_auth_event`), and its owner is a configured
    developer.
-3. The payload's `private_key_nsec` is the signer's key, and the payload's
-   `op` matches the envelope's.
+3. Provider payloads bind `private_key_nsec` to the signer, and their `op` matches the envelope's.
+   A `start` payload instead proves an owner-signed channel mention addressing its requested agent.
 4. `created_at` is within 60 s of the manager's clock, and the event has not
    expired.
 5. The manager has not received the event id in the last 10 minutes.
 6. The namespace is the verified owner's developer namespace from the
    configuration file. It replaces `provider_config.namespace`, and the verified agent and owner
    replace `identity_policy`. The manager runs Sandbox sessions only.
-7. `enroll` and `profile` are signed by the owner key itself, without an
+7. `enroll`, `profile`, and `start` are signed by the owner key itself, without an
    `auth` tag.
+
+**Mobile start.** `start` is an owner-authorized operation that uses a previously registered desktop launch.
+Its payload is `{agent_pubkey, relay_url, trigger}`, where `trigger` is the complete owner-signed channel message addressing the agent.
+The manager derives the thread scope and replay floor from that message, then uses the ordinary confined Sandbox deploy path.
+A successful desktop deploy retains its launch payload in an owner-, community-, and agent-bound `buzz-mobile-launch-*` Secret.
+These registrations survive individual Sandbox cleanup and require manager Secret `update` permission.
+The phone receives no agent credentials or launch overrides.
+See [mobile remote-agent launch](mobile-remote-agent-launch.md) for retention, authorization, rollout, and acceptance tests.
 
 Then the manager replies `accepted` and runs the request in-process with
 its own in-cluster credentials (`provider::run`), and replies `done` with the
@@ -1948,6 +1956,10 @@ Refusals are `done` replies with one of these codes
 | `stale_request` | `created_at` is more than 60 s from the manager's clock, or the event has expired. | fix the clock, then retry |
 | `replayed_request` | The manager has already received this event. | retry with a new event |
 | `request_id_reused` | The `request_id` belongs to a different request. | use a new `request_id` |
+| `launch_not_registered` | No saved launch exists for this owner, community and agent. | start the agent once from the updated desktop |
+| `launch_store_failed` | The saved launch could not be read, verified, or updated. | retry; ask an operator to check manager Secret access |
+| `invalid_launch_registration` | The desktop launch does not name a valid WebSocket relay endpoint. | use a valid `ws://` or `wss://` relay URL |
+| `invalid_start` | The payload is not a valid owner-signed channel mention of the requested agent. | send a new signed mention from the owning account |
 | `manager_busy` | The manager is at its limit: 16 running requests, 1,024 tracked requests, 10,000 recent event ids, or 8 events for one request. | retry later |
 | `unsupported_op` | An unknown operation. | update Buzz |
 | `unsupported_version` | An envelope version other than `1`. | update Buzz |

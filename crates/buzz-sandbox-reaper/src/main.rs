@@ -13,6 +13,7 @@ mod config;
 mod enroll;
 mod evidence;
 mod manager;
+mod mobile_launch;
 mod plan;
 mod profile;
 mod reconcile;

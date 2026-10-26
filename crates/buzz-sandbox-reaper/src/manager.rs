@@ -19,6 +19,7 @@ use sha2::{Digest, Sha256};
 
 use crate::config::{is_dns_label, is_owner, CONFIG_VERSION};
 use crate::enroll::{self, Enrollment};
+use crate::mobile_launch::{Registration, Start};
 
 /// How long received event ids and finished responses are kept.
 pub const REPLAY_WINDOW_SECS: u64 = 600;
@@ -253,7 +254,13 @@ pub struct Job {
 /// What a job runs.
 pub enum Work {
     /// A provider protocol request, against the owner's namespace.
-    Provider { request: Request, target: Target },
+    Provider {
+        request: Request,
+        target: Target,
+        registration: Option<Registration>,
+    },
+    /// An owner-authorized start using a registered launch identity.
+    Start { start: Start, target: Target },
     /// Steps 5 and 6 of enrollment: the merge, the GitHub login check and
     /// the write.
     Enroll {
@@ -268,8 +275,41 @@ impl Work {
     /// Run to the `done` response.
     pub async fn run(self, manager: &Manager) -> serde_json::Value {
         match self {
-            Work::Provider { request, target } => {
-                response_value(&provider::run(request, &target).await)
+            Work::Provider {
+                request,
+                target,
+                registration,
+            } => {
+                let response = response_value(&provider::run(request, &target).await);
+                if response["ok"] == true {
+                    if let (
+                        Some(registration),
+                        Target::Managed {
+                            client, namespace, ..
+                        },
+                    ) = (registration, &target)
+                    {
+                        if let Err(error) = registration.save(client.clone(), namespace).await {
+                            return error;
+                        }
+                    }
+                }
+                response
+            }
+            Work::Start { start, target } => {
+                let Target::Managed {
+                    client, namespace, ..
+                } = &target
+                else {
+                    return refusal(
+                        ErrorCode::InvalidStart,
+                        "mobile starts require a managed target",
+                    );
+                };
+                match start.request(client.clone(), namespace).await {
+                    Ok(request) => response_value(&provider::run(request, &target).await),
+                    Err(error) => error,
+                }
             }
             Work::Enroll { developer, profile } => {
                 manager.enrollment.run(&developer, profile).await
@@ -444,11 +484,42 @@ impl Manager {
             Work::Profile {
                 developer: developer.clone(),
             }
+        } else if op == Op::Start {
+            let start = match Start::admit(
+                opened.request.payload.clone(),
+                owner,
+                opened.created_at.as_secs(),
+            ) {
+                Ok(start) => start,
+                Err(response) => return answer(response),
+            };
+            let target = Target::Managed {
+                client: self.client.clone(),
+                namespace: developer.namespace.clone(),
+                agent: start.agent(),
+                owner,
+                defaults: self.defaults.clone(),
+                env: self.config.launch_env(developer),
+            };
+            Work::Start { start, target }
         } else {
+            let registration = if op == Op::Deploy {
+                match Registration::new(
+                    owner,
+                    opened.signer,
+                    opened.request.payload["agent"].clone(),
+                ) {
+                    Ok(registration) => Some(registration),
+                    Err(response) => return answer(response),
+                }
+            } else {
+                None
+            };
             match self.payload(&opened) {
                 // 6. The namespace comes from the verified owner, never the request.
                 Ok(request) => Work::Provider {
                     request,
+                    registration,
                     target: Target::Managed {
                         client: self.client.clone(),
                         namespace: developer.namespace.clone(),
@@ -563,7 +634,7 @@ impl Manager {
                 return Admission::Ignore {
                     event: event.id,
                     error,
-                }
+                };
             }
         };
         Admission::Done {
@@ -579,12 +650,12 @@ impl Manager {
 
     /// Steps 2 and 7: the verified owner.
     fn owner(&self, opened: &OpenedRequest) -> Result<PublicKey, (ErrorCode, &'static str)> {
-        if matches!(opened.request.op, Op::Enroll | Op::Profile) {
+        if matches!(opened.request.op, Op::Enroll | Op::Profile | Op::Start) {
             // The profile is owner-level: an agent key's attestation is not enough.
             if opened.auth_tag.is_some() {
                 return Err((
                     ErrorCode::SignerMismatch,
-                    "enroll and profile must be signed by the owner key itself",
+                    "enroll, profile and start must be signed by the owner key itself",
                 ));
             }
             return Ok(opened.signer);
