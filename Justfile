@@ -980,6 +980,14 @@ mobile_dir := "mobile"
 mobile-install:
     unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && flutter pub get
 
+# Save this fork's iPhone signing identity (no Apple credentials are stored)
+mobile-ios-setup bundle_id team_id name="Buzz Voltage":
+    /bin/bash scripts/mobile-ios-setup.sh {{quote(bundle_id)}} {{quote(team_id)}} {{quote(name)}}
+
+# Install on a named iPhone from a Mac; PHONE_ID comes from flutter devices
+mobile-ios-device device:
+    /bin/bash scripts/mobile-ios-device.sh {{quote(device)}}
+
 # Format all Dart code
 mobile-fmt:
     unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && dart format .
