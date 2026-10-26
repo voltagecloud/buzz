@@ -80,6 +80,21 @@ Older managers return an unsupported-operation error that mobile displays as an 
 Unregistered agents display the one-time desktop setup instruction.
 This change does not deploy a manager, sync ArgoCD, or change production permissions.
 
+## Why existing mobile builds need an update
+
+Existing mobile builds publish the owner's signed channel message, including its addressed agent and thread tags.
+They do not send the separate kind 24210 `start` request.
+The manager currently subscribes only to kind 24210 requests addressed to its key, so it never receives those channel mentions.
+
+This is an implementation boundary, not a signature or protocol limitation.
+A server-side mention watcher could support existing clients using the saved launch registration and the same owner and thread checks.
+That watcher is not implemented here.
+It must receive messages through an identity with access to the agent's channels, preserve community boundaries, and reconcile duplicates and reconnect gaps.
+The manager's service identity does not automatically inherit each developer's private channel memberships.
+
+A web client can also send the same `start` operation without changing the cluster agent protocol.
+It still needs the user's signing identity, the registered agent, and verified manager replies.
+
 ## Phone acceptance test
 
 Use an owned staging Remote workspace agent and a disposable test thread.

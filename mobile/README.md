@@ -2,6 +2,8 @@
 
 Flutter mobile client for Buzz.
 
+To install your own fork on a physical iPhone, follow [the fork setup guide](IOS_FORK.md).
+
 See [VISION_MOBILE.md](../VISION_MOBILE.md) for intended behavior and
 architecture.
 

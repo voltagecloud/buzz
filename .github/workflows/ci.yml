@@ -128,6 +128,8 @@ jobs:
         run: scripts/test-desktop-instance-detection.sh
       - name: Mobile worktree identity contract
         run: scripts/test-mobile-worktree-overrides.sh
+      - name: Mobile fork iPhone setup
+        run: /bin/bash scripts/test-mobile-ios-setup.sh
       - name: Codex security review contract
         run: just security-review-check
       - name: Rust cache contract
