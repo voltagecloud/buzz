@@ -8,15 +8,17 @@ docker run --rm --entrypoint /bin/bash "$IMAGE" -ceu '
   test "$(id -g)" = 10001
   test "$HOME" = /home/agent
   test "$(pwd)" = /home/agent
-  for binary in buzz-acp buzz-dev-mcp codex-acp claude-agent-acp codex claude; do
+  for binary in buzz-acp buzz-dev-mcp codex-acp claude-agent-acp codex claude kubectl; do
     command -v "$binary" >/dev/null
   done
   codex --version
   claude --version
+  kubectl version --client
   codex login --help | grep -q -- --device-auth
   claude setup-token --help >/dev/null
   # Startup appends the sub-agent guide to the harness instructions as this user.
   test -r /etc/buzz-agent/subagents.md
+  test -r /etc/buzz-agent/cluster.md
   ! test -e /home/agent/.codex/auth.json
   ! test -e /home/agent/.claude/.credentials.json
 '

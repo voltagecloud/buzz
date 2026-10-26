@@ -35,12 +35,14 @@ ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/home/agent/.cargo CARGO_BUILD_JOBS=2
 ARG TARGETARCH
 RUN case "$TARGETARCH" in \
         amd64) via=x86_64 gitleaks=x64 sccache=x86_64 \
+            kubectl_sha=874d5e72dbb819f43cff16bcd1e4f8bac5b7f2361fe1e55049b0a6c676fb0cbf \
             via_sha=9e5a7f9384cacda29061d814e9397e7b6d90a72ee4663775362978ac9b65d8b7 \
             op_sha=198b05dcf9a0972778ce5a4e262c459979b0c837257b5da65e2fba6187734226 \
             gitleaks_sha=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb \
             depot_sha=7a469c767bd3b7e67b3174f91af9c6315fea0ced4871948ee9d41a006fb2347e \
             sccache_sha=45f1447fbe231e3037bde351ef70677dd212216c8d62ae7ca409fecc4d6acc89 ;; \
         arm64) via=arm64 gitleaks=arm64 sccache=aarch64 \
+            kubectl_sha=cc749967b62f4422260bc9c0aa7a7c55f45175ae38cb8d95767b5d2b7e04c1fd \
             via_sha=26cc174802c875424b9846a398d4b2d890b911506f7c574dee96859620caa535 \
             op_sha=7b5c361a23e738a3969cf676960f4843af4aa9aa68dbec23d18a9134da428ba3 \
             gitleaks_sha=e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080 \
@@ -65,6 +67,9 @@ RUN case "$TARGETARCH" in \
     && curl -fsSL "https://github.com/mozilla/sccache/releases/download/v0.18.0/sccache-v0.18.0-$sccache-unknown-linux-musl.tar.gz" -o /tmp/sccache.tar.gz \
     && echo "$sccache_sha  /tmp/sccache.tar.gz" | sha256sum -c - \
     && tar -xzf /tmp/sccache.tar.gz -C /usr/local/bin --strip-components=1 "sccache-v0.18.0-$sccache-unknown-linux-musl/sccache" \
+    && curl -fsSL "https://dl.k8s.io/release/v1.35.8/bin/linux/${TARGETARCH}/kubectl" -o /usr/local/bin/kubectl \
+    && echo "$kubectl_sha  /usr/local/bin/kubectl" | sha256sum -c - \
+    && chmod 0755 /usr/local/bin/kubectl \
     && rm /tmp/via.tar.gz /tmp/op.zip /tmp/gitleaks.tar.gz /tmp/depot.tar.gz /tmp/sccache.tar.gz
 COPY voltage/images/buzz-agent/checkpoint-gitleaks.toml /opt/agent-tools/checkpoint-gitleaks.toml
 WORKDIR /opt/buzz-runtimes
@@ -85,6 +90,7 @@ COPY --chmod=0755 voltage/images/buzz-agent/subagent.py /usr/local/bin/buzz-suba
 # a 0644 /etc/buzz-agent cannot be entered, and every Sandbox with sub-agents failed to start.
 RUN install -d -m 0755 /etc/buzz-agent
 COPY --chmod=0644 voltage/images/buzz-agent/subagents.md /etc/buzz-agent/subagents.md
+COPY --chmod=0644 voltage/images/buzz-agent/cluster.md /etc/buzz-agent/cluster.md
 COPY --chmod=0755 voltage/images/buzz-agent/heavy-bin/ /opt/buzz-heavy/bin/
 COPY --chmod=0755 voltage/images/buzz-agent/gh.sh /usr/local/bin/gh
 COPY --chmod=0755 voltage/images/buzz-agent/via.sh /usr/local/bin/via
