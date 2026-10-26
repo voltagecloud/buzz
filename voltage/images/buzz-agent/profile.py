@@ -220,6 +220,38 @@ def restore_checkpoint():
 
 SUBAGENT_CREDENTIALS = Path('/var/run/secrets/buzz-subagents')
 SUBAGENT_GUIDE = Path('/etc/buzz-agent/subagents.md')
+CLUSTER_CREDENTIALS = Path('/var/run/secrets/buzz-cluster')
+CLUSTER_GUIDE = Path('/etc/buzz-agent/cluster.md')
+
+
+def install_cluster_access(env):
+    """Configure kubectl with the mounted, rotating token; never copy its value."""
+    credentials = next((path for path in (CLUSTER_CREDENTIALS, SUBAGENT_CREDENTIALS)
+                        if (path / 'token').is_file()), None)
+    if credentials is None:
+        return
+    require(all((credentials / name).is_file() for name in ('ca.crt', 'namespace')),
+            'Staging cluster credentials are incomplete')
+    namespace = (credentials / 'namespace').read_text().strip()
+    require(namespace == 'buzz-agent-staging-' + env['BUZZ_DEVELOPER_ID'],
+            'Staging cluster credentials do not match the developer namespace')
+    config = {
+        'apiVersion': 'v1', 'kind': 'Config', 'current-context': 'voltage-staging',
+        'clusters': [{'name': 'voltage-staging', 'cluster': {
+            'server': 'https://kubernetes.default.svc',
+            'certificate-authority': str(credentials / 'ca.crt')}}],
+        'users': [{'name': 'agent-observer', 'user': {'tokenFile': str(credentials / 'token')}}],
+        'contexts': [{'name': 'voltage-staging', 'context': {
+            'cluster': 'voltage-staging', 'user': 'agent-observer', 'namespace': namespace}}],
+    }
+    path = DIRECTORY / 'staging-kubeconfig.json'
+    write_file(path, json.dumps(config))
+    env['KUBECONFIG'] = str(path)
+    guide = CLUSTER_GUIDE.read_text()
+    for target in (Path('/home/agent/.claude/CLAUDE.md'), Path(env.get('CODEX_HOME', '/home/agent/.codex')) / 'AGENTS.md'):
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with open(target, 'a') as handle:
+            handle.write(guide)
 
 
 def install_subagent_guide(env):
@@ -234,6 +266,7 @@ def install_subagent_guide(env):
 
 
 def main():
+    """Load the owner profile and cluster access before starting a session or worker."""
     parser = argparse.ArgumentParser(description=__doc__)
     actions = parser.add_subparsers(dest='action', required=True)
     run_parser = actions.add_parser('run', help='Load the verified owner profile, then start the harness')
@@ -242,6 +275,8 @@ def main():
     args = parser.parse_args()
     if args.action == 'work':
         env = bootstrap()
+        step('configuring staging cluster diagnostics')
+        install_cluster_access(env)
         step('starting the worker')
         worker = ['/usr/local/bin/buzz-agent-cache', '/usr/local/bin/buzz-agent-worker']
         os.execvpe(worker[0], worker, env)
@@ -249,6 +284,8 @@ def main():
         env = bootstrap()
         step('restoring the checkpoint')
         restore_checkpoint()
+        step('configuring staging cluster diagnostics')
+        install_cluster_access(env)
         step('installing the sub-agent guide')
         install_subagent_guide(env)
         step('starting the harness')

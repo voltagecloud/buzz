@@ -5,7 +5,7 @@ Build Linux `arm64` and `amd64` images for the five initial sessions owned by `t
 Staging agent workers are Graviton (`arm64`); the tool downloads in the Dockerfile are pinned per architecture.
 Each developer supplies their own accounts at runtime.
 
-The image contains Codex and Claude ACP adapters, Rust, Node, Go, Python, Git, GitHub CLI, `via`, and SQL clients.
+The image contains Codex and Claude ACP adapters, Rust, Node, Go, Python, Git, GitHub CLI, `via`, `kubectl`, and SQL clients.
 Buzz selects the runtime, model, persona, and arguments for each session.
 The image builds the Buzz source of the commit it is built from; npm dependencies use the committed lockfile.
 
@@ -40,6 +40,7 @@ python3 test-gate.py buzz-agent:local
 python3 test-worker.py buzz-agent:local
 python3 test-cache.py buzz-agent:local
 python3 -O test-profile.py buzz-agent:local
+python3 test-cluster.py buzz-agent:local
 ```
 
 These checks use synthetic tasks and accounts. Live GitHub, signing, `via`, cache, and staging behavior require end-to-end validation.
@@ -85,6 +86,25 @@ A slot is released when its connection closes, including when the job crashes. I
 Codex uses `BUZZ_ACP_PERMISSION_MODE=agent-full-access` inside the restricted Kubernetes container.
 The harness requires the adapter to advertise and confirm this mode before sending a prompt.
 Developer tools and configured MCP servers remain available; the previous text-only restriction is removed.
+
+## Staging cluster diagnostics
+
+The image includes checksum-pinned `kubectl` 1.35.8 for staging Kubernetes 1.35.
+During `buzz-agent-profile run` and `work`, the bootstrap configures staging access when projected credentials are mounted.
+Primary sessions reuse `/var/run/secrets/buzz-subagents`; workers use `/var/run/secrets/buzz-cluster`.
+The generated kubeconfig references the mounted token file and CA without copying token contents.
+Kubelet rotates the 600-second token.
+
+The bootstrap exports `KUBECONFIG` and appends [the diagnostic guide](cluster.md) to Claude Code and Codex instructions.
+It skips configuration when neither token is mounted, and rejects credentials for another developer namespace.
+It performs no cluster API calls during startup.
+
+The staging Terraform root owns the observer RBAC, worker projection, and API egress policy.
+Diagnostic permissions cover reads across staging namespaces, including logs, events, metrics, routing, and Argo CD state.
+They exclude Secrets, exec, attach, port forwarding, node/service proxies, and mutations.
+Existing orchestrator permissions continue to manage worker claims only in the developer namespace.
+Publish this image and promote its manager and worker pins after reviewing the Terraform change.
+Existing Pods retain their current tools until their normal replacement.
 
 ## Developer accounts
 
