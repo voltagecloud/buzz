@@ -170,9 +170,16 @@ fn golden_events_open_to_their_envelopes() {
 
 #[test]
 fn envelopes_round_trip_for_every_op_and_status() {
-    for op in [Op::Info, Op::Deploy, Op::Stop, Op::Enroll, Op::Profile] {
+    for op in [
+        Op::Info,
+        Op::Deploy,
+        Op::Stop,
+        Op::Enroll,
+        Op::Profile,
+        Op::Start,
+    ] {
         let request = Request::new(op, "r-1", json!({"op": op.as_str()}));
-        let owner_signed = matches!(op, Op::Enroll | Op::Profile);
+        let owner_signed = matches!(op, Op::Enroll | Op::Profile | Op::Start);
         let auth = (!owner_signed).then(auth_tag);
         let event = build_request(
             &agent(),

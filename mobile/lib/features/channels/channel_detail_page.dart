@@ -1,4 +1,6 @@
 import 'dart:async';
+
+import '../../shared/agents/remote_agent_launch_status.dart';
 import 'dart:math' show cos, max, min, pi;
 import 'dart:ui' show ImageFilter, lerpDouble;
 
@@ -832,6 +834,7 @@ class ChannelDetailPage extends HookConsumerWidget {
                                 entries: typingEntries,
                               ),
                       ),
+                      RemoteAgentLaunchStatus(channelId: channel.id),
                       ComposeBar(
                         channelId: channel.id,
                         focusNode: composerFocusNode,

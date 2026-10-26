@@ -154,6 +154,7 @@ async fn an_attested_fresh_deploy_starts_in_the_owners_namespace() {
                 env,
                 ..
             },
+        ..
     } = job.work
     else {
         panic!("not a managed deploy");

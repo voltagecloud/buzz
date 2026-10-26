@@ -159,6 +159,8 @@ pub struct ErrorResponse {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
+    /// A desktop launch cannot register its relay endpoint for mobile starts.
+    InvalidLaunchRegistration,
     /// The session is a tombstone; only an explicit recovery starts another.
     SessionEnded,
     /// A stop is draining; the session ends once its Pod is gone.
@@ -242,6 +244,12 @@ pub enum ErrorCode {
     GithubLoginMismatch,
     /// The profile could not be written to the developer's secret.
     ProfileStoreFailed,
+    /// No saved launch exists for this owner, community and agent.
+    LaunchNotRegistered,
+    /// A saved launch could not be read or durably updated.
+    LaunchStoreFailed,
+    /// An owner-start payload is not a signed mention of the requested agent.
+    InvalidStart,
     /// Client-side: the manager did not accept the request within 30 s.
     ManagerUnavailable,
     /// Client-side: the manager accepted the request but did not finish it

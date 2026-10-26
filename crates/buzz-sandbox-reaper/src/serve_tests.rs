@@ -225,12 +225,23 @@ async fn deploy_and_stop_run_end_to_end_over_the_relay() {
     )
     .unwrap();
     let cluster = sandbox_fake::Shared::default();
-    let manager = Arc::new(Manager::new(
-        manager_keys.clone(),
-        config,
-        sandbox_fake::client(&cluster),
-        crate::enroll::tests::offline(Default::default()),
-    ));
+    let manager = Arc::new(
+        Manager::new(
+            manager_keys.clone(),
+            config,
+            sandbox_fake::client(&cluster),
+            crate::enroll::tests::offline(Default::default()),
+        )
+        .with_sandbox_defaults(
+            json!({
+                "image": format!("example.invalid/sprig@sha256:{}", "a".repeat(64)),
+                "pod_options": {"active_deadline_seconds": 3600}
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        ),
+    );
     let mut relay = FakeRelay::start().await;
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let url = relay.url.clone();
@@ -243,6 +254,28 @@ async fn deploy_and_stop_run_end_to_end_over_the_relay() {
     relay.wait_for_subscriber(&manager_keys.public_key()).await;
     let mut agent = Agent::connect(&mut relay, agent_keys.clone(), manager_keys.public_key()).await;
     let auth = buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent_keys.public_key(), "").unwrap();
+
+    let trigger = nostr::EventBuilder::new(nostr::Kind::Custom(9), "@agent investigate")
+        .tags([
+            Tag::parse(["h", "0b6c1f0e-2a7d-4c1e-9f3a-5d2b8e4c7a10"]).unwrap(),
+            Tag::public_key(agent_keys.public_key()),
+        ])
+        .sign_with_keys(&owner)
+        .unwrap();
+    let before_setup = Envelope::new(
+        Op::Start,
+        "phone-before-setup",
+        json!({"agent_pubkey":agent_keys.public_key(),
+            "relay_url":"wss://relay.example.invalid", "trigger":trigger}),
+    );
+    let mut setup_phone =
+        Agent::connect(&mut relay, owner.clone(), manager_keys.public_key()).await;
+    let refused = setup_phone.request(&before_setup, None).await;
+    assert_eq!(
+        refused.last().unwrap().response.as_ref().unwrap()["code"],
+        "launch_not_registered"
+    );
+    drop(setup_phone);
 
     let deploy = Envelope::new(
         Op::Deploy,
@@ -265,6 +298,40 @@ async fn deploy_and_stop_run_end_to_end_over_the_relay() {
         }
     }
 
+    // The owner can start a new thread after the desktop/agent connection
+    // closes: only the saved registration and owner's key are needed.
+    drop(agent);
+    let mut phone = Agent::connect(&mut relay, owner.clone(), manager_keys.public_key()).await;
+    // Completed failures stay cached even after desktop setup fixes their cause.
+    // Explicit Retry needs a new operation ID; the signed trigger stays intact.
+    let cached = phone.request(&before_setup, None).await;
+    assert_eq!(
+        cached.last().unwrap().response.as_ref().unwrap()["code"],
+        "launch_not_registered"
+    );
+    let start = Envelope::new(Op::Start, "phone-1", before_setup.payload.clone());
+    let mobile = phone.request(&start, None).await;
+    let mobile_response = mobile.last().unwrap().response.as_ref().unwrap();
+    assert_eq!(mobile_response["ok"], true, "{mobile_response}");
+    assert_ne!(mobile_response["agent_id"], agent_id);
+    assert_eq!(cluster.lock().unwrap().sandboxes.len(), 2);
+    let duplicate = phone.request(&start, None).await;
+    assert_eq!(
+        duplicate.last().unwrap().response.as_ref().unwrap(),
+        mobile_response
+    );
+    assert_eq!(cluster.lock().unwrap().sandboxes.len(), 2);
+    // Even a new operation ID converges to the existing thread Sandbox;
+    // correctness does not depend only on the manager's short-lived cache.
+    let retry = Envelope::new(Op::Start, "phone-2", start.payload.clone());
+    let retried = phone.request(&retry, None).await;
+    assert_eq!(
+        retried.last().unwrap().response.as_ref().unwrap(),
+        mobile_response
+    );
+    assert_eq!(cluster.lock().unwrap().sandboxes.len(), 2);
+
+    let mut agent = Agent::connect(&mut relay, agent_keys.clone(), manager_keys.public_key()).await;
     let stop_request = Envelope::new(
         Op::Stop,
         "stop-1",
@@ -302,11 +369,13 @@ async fn deploy_and_stop_run_end_to_end_over_the_relay() {
     );
 
     let sent = relay.published_by(&manager_keys.public_key());
-    assert_eq!(sent.len(), 5);
+    assert_eq!(sent.len(), 13);
     for event in sent {
         let json = serde_json::to_string(&event).unwrap();
         for needle in [
             "unauthorized_owner",
+            "launch_not_registered",
+            "phone-before-setup",
             "ending",
             "agent_id",
             "deploy-1",

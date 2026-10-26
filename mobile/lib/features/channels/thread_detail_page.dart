@@ -1,4 +1,6 @@
 import 'dart:async';
+
+import '../../shared/agents/remote_agent_launch_status.dart';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart' show ValueListenable;
@@ -936,6 +938,10 @@ class ThreadDetailPage extends HookConsumerWidget {
                       _ThreadTypingIndicator(
                         channelId: channelId,
                         entries: threadTyping,
+                      ),
+                      RemoteAgentLaunchStatus(
+                        channelId: channelId,
+                        threadRoot: effectiveRootId,
                       ),
                       ComposeBar(
                         channelId: channelId,
