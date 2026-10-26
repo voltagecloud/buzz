@@ -232,10 +232,26 @@ fn a_partial_profile_may_omit_fields_but_not_add_them() {
     partial["git"] = json!({"email": "ada@example.com"});
     assert_eq!(check_partial(&partial), Ok(()));
     for (pointer, bad, message) in [
-        ("/models", json!({"codex_access_token": 1}), "Unsupported model credential type"),
-        ("/models", json!({"gemini_api_key": "x"}), "Unsupported model credential type"),
-        ("/git", json!({"signing": "x"}), "Profile fields are incomplete or unsupported"),
-        ("/github", json!({"token": "ghp_x"}), "A GitHub token needs its login"),
+        (
+            "/models",
+            json!({"codex_access_token": 1}),
+            "Unsupported model credential type",
+        ),
+        (
+            "/models",
+            json!({"gemini_api_key": "x"}),
+            "Unsupported model credential type",
+        ),
+        (
+            "/git",
+            json!({"signing": "x"}),
+            "Profile fields are incomplete or unsupported",
+        ),
+        (
+            "/github",
+            json!({"token": "ghp_x"}),
+            "A GitHub token needs its login",
+        ),
         ("/version", json!(2), "Unsupported profile version"),
     ] {
         let mut partial = base();
