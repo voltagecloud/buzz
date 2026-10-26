@@ -79,8 +79,9 @@ describe("reminders", () => {
     expect(host.sent).toContainEqual({ method: "message/markers", params: { action: "remind-me", messages: ["m-later", "m-old"] } });
     // One that comes due after the baseline notifies, once.
     await new Promise((resolve) => setTimeout(resolve, 1100));
-    await list([reminder("old", now() - 3600), reminder("now", now())]);
-    await list([reminder("old", now() - 3600), reminder("now", now())]);
+    const due = reminder("now", now());
+    await list([reminder("old", now() - 3600), due]);
+    await list([reminder("old", now() - 3600), due]);
     expect(submitted).toHaveLength(1);
     expect(submitted[0]).toMatchObject({
       category: "reminders",

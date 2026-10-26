@@ -6,6 +6,7 @@
 //! Logs carry only event ids, operations and codes. `buzz_ws_client` logs
 //! whole frames at debug level, so `main` caps that target at info.
 
+use crate::codex_login::server::{Options as CodexLoginOptions, Server as CodexLoginServer};
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
@@ -22,9 +23,12 @@ use futures_util::FutureExt;
 use nostr::{Event, Keys, Tag, Timestamp};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
+use tokio::{join, select};
+use tokio_util::sync::CancellationToken;
 
 use crate::enroll::{self, Enrollment, SecretsManagerStore};
 use crate::manager::{response_value, Admission, Job, Manager, ManagerConfig, Waiter};
+use crate::shutdown;
 
 /// Bound on connecting, authenticating and subscribing.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -39,6 +43,8 @@ const SUBSCRIPTION: &str = "session-control";
 
 #[derive(Args)]
 pub struct ServeArgs {
+    #[command(flatten)]
+    codex: CodexLoginOptions,
     /// Path to the JSON config (ConfigMap `sandbox-manager-config`, key `config.json`).
     #[arg(
         long,
@@ -96,7 +102,12 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
         .map_err(|_| anyhow::anyhow!("BUZZ_AUTH_TAG is not a valid owner attestation"))?;
     let github = enroll::GitHub::new(&args.github_api_url)
         .map_err(|e| anyhow::anyhow!("BUZZ_GITHUB_API_URL: {e}"))?;
-    let enrollment = Enrollment::new(github, Arc::new(SecretsManagerStore::new().await));
+    let store = Arc::new(SecretsManagerStore::new().await);
+    let broker = CodexLoginServer::prepare(args.codex, store.clone(), config.developers()).await?;
+    let mut enrollment = Enrollment::new(github, store);
+    if let Some(server) = &broker {
+        enrollment = enrollment.with_broker(Arc::clone(&server.broker));
+    }
     let client = kube::Client::try_default()
         .await
         .context("build in-cluster Kubernetes client")?;
@@ -105,7 +116,23 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
         Arc::new(Manager::new(keys, config, client, enrollment).with_sandbox_defaults(defaults));
     tracing::info!(manager = %manager.keys().public_key(), developers,
         "buzz-sandbox-reaper serve started");
-    run(manager, &args.relay_url, auth_tag, crate::shutdown()).await;
+    if let Some(broker) = broker {
+        let stop = CancellationToken::new();
+        let relay = async {
+            run(manager, &args.relay_url, auth_tag, stop.cancelled()).await;
+            stop.cancel();
+        };
+        let signal = async {
+            select! {
+                () = shutdown() => stop.cancel(),
+                () = stop.cancelled() => {},
+            }
+        };
+        let (result, (), ()) = join!(broker.run(stop.clone()), relay, signal);
+        result?;
+    } else {
+        run(manager, &args.relay_url, auth_tag, shutdown()).await;
+    }
     Ok(())
 }
 
@@ -134,7 +161,7 @@ pub async fn run(
     tokio::pin!(shutdown);
     let mut backoff = MIN_BACKOFF;
     loop {
-        let connected = tokio::select! {
+        let connected = select! {
             () = &mut shutdown => break,
             connected = tokio::time::timeout(
                 CONNECT_TIMEOUT,
@@ -158,7 +185,7 @@ pub async fn run(
             }
             Err(error) => tracing::warn!(error, "could not connect to the relay"),
         }
-        tokio::select! {
+        select! {
             () = &mut shutdown => break,
             () = tokio::time::sleep(backoff) => {}
         }
@@ -218,7 +245,7 @@ impl Session<'_> {
         shutdown: &mut std::pin::Pin<&mut impl Future<Output = ()>>,
     ) -> Option<&'static str> {
         loop {
-            tokio::select! {
+            select! {
                 () = shutdown.as_mut() => return None,
                 Some(reply) = queued.recv() => {
                     if let Err(error) = self.publish(reply).await {

@@ -4,6 +4,7 @@
 //! talks to the community itself; this type only starts the session.
 //! Built only with the `voltage-sandbox` feature.
 
+mod codex_login;
 pub mod config;
 mod enroll;
 mod enroll_form;

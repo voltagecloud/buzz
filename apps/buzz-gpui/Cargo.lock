@@ -1092,6 +1092,7 @@ dependencies = [
  "libc",
  "markdown",
  "markup5ever_rcdom",
+ "nix 0.31.3",
  "nostr 0.45.5",
  "regex",
  "reqwest",

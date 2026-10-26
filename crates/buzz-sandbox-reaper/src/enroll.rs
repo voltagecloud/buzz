@@ -12,12 +12,21 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use aws_config::timeout::TimeoutConfig;
+use aws_config::{BehaviorVersion, SdkConfig};
 use aws_sdk_secretsmanager::error::{ProvideErrorMetadata, SdkError};
+use aws_sdk_secretsmanager::operation::get_secret_value::GetSecretValueOutput;
+use aws_sdk_secretsmanager::{
+    config::{Builder, Region},
+    primitives::DateTimeFormat,
+    Client,
+};
 use buzz_backend_kubernetes::wire::ErrorCode;
 use nostr::PublicKey;
 use serde_json::Value;
 use zeroize::Zeroizing;
 
+use crate::codex_login::{Broker, Change};
 use crate::manager::{refusal, Developer};
 use crate::profile;
 
@@ -39,7 +48,12 @@ pub fn admit_profile(
 ) -> Result<Value, (ErrorCode, &'static str)> {
     let mut profile = payload
         .as_object()
-        .filter(|payload| payload.len() == 1)
+        .filter(|payload| {
+            payload.contains_key("profile")
+                && payload
+                    .keys()
+                    .all(|key| key == "profile" || key == "codex_login")
+        })
         .and_then(|payload| payload.get("profile"))
         .filter(|profile| profile.is_object())
         .cloned()
@@ -92,6 +106,16 @@ pub trait ProfileStore: Send + Sync {
         region: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<Option<Stored>, StoreFailed>> + Send + 'a>>;
 
+    /// Read an immutable version. Failure must never fall back to AWSCURRENT.
+    fn get_version<'a>(
+        &'a self,
+        _arn: &'a str,
+        _region: &'a str,
+        _version: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<Stored>, StoreFailed>> + Send + 'a>> {
+        Box::pin(async { Err(StoreFailed("version_reads_not_supported")) })
+    }
+
     /// Write `profile` as the new current version of the secret `arn` in
     /// `region`, and return the version id.
     fn put<'a>(
@@ -105,17 +129,17 @@ pub trait ProfileStore: Send + Sync {
 /// Secrets Manager `GetSecretValue` and `PutSecretValue` with the ambient
 /// credentials (IRSA in-cluster). It writes no files.
 pub struct SecretsManagerStore {
-    shared: aws_config::SdkConfig,
+    shared: SdkConfig,
 }
 
 impl SecretsManagerStore {
     pub async fn new() -> Self {
-        let timeouts = aws_config::timeout::TimeoutConfig::builder()
+        let timeouts = TimeoutConfig::builder()
             .connect_timeout(Duration::from_secs(5))
             .operation_attempt_timeout(Duration::from_secs(10))
             .operation_timeout(Duration::from_secs(25))
             .build();
-        let shared = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        let shared = aws_config::defaults(BehaviorVersion::latest())
             .timeout_config(timeouts)
             .load()
             .await;
@@ -124,13 +148,11 @@ impl SecretsManagerStore {
 }
 
 impl SecretsManagerStore {
-    fn client(&self, region: &str) -> aws_sdk_secretsmanager::Client {
-        let config = aws_sdk_secretsmanager::config::Builder::from(&self.shared)
-            .region(aws_sdk_secretsmanager::config::Region::new(
-                region.to_string(),
-            ))
+    fn client(&self, region: &str) -> Client {
+        let config = Builder::from(&self.shared)
+            .region(Region::new(region.to_string()))
             .build();
-        aws_sdk_secretsmanager::Client::from_conf(config)
+        Client::from_conf(config)
     }
 }
 
@@ -157,18 +179,26 @@ impl ProfileStore for SecretsManagerStore {
                 }
                 Err(error) => return Err(store_error(error)),
             };
-            let created = output.created_date().and_then(|at| {
-                at.fmt(aws_sdk_secretsmanager::primitives::DateTimeFormat::DateTime)
-                    .ok()
-            });
-            match (output.secret_string(), output.version_id()) {
-                (Some(text), Some(version_id)) => Ok(Some(Stored {
-                    text: Zeroizing::new(text.to_string()),
-                    version_id: version_id.to_string(),
-                    created,
-                })),
-                _ => Ok(None),
-            }
+            Ok(stored_value(output))
+        })
+    }
+
+    fn get_version<'a>(
+        &'a self,
+        arn: &'a str,
+        region: &'a str,
+        version: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<Stored>, StoreFailed>> + Send + 'a>> {
+        Box::pin(async move {
+            let output = self
+                .client(region)
+                .get_secret_value()
+                .secret_id(arn)
+                .version_id(version)
+                .send()
+                .await
+                .map_err(store_error)?;
+            Ok(stored_value(output))
         })
     }
 
@@ -193,6 +223,17 @@ impl ProfileStore for SecretsManagerStore {
                 .ok_or(StoreFailed("no_version_id"))
         })
     }
+}
+
+fn stored_value(output: GetSecretValueOutput) -> Option<Stored> {
+    let created = output
+        .created_date()
+        .and_then(|at| at.fmt(DateTimeFormat::DateTime).ok());
+    Some(Stored {
+        text: Zeroizing::new(output.secret_string()?.to_owned()),
+        version_id: output.version_id()?.to_owned(),
+        created,
+    })
 }
 
 /// A label for an SDK error. The error itself is never logged or returned.
@@ -272,11 +313,21 @@ impl GitHub {
 pub struct Enrollment {
     github: GitHub,
     store: Arc<dyn ProfileStore>,
+    broker: Option<Arc<Broker>>,
 }
 
 impl Enrollment {
     pub fn new(github: GitHub, store: Arc<dyn ProfileStore>) -> Self {
-        Self { github, store }
+        Self {
+            github,
+            store,
+            broker: None,
+        }
+    }
+
+    pub fn with_broker(mut self, broker: Arc<Broker>) -> Self {
+        self.broker = Some(broker);
+        self
     }
 
     /// The developer's stored profile, parsed. An unreadable stored value
@@ -303,6 +354,29 @@ impl Enrollment {
     /// version id and its [`profile::summary`]. Every profile copy is
     /// dropped, and the serialized one zeroized, before this returns.
     pub async fn run(&self, developer: &Developer, partial: Value) -> Value {
+        self.run_with_login(developer, partial, None).await
+    }
+
+    /// Enroll or revoke a dedicated login under the same lock as token refresh.
+    pub async fn run_with_login(
+        &self,
+        developer: &Developer,
+        partial: Value,
+        login: Option<Change>,
+    ) -> Value {
+        let _guard = match &self.broker {
+            Some(broker) => match broker.lock(developer).await {
+                Ok(guard) => Some(guard),
+                Err(error) => return refusal(ErrorCode::ProfileStoreFailed, &error.to_string()),
+            },
+            None if matches!(login, Some(Change::Connect(_))) => {
+                return refusal(
+                    ErrorCode::InvalidProfile,
+                    "ChatGPT login is not configured on this manager",
+                );
+            }
+            None => None,
+        };
         let stored = match self.stored(developer).await {
             Ok(stored) => stored.map(|(profile, _)| profile),
             Err(refused) => return refused,
@@ -318,7 +392,38 @@ impl Enrollment {
             );
         }
         let new_token = stored.is_none() || partial.get("github").is_some();
-        let profile = profile::merge(stored, partial);
+        let connects_codex = matches!(login, Some(Change::Connect(_)));
+        let disconnects_codex = matches!(login, Some(Change::Disconnect));
+        let replaces_codex = partial
+            .pointer("/models/openai_api_key")
+            .is_some_and(Value::is_string)
+            || partial
+                .pointer("/models/codex_access_token")
+                .is_some_and(Value::is_string)
+            || partial.get("codex_login").is_some_and(Value::is_null);
+        if self.broker.is_none()
+            && (replaces_codex || disconnects_codex)
+            && stored
+                .as_ref()
+                .is_some_and(|p| p.get("codex_login").is_some())
+        {
+            return refusal(
+                ErrorCode::ProfileStoreFailed,
+                "ChatGPT broker is unavailable; enable it before disconnecting this login",
+            );
+        }
+        let mut profile = profile::merge(stored, partial);
+        if replaces_codex || login.is_some() {
+            if let Some(profile) = profile.as_object_mut() {
+                profile.remove("codex_login");
+            }
+        }
+        if matches!(login, Some(Change::Connect(_))) {
+            if let Some(models) = profile["models"].as_object_mut() {
+                models.remove("openai_api_key");
+                models.remove("codex_access_token");
+            }
+        }
         if let Err(profile::Invalid(message)) = profile::validate(&profile) {
             return refusal(ErrorCode::InvalidProfile, message);
         }
@@ -338,6 +443,30 @@ impl Enrollment {
                 Err(message) => return refusal(ErrorCode::GithubLoginMismatch, message),
             }
         }
+        if let Some(Change::Connect(tokens)) = login {
+            let Some(broker) = &self.broker else {
+                return refusal(
+                    ErrorCode::InvalidProfile,
+                    "ChatGPT login is not configured on this manager",
+                );
+            };
+            match broker.stage(developer, tokens).await {
+                Ok(metadata) => profile["codex_login"] = metadata,
+                Err(error) => return refusal(ErrorCode::ProfileStoreFailed, &error.to_string()),
+            }
+        }
+        if let Err(profile::Invalid(message)) = profile::validate(&profile) {
+            return refusal(ErrorCode::InvalidProfile, message);
+        }
+        // Revoke before changing the profile: stale Secrets Manager replicas
+        // may still serve its old broker credential, which must no longer work.
+        if !connects_codex && (disconnects_codex || replaces_codex) {
+            if let Some(broker) = &self.broker {
+                if let Err(error) = broker.disconnect(developer).await {
+                    return refusal(ErrorCode::ProfileStoreFailed, &error.to_string());
+                }
+            }
+        }
         let text = Zeroizing::new(profile.to_string());
         match self
             .store
@@ -345,6 +474,16 @@ impl Enrollment {
             .await
         {
             Ok(version_id) => {
+                if let Some(broker) = &self.broker {
+                    if let Some(credential) = profile
+                        .pointer("/codex_login/refresh_token")
+                        .and_then(Value::as_str)
+                    {
+                        if let Err(error) = broker.activate(developer, credential).await {
+                            return refusal(ErrorCode::ProfileStoreFailed, &error.to_string());
+                        }
+                    }
+                }
                 let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
                 let summary = profile::summary(&profile, &version_id, Some(now));
                 serde_json::json!({"ok": true, "version_id": version_id, "profile": summary})

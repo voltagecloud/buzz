@@ -5,6 +5,7 @@
 //! rule. Refusals are the image's messages, which never include a value.
 
 use serde_json::{Map, Value};
+use url::Url;
 
 /// Largest profile, measured as Python's `json.dumps` writes it: the
 /// Secrets Manager `SecretString` limit.
@@ -111,7 +112,15 @@ fn truthy(value: Option<&toml::Value>) -> bool {
 
 /// `profile.py`'s `validate(profile)`, in its order.
 pub fn validate(profile: &Value) -> Result<(), Invalid> {
-    let top = fields(profile, FIELDS)?;
+    let top = profile
+        .as_object()
+        .filter(|map| {
+            FIELDS.iter().all(|field| map.contains_key(*field))
+                && map
+                    .keys()
+                    .all(|field| FIELDS.contains(&field.as_str()) || field == "codex_login")
+        })
+        .ok_or(Invalid("Profile fields are incomplete or unsupported"))?;
     let version = &top["version"];
     require(
         (version.is_u64() || version.is_i64()) && version.as_i64() == Some(1),
@@ -166,6 +175,13 @@ pub fn validate(profile: &Value) -> Result<(), Invalid> {
         .as_object()
         .filter(|models| models.keys().all(|k| MODEL_FIELDS.contains(&k.as_str())))
         .ok_or(Invalid("Unsupported model credential type"))?;
+    if let Some(login) = top.get("codex_login") {
+        validate_codex_login(login, top["developer"].as_str().unwrap_or_default())?;
+        require(
+            !models.contains_key("openai_api_key") && !models.contains_key("codex_access_token"),
+            "Choose a ChatGPT login, an OpenAI API key, or a Codex access token",
+        )?;
+    }
     // Codex reads the access token before its saved API-key login, so allow only one.
     require(
         !(models.contains_key("openai_api_key") && models.contains_key("codex_access_token")),
@@ -188,6 +204,51 @@ pub fn validate(profile: &Value) -> Result<(), Invalid> {
     require(
         python_json_len(profile) <= MAX_BYTES,
         "Profile exceeds Secrets Manager size limit",
+    )
+}
+
+/// Broker metadata only. The upstream refresh token belongs in the
+/// manager-only login secret, never this agent-readable profile.
+fn validate_codex_login(value: &Value, developer: &str) -> Result<(), Invalid> {
+    let login = fields(value, &["url", "ca_certificate", "refresh_token"])?;
+    let url = login["url"]
+        .as_str()
+        .and_then(|value| Url::parse(value).ok())
+        .ok_or(Invalid("Invalid ChatGPT broker URL"))?;
+    require(
+        url.scheme() == "https"
+            && url.host_str() == Some("codex-refresh.buzz-sandbox-manager.svc.cluster.local")
+            && url.port() == Some(8443)
+            && url.path() == "/oauth/token"
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none(),
+        "Invalid ChatGPT broker URL",
+    )?;
+    require(
+        login["ca_certificate"].as_str().is_some_and(|certificate| {
+            certificate.len() <= 8192
+                && certificate.starts_with("-----BEGIN CERTIFICATE-----\n")
+                && certificate
+                    .trim_end()
+                    .ends_with("-----END CERTIFICATE-----")
+        }),
+        "Invalid ChatGPT broker certificate",
+    )?;
+    token(&login["refresh_token"])?;
+    let credential = login["refresh_token"].as_str().unwrap_or_default();
+    let prefix = format!("{developer}.");
+    require(
+        credential.strip_prefix(&prefix).is_some_and(|body| {
+            body.strip_suffix(".seed").is_some_and(|random| {
+                random.len() == 32
+                    && random
+                        .bytes()
+                        .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+            })
+        }),
+        "Invalid ChatGPT broker credential",
     )
 }
 
@@ -245,7 +306,16 @@ const EXCLUSIVE_MODELS: &[(&str, &str)] = &[
 pub fn check_partial(profile: &Value) -> Result<(), Invalid> {
     const INCOMPLETE: &str = "Profile fields are incomplete or unsupported";
     let top = profile.as_object().ok_or(Invalid(INCOMPLETE))?;
-    require(top.keys().all(|k| FIELDS.contains(&k.as_str())), INCOMPLETE)?;
+    require(
+        top.keys()
+            .all(|k| FIELDS.contains(&k.as_str()) || k == "codex_login"),
+        INCOMPLETE,
+    )?;
+    // Clients may disconnect, but only the manager creates broker metadata.
+    require(
+        top.get("codex_login").is_none_or(Value::is_null),
+        "ChatGPT broker metadata is managed by the Sandbox manager",
+    )?;
     let version = top.get("version").unwrap_or(&Value::Null);
     require(
         (version.is_u64() || version.is_i64()) && version.as_i64() == Some(1),
@@ -336,7 +406,7 @@ pub fn summary(profile: &Value, version_id: &str, updated_at: Option<String>) ->
         .map(|models| models.keys().collect())
         .unwrap_or_default();
     models.sort();
-    serde_json::json!({
+    let mut summary = serde_json::json!({
         "version_id": version_id,
         "updated_at": updated_at,
         "git": {
@@ -347,7 +417,11 @@ pub fn summary(profile: &Value, version_id: &str, updated_at: Option<String>) ->
         "github": {"login": text("/github/login"), "token": present("/github/token")},
         "via": {"profile": present("/via/profile"), "op_token": present("/via/op_token")},
         "models": models,
-    })
+    });
+    if profile.get("codex_login").is_some_and(Value::is_object) {
+        summary["codex_login"] = Value::Bool(true);
+    }
+    summary
 }
 
 #[cfg(test)]
