@@ -1083,6 +1083,7 @@ dependencies = [
  "gpui-base",
  "gpui-kit",
  "gpui-pre-linux",
+ "gpui-pre-macos",
  "gstreamer",
  "gstreamer-app",
  "gstreamer-video",
