@@ -14,7 +14,13 @@
     // flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
-        runtimeLibs = with pkgs; [
+        inherit (pkgs.stdenv.hostPlatform) isLinux isDarwin;
+        runtimeLibs = (with pkgs; [
+          freetype
+          openssl
+          dbus
+          sqlite
+        ]) ++ pkgs.lib.optionals isLinux (with pkgs; [
           wayland
           vulkan-loader
           libxcb
@@ -23,11 +29,7 @@
           libxcursor
           libxi
           fontconfig
-          freetype
-          openssl
-          dbus
-          sqlite
-        ];
+        ]);
         # Audio and video playback. GStreamer's setup hook puts each plugin
         # set on GST_PLUGIN_SYSTEM_PATH_1_0 inside the shell.
         playback = with pkgs.gst_all_1; [
@@ -38,7 +40,7 @@
         ];
         # Libraries the app needs when it runs, beyond those it links: the
         # audio backends GStreamer and the terminal use, and zstd.
-        appRuntimeLibs = runtimeLibs ++ (with pkgs; [ alsa-lib zstd ]);
+        appRuntimeLibs = runtimeLibs ++ [ pkgs.zstd ] ++ pkgs.lib.optional isLinux pkgs.alsa-lib;
         craneLib = crane.mkLib pkgs;
         version = "0.2.0";
         sourceFilter = path: type:
@@ -143,7 +145,8 @@
           };
           doCheck = false;
           nativeBuildInputs = with pkgs; [ pkg-config cmake perl makeWrapper ];
-          buildInputs = runtimeLibs ++ playback ++ (with pkgs; [ vulkan-headers alsa-lib zstd ]);
+          buildInputs = runtimeLibs ++ playback ++ [ pkgs.zstd ]
+            ++ pkgs.lib.optionals isLinux (with pkgs; [ vulkan-headers alsa-lib ]);
         };
         # Buzz's own Node plugins, built as scripts/package-deb.sh builds
         # them: each folder with a manifest ships it and its dist.
@@ -179,8 +182,10 @@
         # the Node that runs them in ../lib/buzz-gpui/node.
         gpuiPackage = { pname, features ? [ ], sandboxProviders ? null }:
           let
-            cargoFeatures = pkgs.lib.optionalString (features != [ ])
-              " --features ${pkgs.lib.concatStringsSep "," features}";
+            # Nix on macOS has no Xcode to compile the Metal shaders with.
+            features' = features ++ pkgs.lib.optional isDarwin "runtime-shaders";
+            cargoFeatures = pkgs.lib.optionalString (features' != [ ])
+              " --features ${pkgs.lib.concatStringsSep "," features'}";
             args = gpuiArgs // {
               inherit pname;
               cargoExtraArgs = gpuiArgs.cargoExtraArgs + cargoFeatures;
@@ -201,13 +206,14 @@
             });
             postInstall = ''
               wrapProgram $out/bin/buzz-gpui \
-                --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath appRuntimeLibs} \
+                ${pkgs.lib.optionalString isLinux "--prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath appRuntimeLibs}"} \
                 --prefix GST_PLUGIN_SYSTEM_PATH_1_0 : ${pkgs.lib.makeSearchPathOutput "lib" "lib/gstreamer-1.0" playback} \
                 --suffix PATH : ${pkgs.lib.makeBinPath [ pkgs.ffmpeg ]}
               mkdir -p $out/lib/buzz-gpui/node/bin $out/share/buzz-gpui
               ln -s ${pkgs.nodejs_22}/bin/node $out/lib/buzz-gpui/node/bin/node
               cp -r ${plugins} $out/share/buzz-gpui/plugins
               chmod -R u+w $out/share/buzz-gpui/plugins
+            '' + pkgs.lib.optionalString isLinux ''
               install -Dm644 packaging/linux/buzz-gpui.desktop -t $out/share/applications
               for size in 128 256 512; do
                 install -Dm644 assets/icons/buzz-$size.png \
@@ -220,7 +226,7 @@
             passthru = { inherit plugins; };
             meta = {
               mainProgram = "buzz-gpui";
-              platforms = pkgs.lib.platforms.linux;
+              platforms = pkgs.lib.platforms.linux ++ pkgs.lib.platforms.darwin;
             };
           });
       in
@@ -249,9 +255,10 @@
         devShells.default = pkgs.mkShell {
           # The Rust toolchain buzzd is built with, so local and CI checks match.
           nativeBuildInputs = with pkgs; [ pkg-config cmake perl rustc cargo clippy rustfmt nodejs_22 ];
-          buildInputs = runtimeLibs ++ playback ++ (with pkgs; [ vulkan-headers alsa-lib zstd ]);
+          buildInputs = gpuiArgs.buildInputs;
           env = {
             RUST_BACKTRACE = "1";
+          } // pkgs.lib.optionalAttrs isLinux {
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath runtimeLibs;
           };
         };

@@ -1,7 +1,9 @@
 //! The human's Buzz identity.
 //!
-//! The key is the same OS keyring entry buzz-app uses, so both apps share
-//! one identity. Nothing outside this crate sees the secret key. Callers
+//! The key is in the OS keyring entry buzz-app used before it moved its keys
+//! into one combined entry; [`adopt_buzz_app`] copies the key from that
+//! entry, so both apps share one identity. Nothing outside this crate sees
+//! the secret key. Callers
 //! ask for a specific purpose (relay auth, an HTTP request, a chat event)
 //! rather than "sign this", so a bug elsewhere cannot mint HTTP or media
 //! tokens or forge kinds the app never writes.
@@ -143,6 +145,45 @@ pub fn forget() -> Result<(), IdentityError> {
         Ok(_) => Err(IdentityError::StillSaved),
         Err(error) => Err(store_error(error)),
     }
+}
+
+/// buzz-app's store since it moved its keys out of [`SERVICE`]: one entry
+/// whose value is a JSON map of every key it holds. The human key is under
+/// [`BUZZ_APP_IDENTITY`].
+pub const BUZZ_APP_SERVICE: &str = "buzz-desktop";
+const BUZZ_APP_ACCOUNT: &str = "secrets";
+const BUZZ_APP_IDENTITY: &str = "identity";
+
+/// Copies buzz-app's identity into this app's entry. `Ok(None)` means
+/// buzz-app keeps no identity. buzz-app's entry is only read, so both apps
+/// keep working with the same key.
+pub fn adopt_buzz_app() -> Result<Option<Identity>, IdentityError> {
+    let bytes = match buzz_keychain::read(BUZZ_APP_SERVICE, BUZZ_APP_ACCOUNT) {
+        Ok(bytes) => bytes,
+        Err(StoreError::Absent) => return Ok(None),
+        Err(error) => return Err(store_error(error)),
+    };
+    let Some(identity) = buzz_app_identity(&bytes)? else {
+        return Ok(None);
+    };
+    match save(identity) {
+        // Another process saved a key first; that one stands.
+        Err(IdentityError::Occupied) => load(),
+        saved => saved.map(Some),
+    }
+}
+
+/// The human key in buzz-app's map. The other keys are its agents'; they
+/// are wiped, not kept.
+fn buzz_app_identity(bytes: &[u8]) -> Result<Option<Identity>, IdentityError> {
+    let mut secrets: std::collections::HashMap<String, String> =
+        serde_json::from_slice(bytes).map_err(|_| IdentityError::Malformed)?;
+    let nsec = secrets.remove(BUZZ_APP_IDENTITY).map(Zeroizing::new);
+    for value in secrets.values_mut() {
+        zeroize::Zeroize::zeroize(value);
+    }
+    nsec.map(|nsec| Identity::from_nsec(&nsec).map_err(|_| IdentityError::Malformed))
+        .transpose()
 }
 
 fn save(identity: Identity) -> Result<Identity, IdentityError> {
@@ -679,6 +720,36 @@ fn header(event: &Event) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// buzz-app's map gives up its human key and nothing else.
+    #[test]
+    fn buzz_app_identity_is_read_from_its_secrets_map() {
+        let human = Identity::ephemeral();
+        let agent = Identity::ephemeral();
+        let map = serde_json::json!({
+            "identity": *human.nsec(),
+            "agent.0123": *agent.nsec(),
+        });
+        let found = buzz_app_identity(map.to_string().as_bytes())
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.pubkey_hex(), human.pubkey_hex());
+
+        let agents_only = serde_json::json!({ "agent.0123": *agent.nsec() });
+        assert!(
+            buzz_app_identity(agents_only.to_string().as_bytes())
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            buzz_app_identity(b"not json").unwrap_err(),
+            IdentityError::Malformed
+        );
+        assert_eq!(
+            buzz_app_identity(br#"{"identity":"nsec1bad"}"#).unwrap_err(),
+            IdentityError::Malformed
+        );
+    }
 
     /// An observer frame an agent encrypted to its owner opens only for
     /// that owner, through buzz-desktop's decoder.

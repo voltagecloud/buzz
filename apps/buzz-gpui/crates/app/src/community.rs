@@ -672,15 +672,88 @@ pub mod identity {
     use super::dev_identity_file;
     use buzz_identity::{Identity, IdentityError};
     use std::io::ErrorKind;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     /// The saved identity; `None` when none is saved.
     pub fn restore() -> Result<Option<Identity>, String> {
         let Some(path) = dev_identity_file() else {
-            return buzz_identity::load().map_err(|error| error.to_string());
+            return match buzz_identity::load().map_err(|error| error.to_string())? {
+                Some(identity) => Ok(Some(identity)),
+                None => Ok(adopt_once(
+                    adopted_marker().as_deref(),
+                    buzz_identity::adopt_buzz_app,
+                )),
+            };
         };
         tracing::warn!(path = %path.display(), "using a development identity file");
         read_file(&path).map_err(|error| error.to_string())
+    }
+
+    /// Present once this app has looked for buzz-app's identity. It sits
+    /// beside the sign-out markers, outside app data, so neither signing
+    /// out nor erasing brings buzz-app's key back.
+    fn adopted_marker() -> Option<PathBuf> {
+        dirs::data_dir().map(|data| {
+            data.join(format!(
+                ".buzz-gpui--{}.identity-adopted",
+                buzz_identity::BUZZ_APP_SERVICE
+            ))
+        })
+    }
+
+    /// buzz-app's identity, copied into this app's entry on the first
+    /// launch without one. A storage failure (denied, busy) is retried next
+    /// launch; until then the user can still import or create a key. A
+    /// malformed buzz-app entry will not fix itself, so it is recorded as
+    /// read rather than retried, which on macOS would prompt every launch.
+    fn adopt_once(
+        marker: Option<&Path>,
+        adopt: impl FnOnce() -> Result<Option<Identity>, IdentityError>,
+    ) -> Option<Identity> {
+        let marker = marker?;
+        if marker.exists() {
+            return None;
+        }
+        let adopted = match adopt() {
+            Ok(adopted) => adopted,
+            Err(IdentityError::Malformed) => {
+                tracing::warn!("buzz-app's identity is malformed; not reading it again");
+                None
+            }
+            Err(error) => {
+                tracing::warn!(%error, "could not read buzz-app's identity");
+                return None;
+            }
+        };
+        if let Err(error) = mark_adopted(marker) {
+            tracing::warn!(%error, "could not record that buzz-app's identity was read");
+        }
+        if let Some(identity) = &adopted {
+            tracing::info!(pubkey = %identity.pubkey_hex(), "using buzz-app's identity");
+        }
+        adopted
+    }
+
+    fn mark_adopted(marker: &Path) -> std::io::Result<()> {
+        std::fs::write(marker, b"")
+    }
+
+    /// Records the adoption before sign-out deletes the key. Without it, a
+    /// user whose key was never adopted (it predates buzz-app's move, or was
+    /// pasted in) would get buzz-app's key copied back at the next launch.
+    /// A failed write fails the removal, so the sign-out stays pending and
+    /// the next launch retries.
+    fn remove_keychain_key(
+        marker: Option<&Path>,
+        forget: impl FnOnce() -> Result<(), IdentityError>,
+    ) -> Result<(), String> {
+        if let Some(marker) = marker {
+            mark_adopted(marker).map_err(|error| {
+                tracing::error!(%error, "could not record that buzz-app's identity was read");
+                error.to_string()
+            })?;
+        }
+        forget().map_err(|error| error.to_string())
     }
 
     /// Saves a new random identity, or the imported `nsec`.
@@ -711,7 +784,7 @@ pub mod identity {
     /// confirms a fresh read finds nothing. An absent key is success.
     pub fn remove() -> Result<(), String> {
         let Some(path) = dev_identity_file() else {
-            return buzz_identity::forget().map_err(|error| error.to_string());
+            return remove_keychain_key(adopted_marker().as_deref(), buzz_identity::forget);
         };
         match std::fs::remove_file(&path) {
             Err(error) if error.kind() != ErrorKind::NotFound => Err(error.to_string()),
@@ -728,6 +801,91 @@ pub mod identity {
             Ok(text) => Identity::from_nsec(&text)
                 .map(Some)
                 .map_err(|_| IdentityError::Malformed),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::cell::Cell;
+
+        fn marker_in(dir: &tempfile::TempDir) -> PathBuf {
+            dir.path().join("identity-adopted")
+        }
+
+        #[test]
+        fn a_recorded_adoption_is_not_repeated() {
+            let dir = tempfile::tempdir().unwrap();
+            let marker = marker_in(&dir);
+            mark_adopted(&marker).unwrap();
+            let called = Cell::new(false);
+            let adopted = adopt_once(Some(&marker), || {
+                called.set(true);
+                Ok(Some(Identity::ephemeral()))
+            });
+            assert!(adopted.is_none());
+            assert!(!called.get());
+        }
+
+        #[test]
+        fn adoption_is_recorded_whether_or_not_buzz_app_has_a_key() {
+            let dir = tempfile::tempdir().unwrap();
+            let marker = marker_in(&dir);
+            let human = Identity::ephemeral();
+            let expected = human.pubkey_hex();
+            let adopted = adopt_once(Some(&marker), move || Ok(Some(human))).unwrap();
+            assert_eq!(adopted.pubkey_hex(), expected);
+            assert!(marker.exists());
+
+            let empty = tempfile::tempdir().unwrap();
+            let marker = marker_in(&empty);
+            assert!(adopt_once(Some(&marker), || Ok(None)).is_none());
+            assert!(marker.exists());
+        }
+
+        #[test]
+        fn a_storage_error_is_retried_but_malformed_data_is_not() {
+            let dir = tempfile::tempdir().unwrap();
+            let marker = marker_in(&dir);
+            for error in [IdentityError::Denied, IdentityError::Busy] {
+                assert!(adopt_once(Some(&marker), || Err(error)).is_none());
+                assert!(!marker.exists());
+            }
+            assert!(adopt_once(Some(&marker), || Err(IdentityError::Malformed)).is_none());
+            assert!(marker.exists());
+        }
+
+        #[test]
+        fn sign_out_records_the_adoption_before_the_key_is_deleted() {
+            let dir = tempfile::tempdir().unwrap();
+            let marker = marker_in(&dir);
+            let forgot = Cell::new(false);
+            remove_keychain_key(Some(&marker), || {
+                assert!(
+                    marker.exists(),
+                    "the marker must exist before the key is deleted"
+                );
+                forgot.set(true);
+                Ok(())
+            })
+            .unwrap();
+            assert!(forgot.get());
+            // The next launch finds no key and does not adopt buzz-app's.
+            let adopted = adopt_once(Some(&marker), || Ok(Some(Identity::ephemeral())));
+            assert!(adopted.is_none());
+        }
+
+        #[test]
+        fn sign_out_fails_and_keeps_the_key_when_the_marker_cannot_be_written() {
+            let dir = tempfile::tempdir().unwrap();
+            let marker = dir.path().join("missing").join("identity-adopted");
+            let forgot = Cell::new(false);
+            let result = remove_keychain_key(Some(&marker), || {
+                forgot.set(true);
+                Ok(())
+            });
+            assert!(result.is_err());
+            assert!(!forgot.get());
         }
     }
 }

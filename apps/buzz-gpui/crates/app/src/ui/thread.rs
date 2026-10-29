@@ -301,7 +301,12 @@ impl ThreadPanel {
         let weak = cx.entity().downgrade();
         list.set_scroll_handler(move |event, _, cx| {
             if event.visible_range.start < LOAD_OLDER_WITHIN && event.is_scrolled {
-                let _ = weak.update(cx, |this, _| this.load_older());
+                // GPUI runs this while it holds the list's state, and
+                // load_older reads and changes that state; run it after.
+                let weak = weak.clone();
+                cx.defer(move |cx| {
+                    let _ = weak.update(cx, |this, _| this.load_older());
+                });
             }
         });
         let tasks = vec![
