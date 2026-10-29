@@ -257,6 +257,7 @@ jobs:
             echo "==> test-$test.py"
             python3 "test-$test.py" "$IMAGE"
           done
+          python3 test-codex-login.py "$IMAGE"
           python3 -O test-profile.py "$IMAGE"
           python3 test-cluster.py "$IMAGE"
 

@@ -50,6 +50,8 @@ jobs:
         run: nix develop --command cargo fmt --all --check
       - name: Clippy
         run: nix develop --command cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Voltage agent Clippy
+        run: nix develop --command cargo clippy -p buzz-gpui --all-targets --locked --features voltage-sandbox -- -D warnings
 
   test:
     name: GPUI Test
@@ -76,6 +78,8 @@ jobs:
       # Tests that need the local test relay skip themselves without it.
       - name: Test
         run: nix develop --command cargo test --workspace --locked
+      - name: Voltage agent tests
+        run: nix develop --command cargo test -p buzz-gpui -p buzz-identity --locked --features buzz-gpui/voltage-sandbox,buzz-identity/session-control
 
   plugins:
     name: GPUI Node plugins
@@ -166,6 +170,11 @@ jobs:
       # The root rust-toolchain.toml pins block/buzz's Rust, and rustup reads
       # it from apps/buzz-gpui too, so name the GPUI toolchain explicitly.
       - run: cargo clippy --workspace --locked -- -D warnings
+        working-directory: apps/buzz-gpui
+        env:
+          RUSTUP_TOOLCHAIN: 1.98.1
+      - name: Voltage agent Clippy
+        run: cargo clippy -p buzz-gpui --locked --features voltage-sandbox -- -D warnings
         working-directory: apps/buzz-gpui
         env:
           RUSTUP_TOOLCHAIN: 1.98.1

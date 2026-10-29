@@ -7,6 +7,7 @@ use super::Identity;
 use buzz_session_control::{self as control, Op, Reply, Request, WireError};
 use nostr::prelude::{Event, EventId, PublicKey};
 use nostr_wire::JsonUtil as _;
+use serde_json::{Value, json};
 
 impl Identity {
     /// The owner's signed `enroll` request carrying `profile` to `manager`.
@@ -16,10 +17,26 @@ impl Identity {
         &self,
         manager: &PublicKey,
         request_id: &str,
-        profile: serde_json::Value,
+        profile: Value,
         created_at: u64,
     ) -> Result<Event, WireError> {
-        let payload = serde_json::json!({ "profile": profile });
+        self.enroll_request_with_codex_login(manager, request_id, profile, None, created_at)
+    }
+
+    /// Enroll a profile with an optional dedicated ChatGPT login. A null
+    /// login disconnects it. The entire payload is encrypted to the manager.
+    pub fn enroll_request_with_codex_login(
+        &self,
+        manager: &PublicKey,
+        request_id: &str,
+        profile: Value,
+        login: Option<Value>,
+        created_at: u64,
+    ) -> Result<Event, WireError> {
+        let mut payload = json!({ "profile": profile });
+        if let Some(login) = login {
+            payload["codex_login"] = login;
+        }
         self.owner_request(
             manager,
             Request::new(Op::Enroll, request_id, payload),
@@ -35,7 +52,7 @@ impl Identity {
         request_id: &str,
         created_at: u64,
     ) -> Result<Event, WireError> {
-        let request = Request::new(Op::Profile, request_id, serde_json::json!({}));
+        let request = Request::new(Op::Profile, request_id, json!({}));
         self.owner_request(manager, request, created_at)
     }
 
@@ -105,7 +122,7 @@ mod tests {
     #[test]
     fn the_manager_opens_an_enroll_request_signed_by_the_owner() {
         let (owner, manager) = (Identity::ephemeral(), manager());
-        let profile = serde_json::json!({"github": {"token": "ghp_fixture"}});
+        let profile = json!({"github": {"token": "ghp_fixture"}});
         let event = owner
             .enroll_request(
                 &manager_key(&manager),
@@ -128,20 +145,39 @@ mod tests {
         assert_eq!(opened.auth_tag, None);
         assert_eq!(opened.request.op, Op::Enroll);
         assert_eq!(opened.request.request_id, "enroll-1");
-        assert_eq!(
-            opened.request.payload,
-            serde_json::json!({ "profile": profile })
-        );
+        assert_eq!(opened.request.payload, json!({ "profile": profile }));
+    }
+
+    #[test]
+    fn a_dedicated_login_is_encrypted_to_the_manager() {
+        let (owner, manager_keys) = (Identity::ephemeral(), manager());
+        let login = json!({"tokens": {"refresh_token": "private-upstream-fixture"}});
+        let event = owner
+            .enroll_request_with_codex_login(
+                &manager_key(&manager_keys),
+                "chatgpt-login",
+                json!({}),
+                Some(login.clone()),
+                1_700_000_000,
+            )
+            .unwrap();
+        let serialized = event.as_json();
+        assert!(!serialized.contains("private-upstream-fixture"));
+        assert!(!serialized.contains("codex_login"));
+        let opened = control::open_request(&wire(&event), &manager_keys).unwrap();
+        assert_eq!(opened.request.payload["codex_login"], login);
+        let stranger = Keys::parse(&"09".repeat(32)).unwrap();
+        assert!(control::open_request(&wire(&event), &stranger).is_err());
     }
 
     #[test]
     fn only_the_managers_reply_to_this_request_opens() {
         let (owner, manager) = (Identity::ephemeral(), manager());
         let request = owner
-            .enroll_request(&manager_key(&manager), "enroll-1", serde_json::json!({}), 0)
+            .enroll_request(&manager_key(&manager), "enroll-1", json!({}), 0)
             .unwrap();
         let reply = |keys: &Keys, to: &Event| {
-            let done = Reply::done("enroll-1", serde_json::json!({"ok": true}));
+            let done = Reply::done("enroll-1", json!({"ok": true}));
             let requester = nostr_wire::PublicKey::from_hex(&owner.pubkey_hex()).unwrap();
             app(&control::build_reply(keys, &requester, &wire(to).id, &done, 0.into()).unwrap())
         };
@@ -149,7 +185,7 @@ mod tests {
         let opened = owner
             .open_session_reply(&reply(&manager, &request), &manager_pubkey, &request.id)
             .unwrap();
-        assert_eq!(opened.response, Some(serde_json::json!({"ok": true})));
+        assert_eq!(opened.response, Some(json!({"ok": true})));
 
         let stranger = Keys::parse(&"09".repeat(32)).unwrap();
         let forged = reply(&stranger, &request);
@@ -158,7 +194,7 @@ mod tests {
             Err(WireError::WrongSender)
         );
         let other = owner
-            .enroll_request(&manager_pubkey, "enroll-2", serde_json::json!({}), 0)
+            .enroll_request(&manager_pubkey, "enroll-2", json!({}), 0)
             .unwrap();
         assert_eq!(
             owner.open_session_reply(&reply(&manager, &other), &manager_pubkey, &request.id),

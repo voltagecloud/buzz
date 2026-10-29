@@ -3,6 +3,7 @@
 //! and once a profile is, sends only what changes. Its tokens are masked,
 //! cleared once sent, and never saved.
 
+use super::codex_login::PendingLogin;
 use super::enroll::{Field, OnFile, Outcome, Values};
 use super::settings::SettingsTab;
 use super::signing::Registration;
@@ -14,10 +15,16 @@ use buzz_ui::{
     Button, ButtonSize, Checkbox, Colors, Surface, TextArea, TextField, TypeStyled, tokens::space,
 };
 use gpui_kit::component::input::{InputState, TextareaState};
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::sync::Arc;
 
 pub struct EnrollForm {
+    pub codex_login: Option<PendingLogin>,
+    pub logging_in: bool,
+    pub login_generation: u64,
+    pub login_abort: Option<tokio::task::AbortHandle>,
+    pub login_status: Option<String>,
     /// Every field but the via profile.
     inputs: Vec<(Field, Entity<InputState>)>,
     via: Entity<TextareaState>,
@@ -74,6 +81,11 @@ impl EnrollForm {
             TextareaState::new(window, cx).placeholder(placeholder(Field::ViaProfile, false))
         });
         Self {
+            codex_login: None,
+            logging_in: false,
+            login_generation: 0,
+            login_abort: None,
+            login_status: None,
             inputs,
             via,
             sending: false,
@@ -103,8 +115,10 @@ impl EnrollForm {
         self.via.update(cx, |state, cx| {
             state.set_placeholder(placeholder(Field::ViaProfile, held), window, cx)
         });
-        self.removed
-            .retain(|key| summary.models.iter().any(|stored| stored == key));
+        self.removed.retain(|key| {
+            summary.models.iter().any(|stored| stored == key)
+                || (*key == "codex_login" && summary.codex_login)
+        });
         if !summary.git.signing_key {
             self.replace_key = false;
         }
@@ -229,6 +243,36 @@ impl EnrollForm {
                 c,
             ))
             .child(row(&[Field::OpToken]))
+            .child(
+                div().flex().gap(space::S2)
+                    .child(Button::new("remote-workspace-chatgpt-login", "Sign in with ChatGPT")
+                        .size(ButtonSize::Sm).outline().disabled(disabled || self.logging_in)
+                        .on_click(cx.listener(|this, _, window, cx| this.sign_in_chatgpt(window, cx))))
+                    .when(self.codex_login.is_some(), |row| row.child(
+                        Button::new("remote-workspace-discard-chatgpt-login", "Discard sign-in")
+                            .size(ButtonSize::Sm).outline().disabled(disabled)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.enroll.codex_login = None;
+                                this.enroll.login_status = None;
+                                cx.notify();
+                            }))
+                    ))
+                    .when(self.logging_in, |row| row.child(
+                        Button::new("remote-workspace-cancel-chatgpt-login", "Cancel sign-in")
+                            .size(ButtonSize::Sm).outline()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.enroll.login_generation = this.enroll.login_generation.wrapping_add(1);
+                                if let Some(abort) = this.enroll.login_abort.take() { abort.abort(); }
+                                this.enroll.logging_in = false;
+                                this.enroll.login_status = Some("ChatGPT sign-in cancelled.".into());
+                                cx.notify();
+                            }))
+                    ))
+            )
+            .children(self.login_status.as_ref().map(|status| div().text_body_sm().child(status.clone())))
+            .child(div().text_body_sm().text_color(c.text_subtle).child(
+                "Sign in once for all remote Codex agents. Enrolling this login replaces an OpenAI API key or Codex access token."
+            ))
             // Subscriptions first: both can run in parallel in every Sandbox.
             .child(row(&[Field::CodexAccessToken, Field::ClaudeOauthToken]))
             .child(row(&[
@@ -309,6 +353,29 @@ impl EnrollForm {
                 .flex_col()
                 .gap(space::S2)
                 .child(div().flex().flex_wrap().gap(space::S2).children(removals))
+                .when(summary.codex_login, |view| {
+                    view.child(
+                        Button::new(
+                            "remote-workspace-remove-chatgpt-login",
+                            if self.removed.contains(&"codex_login") {
+                                "Keep ChatGPT login"
+                            } else {
+                                "Disconnect ChatGPT login"
+                            },
+                        )
+                        .size(ButtonSize::Sm)
+                        .outline()
+                        .disabled(disabled)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.enroll.toggle_removed("codex_login");
+                            if this.enroll.removed.contains(&"codex_login") {
+                                this.enroll.codex_login = None;
+                                this.enroll.login_status = None;
+                            }
+                            cx.notify();
+                        })),
+                    )
+                })
                 .children(removing)
                 .children(replace),
         )

@@ -184,3 +184,24 @@ The test prints only counts and elapsed time. It does not persist credentials ou
 Each merge to `main` that changes the image inputs publishes this image to `voltage-buzz-agent-staging`, tagged with the full commit SHA.
 See [../README.md](../README.md) for the workflow, the digest to pin, and where to pin it.
 The voltage-terraform admission policy admits only digest-pinned images from `voltage-buzz-agent-staging` in developer namespaces.
+
+## Shared ChatGPT login
+
+A profile may select `codex_login` instead of `openai_api_key` or `codex_access_token`.
+Its fields are the fixed internal broker URL, its public CA certificate, and a broker credential.
+The real upstream refresh token stays with the manager.
+Both interactive and worker bootstrap call the broker before starting their harness.
+Revoked or unavailable credentials stop startup with a fixed refusal that contains no token values.
+
+Bootstrap writes a private `.codex/auth.json` with short-lived tokens and a versioned broker credential,
+plus `config.toml` selecting file storage. It sets `CODEX_REFRESH_TOKEN_URL_OVERRIDE` and
+`CODEX_CA_CERTIFICATE` (system trust roots plus the broker CA). These files are excluded from checkpoints.
+Codex 0.159.3 refreshes through that override and persists the returned broker credential.
+Do not upgrade Codex without checking this contract. See the
+[broker rollout and recovery guide](../buzz-sandbox-reaper/codex-login.md).
+
+Run the local TLS bootstrap test with synthetic credentials:
+
+```sh
+python3 voltage/images/buzz-agent/test-codex-login.py buzz-agent:local
+```

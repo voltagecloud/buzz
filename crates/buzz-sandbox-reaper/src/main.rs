@@ -9,6 +9,7 @@
 //! `serve` is the session manager (§Relay transport): it runs developers'
 //! provider requests, received over the Buzz relay, in their namespaces.
 
+mod codex_login;
 mod config;
 mod enroll;
 mod evidence;
@@ -56,7 +57,7 @@ enum Command {
     /// Reconcile Agent Sandbox session lifecycles.
     Reconcile(ReconcileArgs),
     /// Serve Sandbox session requests received over the Buzz relay.
-    Serve(serve::ServeArgs),
+    Serve(Box<serve::ServeArgs>),
 }
 
 #[derive(Args)]
@@ -110,7 +111,7 @@ async fn main() -> Result<()> {
         .init();
     match Cli::parse().command {
         Command::Reconcile(args) => reconcile(args).await,
-        Command::Serve(args) => serve::serve(args).await,
+        Command::Serve(args) => serve::serve(*args).await,
     }
 }
 

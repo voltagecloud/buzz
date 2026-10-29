@@ -389,7 +389,10 @@ async fn enroll_runs_for_the_signing_owners_developer() {
     let Admission::Start { job, .. } = manager.admit(&sent.event(), now()) else {
         panic!("not started");
     };
-    let Work::Enroll { developer, profile } = job.work else {
+    let Work::Enroll {
+        developer, profile, ..
+    } = job.work
+    else {
         panic!("not an enrollment");
     };
     assert_eq!(developer.id, "another-dev");

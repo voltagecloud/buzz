@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """Load the developer profile the Sandbox manager enrolled into that developer's Sandboxes."""
 import argparse
+import base64
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
 import re
 import stat
+import ssl
 import subprocess
 import sys
 import tomllib
+from urllib import request as http
+from urllib.parse import urlsplit
 
 MAX_BYTES = 65536
 DIRECTORY = Path('/home/agent/.config/buzz-agent')
@@ -17,7 +22,8 @@ MODEL_FIELDS = {'openai_api_key', 'codex_access_token', 'anthropic_api_key', 'cl
                 'openrouter_api_key'}
 # Inherited values would override or mix with the profile's selected accounts.
 INHERITED_MODEL_VARIABLES = ('OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_ACCESS_TOKEN', 'ANTHROPIC_API_KEY',
-                             'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'OPENROUTER_API_KEY')
+                             'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'OPENROUTER_API_KEY',
+                             'CODEX_REFRESH_TOKEN_URL_OVERRIDE', 'CODEX_CA_CERTIFICATE')
 # The shared Depot cache credential: the via profile's `depot` service, read from the vault.
 DEPOT_SERVICE = 'depot'
 # The developer's agent-only commit signing key, registered on their GitHub account at enrollment.
@@ -51,7 +57,8 @@ def token(value):
 
 
 def validate(profile):
-    fields(profile, FIELDS)
+    require(isinstance(profile, dict) and FIELDS <= set(profile)
+            and set(profile) <= FIELDS | {'codex_login'}, 'Profile fields are incomplete or unsupported')
     require(type(profile['version']) is int and profile['version'] == 1, 'Unsupported profile version')
     require(isinstance(profile['developer'], str)
             and re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?', profile['developer']), 'Invalid developer ID')
@@ -74,6 +81,10 @@ def validate(profile):
     require(config.get('services') and config.get('providers'), 'via profile requires providers and services')
     require(isinstance(profile['models'], dict)
             and set(profile['models']) <= MODEL_FIELDS, 'Unsupported model credential type')
+    if 'codex_login' in profile:
+        validate_codex_login(profile['codex_login'], profile['developer'])
+        require(not {'openai_api_key', 'codex_access_token'} & set(profile['models']),
+                'Choose a ChatGPT login, an OpenAI API key, or a Codex access token')
     # Codex reads the access token before its saved API-key login, so allow only one.
     require(not {'openai_api_key', 'codex_access_token'} <= set(profile['models']),
             'Choose either an OpenAI API key or a Codex access token')
@@ -85,6 +96,70 @@ def validate(profile):
     require('codex_access_token' not in profile['models']
             or profile['models']['codex_access_token'].startswith('at-'), 'Use a Codex access token (at-...)')
     require(len(json.dumps(profile).encode()) <= MAX_BYTES, 'Profile exceeds Secrets Manager size limit')
+
+
+def validate_codex_login(login, developer):
+    fields(login, {'url', 'ca_certificate', 'refresh_token'})
+    require(isinstance(login['url'], str), 'Invalid ChatGPT broker URL')
+    url = urlsplit(login['url'])
+    require(url.scheme == 'https'
+            and url.hostname == 'codex-refresh.buzz-sandbox-manager.svc.cluster.local'
+            and url.port == 8443 and url.path == '/oauth/token'
+            and url.username is None and url.password is None
+            and not url.query and not url.fragment, 'Invalid ChatGPT broker URL')
+    certificate = login['ca_certificate']
+    require(isinstance(certificate, str) and len(certificate) <= 8192
+            and certificate.startswith('-----BEGIN CERTIFICATE-----\n')
+            and certificate.rstrip().endswith('-----END CERTIFICATE-----'), 'Invalid ChatGPT broker certificate')
+    token(login['refresh_token'])
+    require(re.fullmatch(re.escape(developer) + r'\.[a-f0-9]{32}\.seed', login['refresh_token']),
+            'Invalid ChatGPT broker credential')
+
+
+class NoRedirect(http.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def configure_codex_login(login, env):
+    """Validate the broker grant before every new Sandbox or worker starts."""
+    step('loading the shared ChatGPT login')
+    try:
+        context = ssl.create_default_context(cadata=login['ca_certificate'])
+        # Ignore ambient HTTP proxies for this private, authenticated endpoint.
+        opener = http.build_opener(http.ProxyHandler({}), http.HTTPSHandler(context=context), NoRedirect())
+        body = json.dumps({'client_id': 'app_EMoamEEZ73f0CkXaXp7hrann',
+                           'grant_type': 'refresh_token',
+                           'refresh_token': login['refresh_token']}).encode()
+        req = http.Request(login['url'], data=body, headers={'Content-Type': 'application/json'})
+        with opener.open(req, timeout=60) as response:
+            raw = response.read(MAX_BYTES + 1)
+        require(len(raw) <= MAX_BYTES, 'Invalid ChatGPT broker response')
+        refreshed = json.loads(raw)
+        for key in ('access_token', 'id_token', 'refresh_token', 'account_id'):
+            token(refreshed[key])
+        require(refreshed['refresh_token'].rsplit('.', 1)[0]
+                == login['refresh_token'].rsplit('.', 1)[0], 'Invalid ChatGPT broker response')
+        claims = json.loads(base64.urlsafe_b64decode(refreshed['id_token'].split('.')[1] + '==='))
+        require(claims['https://api.openai.com/auth']['chatgpt_account_id'] == refreshed['account_id'],
+                'Invalid ChatGPT broker response')
+    except (KeyError, ValueError, TypeError, OSError, IndexError, ssl.SSLError):
+        raise Refused('Shared ChatGPT login unavailable; enroll again if it was disconnected or interrupted') from None
+    directory = Path('/home/agent/.codex')
+    write_file(directory / 'config.toml', 'cli_auth_credentials_store = "file"\n')
+    write_file(directory / 'auth.json', json.dumps({
+        'auth_mode': 'chatgpt', 'OPENAI_API_KEY': None,
+        'tokens': {key: refreshed[key] for key in ('id_token', 'access_token', 'refresh_token', 'account_id')},
+        'last_refresh': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
+    }))
+    # Keep public roots as well as the private broker CA: Codex uses this
+    # bundle for its upstream HTTPS connections too.
+    system_ca = ssl.get_default_verify_paths().cafile
+    roots = Path(system_ca).read_text() if system_ca else ''
+    certificate_file = DIRECTORY / 'codex-ca.pem'
+    write_file(certificate_file, roots + '\n' + login['ca_certificate'])
+    env.update(CODEX_HOME=str(directory), CODEX_CONFIG='{"cli_auth_credentials_store":"file"}',
+               CODEX_REFRESH_TOKEN_URL_OVERRIDE=login['url'], CODEX_CA_CERTIFICATE=str(certificate_file))
 
 
 def secret_region(arn, developer):
@@ -191,6 +266,8 @@ def bootstrap():
     if 'codex_access_token' in profile['models']:
         # A workspace access token: no refresh token, so concurrent Sandboxes share it safely.
         env['CODEX_ACCESS_TOKEN'] = profile['models']['codex_access_token']
+    if 'codex_login' in profile:
+        configure_codex_login(profile['codex_login'], env)
     if 'anthropic_api_key' in profile['models']:
         env['ANTHROPIC_API_KEY'] = profile['models']['anthropic_api_key']
     if 'openrouter_api_key' in profile['models']:

@@ -3,18 +3,22 @@
 //! enrolls a developer profile with the Sandbox manager. Every agent asks the
 //! manager over its community's relay, with the build's manager key.
 
+use super::codex_login::{LoginTask, PendingLogin, run as run_codex_login};
 use super::config::{Config, EFFORTS, MANAGER_PUBKEY, RUNTIMES};
-use super::enroll::{OnFile, Outcome};
+use super::enroll::{ModelChanges, OnFile, Outcome};
 use super::enroll_form::{self, EnrollForm};
 use crate::agent_plugins::tabs::{
     Picking, choice, field, instructions_field, instructions_state, options, saved_config,
 };
 use crate::agents2::{AgentView, Agents2};
+use crate::runtime::Runtime;
 use buzz_ui::{ActiveTheme, Button, Surface, TextArea, TextField, TypeStyled, tokens::space};
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use serde_json::Value;
+use tokio::select;
+use tokio::sync::mpsc::channel;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Picker {
@@ -224,7 +228,7 @@ impl SettingsTab {
             }
         };
         self.enroll.show_on_file(OnFile::Loading, window, cx);
-        let asked = crate::runtime::Runtime::handle(cx).spawn(super::enroll::on_file(
+        let asked = Runtime::handle(cx).spawn(super::enroll::on_file(
             session,
             owner,
             MANAGER_PUBKEY.to_owned(),
@@ -249,6 +253,9 @@ impl SettingsTab {
     /// community, as the signed-in owner. Its tokens are cleared at once,
     /// sent or not. With a profile on file, only what changes is sent.
     fn enroll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.enroll.sending || self.enroll.logging_in {
+            return;
+        }
         let relay = self.view.agent.relay.clone();
         let owner = enroll_form::owner(cx);
         let values = self.enroll.submit(window, cx);
@@ -266,17 +273,31 @@ impl SettingsTab {
                 return;
             }
         };
+        let codex_login = match self.enroll.codex_login.take() {
+            Some(login) => match login.into_cache(&owner.pubkey_hex(), &relay) {
+                Ok(cache) => Some(cache),
+                Err(error) => {
+                    self.enroll.login_status = Some(error);
+                    cx.notify();
+                    return;
+                }
+            },
+            None => None,
+        };
         self.enroll.sending = true;
         self.enroll.status = None;
         self.enroll.registration = None;
-        let sent = crate::runtime::Runtime::handle(cx).spawn(super::enroll::run(
+        let sent = Runtime::handle(cx).spawn(super::enroll::run(
             session,
             owner,
             MANAGER_PUBKEY.to_owned(),
             values,
             self.enroll.on_file.summary().cloned(),
             self.enroll.replace_key,
-            self.enroll.removed.clone(),
+            ModelChanges {
+                removed: self.enroll.removed.clone(),
+                codex_login,
+            },
         ));
         cx.spawn_in(window, async move |this, cx| {
             let outcome = sent
@@ -305,6 +326,81 @@ impl SettingsTab {
             });
         })
         .detach();
+        cx.notify();
+    }
+}
+
+impl SettingsTab {
+    /// Device login results are fenced to this view, generation and owner.
+    pub(super) fn sign_in_chatgpt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.enroll.sending || self.enroll.logging_in {
+            return;
+        }
+        let Some(owner) = enroll_form::owner(cx) else {
+            self.enroll.login_status = Some("Sign in to Buzz first.".into());
+            cx.notify();
+            return;
+        };
+        let owner = owner.pubkey_hex();
+        let relay = self.view.agent.relay.clone();
+        self.enroll.login_generation = self.enroll.login_generation.wrapping_add(1);
+        let generation = self.enroll.login_generation;
+        self.enroll.logging_in = true;
+        self.enroll.login_status = Some("Requesting a ChatGPT sign-in code…".into());
+        self.enroll.codex_login = None;
+        let (progress, mut updates) = channel(1);
+        let task = Runtime::handle(cx).spawn(run_codex_login(progress));
+        self.enroll.login_abort = Some(task.abort_handle());
+        cx.spawn_in(window, async move |this, cx| {
+            let mut task = LoginTask(task);
+            let mut updates_open = true;
+            loop {
+                select! {
+                    result = &mut task.0 => {
+                        let _ = this.update_in(cx, |this, _, cx| {
+                            if this.enroll.login_generation != generation { return; }
+                            this.enroll.logging_in = false;
+                            this.enroll.login_abort = None;
+                            let same_owner = enroll_form::owner(cx).is_some_and(|identity| identity.pubkey_hex() == owner);
+                            if !same_owner || this.view.agent.relay != relay {
+                                this.enroll.login_status = Some("Buzz identity or community changed; start sign-in again.".into());
+                            } else {
+                                match result {
+                                    Ok(Ok(cache)) => {
+                                        this.enroll.codex_login = Some(PendingLogin::new(cache, owner.clone(), relay.clone()));
+                                        this.enroll.removed.retain(|key| *key != "codex_login");
+                                        this.enroll.login_status = Some("Signed in. Select Enroll profile to use this login for remote agents.".into());
+                                    }
+                                    Ok(Err(error)) => this.enroll.login_status = Some(error),
+                                    Err(_) => this.enroll.login_status = Some("ChatGPT sign-in cancelled.".into()),
+                                }
+                            }
+                            cx.notify();
+                        });
+                        break;
+                    }
+                    progress = updates.recv(), if updates_open => {
+                        let Some(progress) = progress else { updates_open = false; continue; };
+                        let active = this.update_in(cx, |this, _, cx| {
+                            let active = this.enroll.login_generation == generation
+                                && this.view.agent.relay == relay
+                                && enroll_form::owner(cx).is_some_and(|identity| identity.pubkey_hex() == owner);
+                            if active {
+                                this.enroll.login_status = Some(progress);
+                                cx.notify();
+                            } else if this.enroll.login_generation == generation {
+                                this.enroll.logging_in = false;
+                                this.enroll.login_abort = None;
+                                this.enroll.login_status = Some("Buzz identity or community changed; start sign-in again.".into());
+                                cx.notify();
+                            }
+                            active
+                        }).unwrap_or(false);
+                        if !active { break; }
+                    }
+                }
+            }
+        }).detach();
         cx.notify();
     }
 }
@@ -443,7 +539,7 @@ impl Render for SettingsTab {
                                     if sending { "Enrolling…" } else { "Enroll profile" },
                                 )
                                 .loading(sending)
-                                .disabled(sending)
+                                .disabled(sending || self.enroll.logging_in)
                                 .on_click(
                                     cx.listener(|this, _, window, cx| this.enroll(window, cx)),
                                 ),

@@ -108,10 +108,11 @@ sequenceDiagram
 | GitHub token | Enroll form | Profile (Secrets Manager) | The Sandbox: clone, push, PRs |
 | Agent signing key | Created by the app | Profile; public half on GitHub | The Sandbox: sign commits |
 | 1Password service account token | Enroll form | Profile | The Sandbox: read the Buzz Agents Dev vault |
-| Codex, Claude, OpenAI, Anthropic, OpenRouter credentials | Enroll form | Profile | The harness in the Sandbox |
+| Claude, OpenAI, OpenRouter credentials and Codex access tokens | Enroll form | Profile | The harness in the Sandbox |
+| ChatGPT refresh token | Dedicated sign-in button | Manager-only Secrets Manager secret | Manager refresh broker |
 | Depot, Grafana, Linear, Argo CD tokens | Nobody: admins keep them in the vault | 1Password Buzz Agents Dev | The Sandbox, through `via` |
 
-The app never saves your tokens. The profile is encrypted in transit and at rest. Checkpoints never include credentials.
+The app removes the dedicated ChatGPT login cache after enrollment or cancellation. Other enrollment credentials are held in memory only. The profile is encrypted in transit and at rest. Checkpoints never include credentials.
 
 ## Onboard a developer
 
@@ -219,6 +220,31 @@ To check the token, run this command. The output must show **Buzz Agents Dev** a
 OP_SERVICE_ACCOUNT_TOKEN='ops_…' op vault list
 ```
 
+#### Shared ChatGPT login for remote Codex agents
+
+Requires the DEV-2948 app, agent image, and manager rollout described in
+[the deployment guide](images/buzz-sandbox-reaper/codex-login.md).
+Install the Codex CLI locally and enable device-code sign-in in your ChatGPT workspace.
+
+1. In the Remote workspace enrollment form, select **Sign in with ChatGPT**.
+2. Open the displayed OpenAI device page and enter the one-time code. Choose the Voltage workspace.
+3. Return to Buzz and select **Enroll profile**. A completed browser sign-in is staged until you enroll.
+
+Buzz uses a dedicated temporary Codex cache. Your normal local Codex login remains separate.
+The encrypted owner-signed enrollment sends the login to the manager.
+The manager alone stores and rotates the upstream refresh token. Each Sandbox and worker receives
+short-lived access tokens and a revocable broker credential through private HTTPS.
+Starting a session checks that credential with the manager before launching the harness.
+
+To replace the login, sign in again and enroll. To revoke it, select **Disconnect ChatGPT login**
+and enroll. New sessions and future refreshes are then refused, including sessions with a stale profile.
+Already-issued access tokens remain usable until OpenAI expires or revokes them; stop existing sessions
+when immediate termination is required. An OpenAI API key or Codex access token also replaces this login.
+
+If a manager restart interrupts a refresh whose outcome is uncertain, sign in and enroll again.
+The manager refuses to retry a potentially consumed upstream refresh token.
+This broker uses refresh behavior specific to the pinned Codex version; verify it before upgrading.
+
 #### Codex access token (ChatGPT Business or Enterprise)
 
 1. On chatgpt.com, switch to the **Voltage** workspace.
@@ -227,7 +253,7 @@ OP_SERVICE_ACCOUNT_TOKEN='ops_…' op vault list
 4. Copy the token (`at-…`). It shows only once.
 
 The token does not refresh, so all of your Sandboxes can use it at the same time. Before it expires, create a new one and enroll again.
-A personal ChatGPT Plus or Pro account cannot create these tokens. Use an OpenAI API key instead.
+A personal ChatGPT Plus or Pro account cannot create these workspace access tokens. Use the shared-login flow above or an OpenAI API key instead.
 
 #### Claude subscription token (Claude Pro, Max, Team, or Enterprise)
 

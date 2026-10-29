@@ -142,6 +142,8 @@ pub struct Summary {
     /// The stored models entries, by key.
     #[serde(default)]
     pub models: Vec<String>,
+    #[serde(default)]
+    pub codex_login: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize)]
@@ -215,6 +217,9 @@ impl Summary {
                 .iter()
                 .map(|field| field.label().to_owned()),
         );
+        if self.codex_login {
+            parts.push("ChatGPT login".into());
+        }
         let updated = self
             .updated_at
             .as_deref()
@@ -723,6 +728,14 @@ pub async fn done<T>(
     Err("The community connection closed before the Sandbox manager answered.".into())
 }
 
+/// Model credentials to remove or replace in one enrollment.
+pub struct ModelChanges {
+    /// Stored model fields to remove, including `codex_login` to disconnect it.
+    pub removed: Vec<&'static str>,
+    /// Dedicated native ChatGPT cache, encrypted only to the manager.
+    pub codex_login: Option<Zeroizing<String>>,
+}
+
 /// Enrolls the form's `values` as `identity`.
 ///
 /// With nothing on file, it reads the GitHub token's account, creates the
@@ -737,11 +750,31 @@ pub async fn run(
     session: Arc<Session>,
     identity: Arc<Identity>,
     manager: String,
-    values: Values,
+    mut values: Values,
     on_file: Option<Summary>,
     replace_key: bool,
-    removed: Vec<&'static str>,
+    models: ModelChanges,
 ) -> Result<(Outcome, Option<signing::Registration>), String> {
+    let ModelChanges {
+        removed,
+        codex_login,
+    } = models;
+    if codex_login.is_some() {
+        values.set(Field::OpenaiApiKey, String::new());
+        values.set(Field::CodexAccessToken, String::new());
+    }
+    let chatgpt_login = match codex_login {
+        Some(cache) => Some(
+            serde_json::from_str::<Value>(&cache)
+                .map_err(|_| "The dedicated ChatGPT login is invalid.".to_string())?,
+        ),
+        None if removed.contains(&"codex_login") => Some(Value::Null),
+        None => None,
+    };
+    let model_removals: Vec<_> = removed
+        .into_iter()
+        .filter(|key| *key != "codex_login")
+        .collect();
     let token = values.get(Field::GithubToken).trim().to_owned();
     let github = if !token.is_empty() {
         Some(signing::identity(&token).await?)
@@ -775,11 +808,14 @@ pub async fn run(
             Changes {
                 github: github.as_ref(),
                 signing_key: key.as_ref().map(|key| key.private.as_str()),
-                removed: &removed,
+                removed: &model_removals,
             },
         )?,
     };
-    let outcome = enroll(session, identity, manager, profile).await?;
+    let outcome = match chatgpt_login {
+        Some(login) => enroll_with_login(session, identity, manager, profile, Some(login)).await?,
+        None => enroll(session, identity, manager, profile).await?,
+    };
     let (Outcome::Enrolled { .. }, Some(key)) = (&outcome, key) else {
         return Ok((outcome, None));
     };
@@ -800,10 +836,20 @@ pub async fn enroll(
     manager: String,
     profile: Value,
 ) -> Result<Outcome, String> {
+    enroll_with_login(session, identity, manager, profile, None).await
+}
+
+async fn enroll_with_login(
+    session: Arc<Session>,
+    identity: Arc<Identity>,
+    manager: String,
+    profile: Value,
+    login: Option<Value>,
+) -> Result<Outcome, String> {
     let manager = PublicKey::from_hex(&manager).map_err(|_| "The manager key is not valid.")?;
     let request_id = uuid::Uuid::new_v4().to_string();
     let request = identity
-        .enroll_request(&manager, &request_id, profile, now())
+        .enroll_request_with_codex_login(&manager, &request_id, profile, login, now())
         .map_err(|error| format!("Could not sign the enrollment ({}).", error.label()))?;
     if json!(["EVENT", request]).to_string().len() > MAX_PUBLICATION_FRAME {
         return Err("The profile is too large to send. Shorten the via profile.".into());

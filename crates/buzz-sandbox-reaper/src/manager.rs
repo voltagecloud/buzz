@@ -7,6 +7,7 @@
 //! Nothing here logs: the caller logs an [`Admission`]'s event id, op and
 //! code, never content.
 
+use crate::codex_login::Change;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 
@@ -229,6 +230,11 @@ impl ManagerConfig {
     pub fn len(&self) -> usize {
         self.developers.len()
     }
+
+    /// Bind the broker to the same configured developers as the relay.
+    pub fn developers(&self) -> impl Iterator<Item = Developer> + '_ {
+        self.developers.values().cloned()
+    }
 }
 
 /// Who a reply goes to: the request's signer, `e`-tagging its event.
@@ -266,6 +272,7 @@ pub enum Work {
     Enroll {
         developer: Developer,
         profile: serde_json::Value,
+        login: Option<Change>,
     },
     /// The `profile` operation: describe the developer's stored profile.
     Profile { developer: Developer },
@@ -311,9 +318,19 @@ impl Work {
                     Err(error) => error,
                 }
             }
-            Work::Enroll { developer, profile } => {
-                manager.enrollment.run(&developer, profile).await
-            }
+            Work::Enroll {
+                developer,
+                profile,
+                login,
+            } => match login {
+                Some(login) => {
+                    manager
+                        .enrollment
+                        .run_with_login(&developer, profile, Some(login))
+                        .await
+                }
+                None => manager.enrollment.run(&developer, profile).await,
+            },
             Work::Profile { developer } => manager.enrollment.describe(&developer).await,
         }
     }
@@ -470,10 +487,15 @@ impl Manager {
         // 3. The payload acts for the signer: its agent key, or for `enroll`
         // a valid profile of the signing owner's developer.
         let work = if op == Op::Enroll {
+            let login = match Change::parse(opened.request.payload.get("codex_login")) {
+                Ok(login) => login,
+                Err(error) => return refused(ErrorCode::InvalidProfile, &error.to_string()),
+            };
             match enroll::admit_profile(&opened.request.payload, &owner, developer) {
                 Ok(profile) => Work::Enroll {
                     developer: developer.clone(),
                     profile,
+                    login,
                 },
                 Err((code, message)) => return refused(code, message),
             }
