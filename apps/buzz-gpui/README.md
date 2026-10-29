@@ -17,9 +17,12 @@ sudo apt install ./buzz-gpui_0.1.0-1_amd64.deb
 Build the package with `scripts/package-deb.sh`. It builds inside an
 `ubuntu:26.04` container and writes `dist/buzz-gpui_<version>_amd64.deb`.
 
-On first start the app reads your identity from the same keyring entry buzz-app
-uses (`dev.local.buzz.foundation.identity`). If you have never used buzz-app on
-this machine, import your `nsec` or create a new identity. Then add your
+On first start the app reads your identity from the keyring. It uses the
+`dev.local.buzz.foundation.identity` entry. If that entry is empty, it copies
+the identity once from buzz-app's combined entry (`buzz-desktop`), and leaves
+buzz-app's entry as it was. macOS can ask you to allow access to that entry.
+If you have never used buzz-app on this machine, import your `nsec` or create
+a new identity. Then add your
 community by its relay origin, for example `wss://relay.example.com`.
 
 Settings → Appearance → System tray puts a Buzz icon in the panel and can

@@ -145,15 +145,25 @@ The developer's Buzz identity must be a member of the `buzz.voltage.cloud` commu
 
 ### 1. Install the Buzz app (Voltage build)
 
-Remote workspace agents need the `buzz-gpui-voltage` package. On NixOS, add the flake input and install the package:
+Remote workspace agents need the `buzz-gpui-voltage` package. The flake builds it on Linux and macOS. You need only Nix: the flake supplies every other prerequisite.
+
+To run it once:
+
+```sh
+nix run 'github:voltagecloud/buzz/<commit on main>?dir=apps/buzz-gpui#buzz-gpui-voltage'
+```
+
+To install it on NixOS or nix-darwin, add the flake input and install the package:
 
 ```nix
 # flake.nix inputs
 buzz-gpui.url = "github:voltagecloud/buzz/<commit on main>?dir=apps/buzz-gpui";
 
-# configuration.nix
+# configuration.nix or darwin-configuration.nix
 environment.systemPackages = [ buzz-gpui.packages.${system}.buzz-gpui-voltage ];
 ```
+
+On macOS, the Nix build runs from the terminal, not from an app bundle, so the app does not show system notifications.
 
 Sign in with your Buzz identity and join the `buzz.voltage.cloud` community.
 Install the GitHub CLI (`gh`) and sign in with `gh auth login`, so the app can add your signing key to GitHub.

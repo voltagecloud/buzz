@@ -672,15 +672,54 @@ pub mod identity {
     use super::dev_identity_file;
     use buzz_identity::{Identity, IdentityError};
     use std::io::ErrorKind;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     /// The saved identity; `None` when none is saved.
     pub fn restore() -> Result<Option<Identity>, String> {
         let Some(path) = dev_identity_file() else {
-            return buzz_identity::load().map_err(|error| error.to_string());
+            return match buzz_identity::load().map_err(|error| error.to_string())? {
+                Some(identity) => Ok(Some(identity)),
+                None => Ok(adopt_once(adopted_marker().as_deref())),
+            };
         };
         tracing::warn!(path = %path.display(), "using a development identity file");
         read_file(&path).map_err(|error| error.to_string())
+    }
+
+    /// Present once this app has looked for buzz-app's identity. It sits
+    /// beside the sign-out markers, outside app data, so neither signing
+    /// out nor erasing brings buzz-app's key back.
+    fn adopted_marker() -> Option<PathBuf> {
+        dirs::data_dir().map(|data| {
+            data.join(format!(
+                ".buzz-gpui--{}.identity-adopted",
+                buzz_identity::BUZZ_APP_SERVICE
+            ))
+        })
+    }
+
+    /// buzz-app's identity, copied into this app's entry on the first
+    /// launch without one. A failure is retried next launch; until then
+    /// the user can still import or create a key.
+    fn adopt_once(marker: Option<&Path>) -> Option<Identity> {
+        let marker = marker?;
+        if marker.exists() {
+            return None;
+        }
+        let adopted = match buzz_identity::adopt_buzz_app() {
+            Ok(adopted) => adopted,
+            Err(error) => {
+                tracing::warn!(%error, "could not read buzz-app's identity");
+                return None;
+            }
+        };
+        if let Err(error) = std::fs::write(marker, b"") {
+            tracing::warn!(%error, "could not record that buzz-app's identity was read");
+        }
+        if let Some(identity) = &adopted {
+            tracing::info!(pubkey = %identity.pubkey_hex(), "using buzz-app's identity");
+        }
+        adopted
     }
 
     /// Saves a new random identity, or the imported `nsec`.
