@@ -11,7 +11,8 @@
 //! (swash has no COLRv1). Left to cosmic-text's own fallback, emoji Inter
 //! lacks land in whichever system font covers them first, often DejaVu
 //! Sans in monochrome, so Noto Color Emoji 2.051 is bundled and named as
-//! every text style's fallback ([`fallbacks`]). Two edits make that work,
+//! every text style's fallback ([`fallbacks`]). macOS cannot load it, so
+//! there the fallback is the system's Apple Color Emoji. Two edits make that work,
 //! both done with fontTools:
 //!
 //! - GPUI drops any family without a glyph for `m` when it loads it by
@@ -45,19 +46,31 @@ const FONTS: &[&[u8]] = &[
     include_bytes!("../../../assets/fonts/jetbrains-mono/JetBrainsMono-Regular.ttf"),
     // The terminal's bold, as buzz-app's terminal loads 600 too.
     include_bytes!("../../../assets/fonts/jetbrains-mono/JetBrainsMono-SemiBold.ttf"),
+    // Core Graphics cannot load a bitmap-only (CBDT) font, so macOS draws
+    // emoji with the system's Apple Color Emoji instead.
+    #[cfg(not(target_os = "macos"))]
     EMOJI_FONT,
 ];
 
-/// Registers the bundled fonts with GPUI's text system.
+/// The colour emoji family that text styles fall back to.
+#[cfg(target_os = "macos")]
+const FALLBACK_EMOJI: &str = "Apple Color Emoji";
+#[cfg(not(target_os = "macos"))]
+const FALLBACK_EMOJI: &str = EMOJI;
+
+/// Registers the bundled fonts with GPUI's text system. Each font is added
+/// on its own: GPUI rejects a whole batch when one font in it fails to load,
+/// and then every text style falls through to the system fallbacks.
 pub fn register(cx: &mut App) {
-    let fonts = FONTS.iter().map(|bytes| Cow::Borrowed(*bytes)).collect();
-    if let Err(err) = cx.text_system().add_fonts(fonts) {
-        eprintln!("buzz-ui: failed to register bundled fonts: {err:#}");
+    for bytes in FONTS {
+        if let Err(err) = cx.text_system().add_fonts(vec![Cow::Borrowed(*bytes)]) {
+            eprintln!("buzz-ui: failed to register a bundled font: {err:#}");
+        }
     }
 }
 
 /// The fallback chain for every text style: colour emoji before any
 /// system font.
 pub fn fallbacks() -> FontFallbacks {
-    FontFallbacks::from_fonts(vec![EMOJI.to_string()])
+    FontFallbacks::from_fonts(vec![FALLBACK_EMOJI.to_string()])
 }
