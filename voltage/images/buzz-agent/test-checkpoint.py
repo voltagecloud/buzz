@@ -5,7 +5,7 @@ import sys
 SCRIPT = r'''
 import base64, hashlib, importlib.machinery, importlib.util, io, json, os
 from pathlib import Path
-import subprocess, tarfile, tempfile
+import socket, subprocess, tarfile, tempfile, threading, time
 
 loader = importlib.machinery.SourceFileLoader('checkpoint', '/usr/local/bin/buzz-agent-checkpoint')
 spec = importlib.util.spec_from_loader(loader.name, loader)
@@ -72,13 +72,13 @@ with tempfile.TemporaryDirectory() as temp:
         raise AssertionError('restore overwrote an existing workspace')
     except ValueError:
         pass
-    # Version 1 archives, written before origin bases, still restore.
+    # Without an origin base the manifest stays version 1, which older images
+    # restore; archives written before origin bases still restore too.
+    assert manifest['version'] == 1 and manifest['repositories'][0]['base'] == 'bundle'
     legacy = root/'legacy'
     with tarfile.open(artifact) as archive:
         archive.extractall(legacy, filter='data')
     old_manifest = json.loads((legacy/'snapshot/manifest.json').read_text())
-    assert [r['base'] for r in old_manifest['repositories']] == ['bundle']
-    old_manifest['version'] = 1
     for record in old_manifest['repositories']:
         del record['base'], record['deleted']
     (legacy/'snapshot/manifest.json').write_text(json.dumps(old_manifest))
@@ -211,6 +211,97 @@ with tempfile.TemporaryDirectory() as temp:
     assert (restored/'untracked.txt').read_text() == 'untracked\n'
     assert not (restored/'remove.txt').exists()
     print('PASS: an HTTPS origin repository saves only unpushed commits and changed files, within budget, and restores from origin; an SSH origin keeps the full bundle')
+
+    # Origin-based restore replaces each saved path over the origin checkout,
+    # whatever type the agent changed it from, and recreates refs origin lacks.
+    types_upstream = root/'types-upstream'
+    types_upstream.mkdir()
+    git(types_upstream,'init','-b','main')
+    git(types_upstream,'config','user.name','Checkpoint Fixture')
+    git(types_upstream,'config','user.email','fixture@example.invalid')
+    for name in ('a.txt','b.txt','c.txt'):
+        (types_upstream/name).write_text(name+'\n')
+    (types_upstream/'d').mkdir()
+    (types_upstream/'d/x.txt').write_text('in a directory\n')
+    (types_upstream/'retarget').symlink_to('a.txt')
+    (types_upstream/'to-file').symlink_to('a.txt')
+    git(types_upstream,'add','.')
+    git(types_upstream,'commit','-m','test: create typed paths')
+    types = workspace/'types'
+    subprocess.check_call(['git','clone','-q',str(types_upstream),str(types)],stderr=subprocess.DEVNULL)
+    git(types,'remote','set-url','origin','https://github.com/example/types.git')
+    git(root,'config','--global','url.'+str(types_upstream)+'.insteadOf','https://github.com/example/types.git')
+    git(types,'config','user.name','Checkpoint Fixture')
+    git(types,'config','user.email','fixture@example.invalid')
+    (types/'retarget').unlink()
+    (types/'retarget').symlink_to('b.txt')
+    (types/'to-file').unlink()
+    (types/'to-file').write_text('now a regular file\n')
+    (types/'c.txt').unlink()
+    (types/'c.txt').mkdir()
+    (types/'c.txt/inner.txt').write_text('file became a directory\n')
+    (types/'d/x.txt').unlink()
+    (types/'d').rmdir()
+    (types/'d').write_text('directory became a file\n')
+    git(types,'tag','light')
+    git(types,'-c','tag.gpgsign=false','tag','-a','-m','annotated, unpushed','annotated')
+    git(types,'branch','wip')
+    typed = checkpoint.pack(workspace,root/'types.tar.gz')
+    assert typed['version'] == 2
+    assert next(r for r in typed['repositories'] if r['path'] == 'types')['base'] == 'origin'
+    checkpoint.restore(root/'types.tar.gz',root/'restored-types')
+    restored = root/'restored-types/types'
+    assert os.readlink(restored/'retarget') == 'b.txt'
+    assert not (restored/'to-file').is_symlink()
+    assert (restored/'to-file').read_text() == 'now a regular file\n'
+    assert (restored/'a.txt').read_text() == 'a.txt\n', 'a write went through the old symlink'
+    assert (restored/'c.txt/inner.txt').read_text() == 'file became a directory\n'
+    assert (restored/'d').read_text() == 'directory became a file\n'
+    assert git(restored,'status','--porcelain') == git(types,'status','--porcelain')
+    for ref in ('refs/tags/light','refs/tags/annotated','refs/heads/wip'):
+        assert git(restored,'rev-parse',ref) == git(types,'rev-parse',ref), ref
+    assert git(restored,'cat-file','-t','annotated') == 'tag'
+    assert git(restored,'cat-file','tag','annotated') == git(types,'cat-file','tag','annotated')
+    # A crafted deletion cannot reach through a symlinked parent.
+    forged = root/'forged-types'
+    with tarfile.open(root/'types.tar.gz') as archive:
+        archive.extractall(forged, filter='data')
+    forged_manifest = json.loads((forged/'snapshot/manifest.json').read_text())
+    (root/'outside.txt').write_text('outside\n')
+    git(types_upstream,'rm','-rq','d')
+    (types_upstream/'escape').symlink_to(root)
+    git(types_upstream,'add','escape')
+    git(types_upstream,'commit','-m','test: add a symlink out of the repository')
+    record = next(r for r in forged_manifest['repositories'] if r['path'] == 'types')
+    record['head'] = git(types_upstream,'rev-parse','HEAD')
+    record['branch'] = ''
+    record['files'], record['refs'], record['tags'] = [], [], {}
+    record['deleted'] = ['escape/outside.txt']
+    (forged/'snapshot/manifest.json').write_text(json.dumps(forged_manifest))
+    with tarfile.open(root/'forged-types.tar.gz','w:gz') as archive:
+        archive.add(forged/'snapshot',arcname='snapshot')
+    checkpoint.restore(root/'forged-types.tar.gz',root/'restored-forged-types')
+    assert (root/'outside.txt').read_text() == 'outside\n'
+    print('PASS: origin restore replaces retargeted symlinks, symlinks turned files, and file/directory swaps in place; unpushed tags, annotated tag objects and branches survive; deletions never follow a symlink')
+
+    # Unreachable origins cost one shared deadline, not one per repository.
+    server = socket.socket()
+    server.bind(('127.0.0.1', 0))
+    server.listen()
+    held = []
+    threading.Thread(target=lambda: [held.append(server.accept()) for _ in range(8)], daemon=True).start()
+    hanging = 'https://127.0.0.1:%d/example.git' % server.getsockname()[1]
+    deadline = checkpoint.ORIGIN_SECONDS
+    checkpoint.ORIGIN_SECONDS = 2
+    try:
+        started = time.monotonic()
+        listings = checkpoint.origin_listings([hanging]*4 + ['ssh://git@example.com/x.git'])
+        elapsed = time.monotonic() - started
+    finally:
+        checkpoint.ORIGIN_SECONDS = deadline
+    assert listings == [None]*5, listings
+    assert elapsed < 5, elapsed
+    print('PASS: four hanging origins and an SSH origin resolve to bundle saves within one shared deadline')
 
     (root/'private').write_text('outside workspace')
     (repo/'escape').symlink_to(root/'private')

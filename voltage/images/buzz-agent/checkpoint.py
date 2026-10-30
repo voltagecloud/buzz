@@ -2,22 +2,27 @@
 """Save and explicitly restore private development workspaces."""
 import argparse
 import base64
+import concurrent.futures
 import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import uuid
 from urllib.parse import urlsplit, urlunsplit
 
 MAX_BYTES = 256 * 1024 * 1024
 MAX_FILES = 50000
+# All origins are asked at once; this bounds the whole save's network wait.
+ORIGIN_SECONDS = 20
 EXCLUDED = {'.git', '.aws', '.ssh', '.gnupg', '.config', '.codex', '.claude',
             '.cache', '.local', '.npm', '.cargo', '.rustup', '.venv', 'venv',
             'node_modules', 'target', '__pycache__', 'dist', 'build', '.terraform'}
@@ -84,11 +89,13 @@ def public_origin(repo):
     return urlunsplit((parsed.scheme, host, parsed.path, '', ''))
 
 
-def scan(directory, *, history=False):
-    """Refuse a credential the agent added: commits not on any remote, or files.
+def scan(directory, *, history=False, negatives=b''):
+    """Refuse a credential the agent added: commits not on a remote, or files.
 
     History and files already on a remote are on the forge, where the agent's
-    token can read them, so the scan leaves them out."""
+    token can read them, so the scan leaves them out. `negatives` are the
+    `^<commit>` origin tips of an origin-based save: its bundle holds every
+    commit beyond them, so the scan covers exactly those."""
     # Immutable image configuration prevents workspace allowlists from bypassing
     # the scan. Scanner output can contain secrets even on errors, so suppress it.
     previous = STEP[0]
@@ -99,7 +106,8 @@ def scan(directory, *, history=False):
                '--gitleaks-ignore-path', '/dev/null', '--ignore-gitleaks-allow',
                '--no-banner', '--redact', '--timeout', '60']
     if history:
-        command += ['--log-opts=--all HEAD --not --remotes']
+        command += ['--log-opts=--all HEAD ' + (' '.join(negatives.decode().split())
+                                                if negatives else '--not --remotes')]
     run(*command, timeout=65, env=env)
     step(previous)
 
@@ -130,32 +138,88 @@ def review_changes(repo, review):
             write(path, b'\n'.join(added) + b'\n')
 
 
-def origin_tips(repo, origin):
-    """Origin's branch tips that this clone has, as `^<commit>` rev-list lines.
+def origin_listings(origins):
+    """`git ls-remote --heads --tags` of each origin, or None where unusable.
 
-    A clone of origin restores everything reachable from them, so a checkpoint
-    needs only the commits and working-tree changes beyond them. Asks origin:
-    local remote-tracking refs can be stale, and after a bundle restore they
-    name commits origin never had. Empty when restore cannot clone origin: it
-    is not HTTPS (the scheme the Sandbox's GitHub credential serves), cannot
-    be reached now, or shares no branch tip with this clone."""
-    if urlsplit(origin).scheme != 'https':
-        return b''
-    try:
-        listing = git(repo, 'ls-remote', '--heads', 'origin', timeout=30,
-                      env=dict(os.environ, GIT_TERMINAL_PROMPT='0'))
-    except (ValueError, subprocess.TimeoutExpired):
-        return b''
-    tips = {line.split(b'\t', 1)[0] for line in listing.splitlines() if b'\t' in line}
+    Asks the normalized URL restore clones, with the global Git configuration
+    restore uses, so a save never relies on a credential restore lacks. Only
+    HTTPS origins qualify: the Sandbox's GitHub credential serves HTTPS. All
+    origins are asked at once under one ORIGIN_SECONDS deadline; an origin
+    that cannot answer in time is saved as a bundle instead."""
+    deadline = time.monotonic() + ORIGIN_SECONDS
+    env = dict(os.environ, GIT_TERMINAL_PROMPT='0')
+
+    def ask(origin):
+        remaining = deadline - time.monotonic()
+        if urlsplit(origin).scheme != 'https' or remaining <= 0:
+            return None
+        # Its own process group: git's HTTPS helper would otherwise outlive a
+        # timed-out git and hold the output pipe open.
+        process = subprocess.Popen(['git', '-c', 'core.hooksPath=/dev/null', 'ls-remote', '--heads',
+                                    '--tags', origin], cwd='/', env=env, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                   start_new_session=True)
+        try:
+            listing, _ = process.communicate(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            listing = None
+        finally:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.communicate()
+        return listing if listing is not None and process.returncode == 0 else None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
+        return list(pool.map(ask, origins))
+
+
+def origin_base(repo, listing):
+    """What a clone of origin would give this repository.
+
+    Returns `^<commit>` rev-list lines for origin's branch tips that this clone
+    has, and origin's (ref, object) pairs. A clone restores everything
+    reachable from those tips, so the checkpoint needs only what lies beyond
+    them. Asks origin, not remote-tracking refs: those can be stale, and after
+    a bundle restore they name commits origin never had. No tips means restore
+    cannot build on origin."""
+    if listing is None:
+        return b'', set()
+    refs = set()
+    for line in listing.decode().splitlines():
+        if '\t' in line:
+            name, ref = line.split('\t', 1)
+            refs.add((ref, name))
+    heads = sorted({value for ref, value in refs if ref.startswith('refs/heads/')})
     found = git(repo, 'cat-file', '--batch-check=%(objectname) %(objecttype)',
-                input=b''.join(tip + b'\n' for tip in sorted(tips)))
-    return b''.join(b'^' + line.split(b' ', 1)[0] + b'\n'
+                input=''.join(head + '\n' for head in heads).encode())
+    tips = b''.join(b'^' + line.split(b' ', 1)[0] + b'\n'
                     for line in found.splitlines() if line.endswith(b' commit'))
+    return tips, refs
+
+
+def local_refs(repo, origin_refs):
+    """Branches, and tags origin lacks, for restore to recreate exactly.
+
+    Annotated tag objects travel by content: a bundle omits a ref whose target
+    origin already has, and a tag object is not on origin."""
+    refs, tags = [], {}
+    listing = git(repo, 'for-each-ref', '--format=%(objectname) %(objecttype) %(refname)',
+                  'refs/heads/', 'refs/tags/')
+    for line in listing.decode().splitlines():
+        value, kind, ref = line.split(' ', 2)
+        if ref.startswith('refs/tags/') and (ref, value) in origin_refs:
+            continue
+        refs.append([ref, value])
+        if kind == 'tag':
+            tags[value] = base64.b64encode(git(repo, 'cat-file', 'tag', value)).decode()
+    return refs, tags
 
 
 def pack(workspace, output):
     workspace = workspace.resolve(strict=True)
-    manifest = {'version': 2, 'repositories': []}
+    manifest = {'version': 1, 'repositories': []}
     total = 0
     count = 0
     with tempfile.TemporaryDirectory(prefix='agent-checkpoint-') as temp, \
@@ -163,20 +227,27 @@ def pack(workspace, output):
         stage = Path(temp)
         # What the agent added to each repository, for the secret scan.
         review = Path(review_temp)
-        for index, repo in enumerate(repositories(workspace)):
+        repos = repositories(workspace)
+        if any(repo == workspace for repo in repos):
+            raise ValueError('Use a workspace directory containing repositories')
+        origins = [public_origin(repo) for repo in repos]
+        listings = origin_listings(origins)
+        for index, (repo, origin, listing) in enumerate(zip(repos, origins, listings)):
             relative = repo.relative_to(workspace).as_posix()
-            if relative == '.':
-                raise ValueError('Use a workspace directory containing repositories')
-            origin = public_origin(repo)
-            tips = origin_tips(repo, origin)
+            tips, origin_refs = origin_base(repo, listing)
             base = 'origin' if tips else 'bundle'
             record = {'path': relative, 'origin': origin, 'base': base,
                       'head': git(repo, 'rev-parse', 'HEAD').decode().strip(),
                       'branch': git(repo, 'branch', '--show-current').decode().strip(),
                       'excluded': [], 'files': [], 'deleted': []}
+            if base == 'origin':
+                # Older images refuse version 2, so it marks only what needs it.
+                manifest['version'] = 2
+                record['refs'], record['tags'] = local_refs(repo, origin_refs)
+                total += sum(len(content) for content in record['tags'].values())
             destination = stage / 'repositories' / str(index)
             (destination / 'files').mkdir(parents=True)
-            scan(repo, history=True)
+            scan(repo, history=True, negatives=tips)
             review_changes(repo, review / str(index))
             bundle = destination / 'history.bundle'
             if base == 'bundle':
@@ -294,12 +365,14 @@ def restore_repositories(stage, manifest, destination):
                 clone_origin(record['origin'], repo)
                 if (source / 'history.bundle').exists():
                     fetch_bundle(repo, source / 'history.bundle')
+                restore_refs(repo, record)
             else:
                 raise ValueError('Unsupported checkpoint repository base')
-            git(repo, 'checkout', '--detach', record['head'])
+            # Checking out a large tree can take minutes.
+            git(repo, 'checkout', '--detach', record['head'], timeout=600)
             if record['branch']:
                 git(repo, 'check-ref-format', '--branch', record['branch'])
-                git(repo, 'checkout', '-B', record['branch'])
+                git(repo, 'checkout', '-B', record['branch'], timeout=600)
             git(repo, 'remote', 'set-url', 'origin', record['origin'])
             if base == 'bundle':
                 # Absence from the snapshot means deletion, except for excluded
@@ -309,10 +382,13 @@ def restore_repositories(stage, manifest, destination):
                 deleted = record.get('deleted', [])
             for value in deleted:
                 path = safe_path(value)
-                target = repo / path
-                if not excluded(path) and (target.is_file() or target.is_symlink()):
-                    target.unlink()
-            shutil.copytree(source / 'files', repo, dirs_exist_ok=True, symlinks=True)
+                if not excluded(path):
+                    remove(repo, path)
+            for value in record['files']:
+                path = safe_path(value)
+                if excluded(path):
+                    raise ValueError('Checkpoint file path is reserved')
+                place(repo, source / 'files', path)
             review_changes(repo, review / str(index))
         scan(review)
 
@@ -327,6 +403,61 @@ def clone_origin(origin, repo):
     run('git', '-c', 'core.hooksPath=/dev/null', '-c', 'http.lowSpeedLimit=1000',
         '-c', 'http.lowSpeedTime=60', 'clone', '--no-checkout', '--', origin, str(repo),
         timeout=None, env=dict(os.environ, GIT_TERMINAL_PROMPT='0'))
+
+
+def remove(repo, path):
+    """Delete the file or symlink at path, never through a symlink or file.
+
+    Git tracks nothing beyond a symlink, so a parent that is not a real
+    directory means the path is already absent."""
+    target = repo
+    for part in path.parts[:-1]:
+        target = target / part
+        if target.is_symlink() or not target.is_dir():
+            return
+    target = target / path.parts[-1]
+    if target.is_symlink() or target.is_file():
+        target.unlink()
+
+
+def place(repo, files, path):
+    """Put the saved file or symlink at path, replacing whatever is there.
+
+    The checkout can hold another type at the path or a parent: a symlink the
+    agent retargeted or replaced, a file it turned into a directory, or the
+    reverse. Replacing, not writing through, keeps every write inside repo."""
+    target = repo
+    for part in path.parts[:-1]:
+        target = target / part
+        if target.is_symlink() or (target.exists() and not target.is_dir()):
+            target.unlink()
+        target.mkdir(exist_ok=True)
+    target = target / path.parts[-1]
+    if target.is_symlink() or target.is_file():
+        target.unlink()
+    elif target.is_dir():
+        shutil.rmtree(target)
+    saved = files / path
+    if saved.is_symlink():
+        target.symlink_to(os.readlink(saved))
+    elif saved.is_file():
+        shutil.copy2(saved, target, follow_symlinks=False)
+    else:
+        raise ValueError('Checkpoint file is missing from the archive')
+
+
+def restore_refs(repo, record):
+    """Recreate the saved branches and tags, annotated tag objects first."""
+    for name, content in record.get('tags', {}).items():
+        made = git(repo, 'hash-object', '-t', 'tag', '-w', '--stdin',
+                   input=base64.b64decode(content, validate=True)).decode().strip()
+        if made != name:
+            raise ValueError('Checkpoint tag object does not match its name')
+    for ref, value in record.get('refs', []):
+        if not ref.startswith(('refs/heads/', 'refs/tags/')) or not re.fullmatch('[0-9a-f]{40,64}', value):
+            raise ValueError('Invalid checkpoint ref')
+        git(repo, 'check-ref-format', ref)
+        git(repo, 'update-ref', ref, value)
 
 
 def fetch_bundle(repo, bundle):
