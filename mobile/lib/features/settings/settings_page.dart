@@ -1,4 +1,6 @@
+// Modified by Voltage: expose upstream credit and distribution licenses.
 import 'dart:async';
+import '../../shared/branding/app_brand.dart';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -125,6 +127,23 @@ class SettingsPage extends HookConsumerWidget {
             _ConnectionSection(
               identityRecoveryPageBuilder: identityRecoveryPageBuilder,
             ),
+            if (isVoltageCommons)
+              AppListCard(
+                verticalPadding: Grid.twelve,
+                children: [
+                  AppListRow(
+                    title: 'About $appDisplayName',
+                    subtitle: 'Built on Buzz by Block',
+                    trailing: const _RowChevron(),
+                    onTap: () => showAboutDialog(
+                      context: context,
+                      applicationName: appDisplayName,
+                      applicationVersion: packageInfo.data?.version,
+                      applicationLegalese: upstreamAttribution,
+                    ),
+                  ),
+                ],
+              ),
             if (packageInfo.hasData)
               _VersionFooter(
                 version: packageInfo.data!.version,

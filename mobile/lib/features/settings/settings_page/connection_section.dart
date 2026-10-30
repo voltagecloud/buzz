@@ -1,3 +1,4 @@
+// Modified by Voltage: identify the selected app in foreground errors.
 part of '../settings_page.dart';
 
 class _ConnectionSection extends ConsumerWidget {
@@ -47,7 +48,7 @@ class _ConnectionSection extends ConsumerWidget {
                   ScaffoldMessenger.of(context).showSnackBar(
                     const SnackBar(
                       content: Text(
-                        'Buzz did not return to the foreground. Try again.',
+                        '$appDisplayName did not return to the foreground. Try again.',
                       ),
                     ),
                   );

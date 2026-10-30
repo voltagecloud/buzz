@@ -1,0 +1,10 @@
+// Voltage's independent mobile distribution. Signing is configured separately.
+// Keep the bundle ID stable when changing the visible product name.
+BUNDLE_IDENTIFIER = cloud.voltage.workspace
+APP_DISPLAY_NAME = Voltage Commons
+BUZZ_APP_VARIANT = voltage-commons
+BUZZ_APP_ICON_NAME = CommonsAppIcon
+BUZZ_LAUNCH_STORYBOARD = CommonsLaunchScreen
+BUZZ_URL_SCHEME = voltage-workspace
+// An unsigned build must never inherit Block's signing team.
+BUZZ_DEVELOPMENT_TEAM =

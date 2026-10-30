@@ -134,7 +134,7 @@ class _SasVerificationView extends HookConsumerWidget {
           ),
           const SizedBox(height: Grid.xxs),
           Text(
-            '$biometricLabel to confirm it’s you before sending your Buzz identity to another device.',
+            '$biometricLabel to confirm it’s you before sending your $appDisplayName identity to another device.',
             textAlign: TextAlign.center,
             style: context.textTheme.bodyMedium?.copyWith(
               color: context._onboardingMutedInk,
