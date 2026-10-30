@@ -5,7 +5,7 @@ import sys
 SCRIPT = r'''
 import base64, hashlib, importlib.machinery, importlib.util, io, json, os
 from pathlib import Path
-import subprocess, tarfile, tempfile
+import shutil, socket, subprocess, tarfile, tempfile, threading, time
 
 loader = importlib.machinery.SourceFileLoader('checkpoint', '/usr/local/bin/buzz-agent-checkpoint')
 spec = importlib.util.spec_from_loader(loader.name, loader)
@@ -72,6 +72,22 @@ with tempfile.TemporaryDirectory() as temp:
         raise AssertionError('restore overwrote an existing workspace')
     except ValueError:
         pass
+    # Without an origin base the manifest stays version 1, which older images
+    # restore; archives written before origin bases still restore too.
+    assert manifest['version'] == 1 and manifest['repositories'][0]['base'] == 'bundle'
+    legacy = root/'legacy'
+    with tarfile.open(artifact) as archive:
+        archive.extractall(legacy, filter='data')
+    old_manifest = json.loads((legacy/'snapshot/manifest.json').read_text())
+    for record in old_manifest['repositories']:
+        del record['base'], record['deleted']
+    (legacy/'snapshot/manifest.json').write_text(json.dumps(old_manifest))
+    with tarfile.open(root/'legacy.tar.gz','w:gz') as archive:
+        archive.add(legacy/'snapshot',arcname='snapshot')
+    checkpoint.restore(root/'legacy.tar.gz',root/'restored-legacy')
+    assert git(root/'restored-legacy/example','rev-parse','HEAD') == head
+    assert (root/'restored-legacy/example/new.rs').read_bytes() == (repo/'new.rs').read_bytes()
+    assert not (root/'restored-legacy/example/deleted.txt').exists()
     print('PASS: SSH origin identity/port, local commit, edited/untracked source, deletion, and symlink survive restore; account files and build outputs excluded; excluded tracked files keep committed content')
 
     (repo/'leak.txt').write_text('github_token = "ghp_'+'aB3dE6gH9jK2mN5pQ8sT1vW4yZ7cF0iL3oR6'+'"\n')
@@ -98,11 +114,16 @@ with tempfile.TemporaryDirectory() as temp:
     git(upstream,'config','user.name','Checkpoint Fixture')
     git(upstream,'config','user.email','fixture@example.invalid')
     (upstream/'values.yaml').write_text(token)
+    (upstream/'large.bin').write_bytes(bytes(1024*1024))
+    (upstream/'remove.txt').write_text('pushed, then deleted locally\n')
     git(upstream,'add','.')
     git(upstream,'commit','-m','chore: commit a credential upstream')
     clone = workspace/'clone'
     subprocess.check_call(['git','clone','-q',str(upstream),str(clone)],stderr=subprocess.DEVNULL)
     git(clone,'remote','set-url','origin','https://github.com/example/upstream.git')
+    # Origin-based restore clones origin; offline, serve it from the fixture.
+    os.environ['GIT_CONFIG_GLOBAL'] = str(root/'gitconfig')
+    git(root,'config','--global','url.'+str(upstream)+'.insteadOf','https://github.com/example/upstream.git')
     git(clone,'config','user.name','Checkpoint Fixture')
     git(clone,'config','user.email','fixture@example.invalid')
     checkpoint.pack(workspace,root/'upstream.tar.gz')
@@ -147,6 +168,281 @@ with tempfile.TemporaryDirectory() as temp:
     git(clone,'reset','-q','--hard','origin/main')
     checkpoint.pack(workspace,root/'reset.tar.gz')
     print('PASS: credentials already on the remote are allowed and restore; one added in a file, an unpushed commit or an archive is refused with the scan step')
+
+    # With an HTTPS origin, a checkpoint holds only what origin lacks, so
+    # pushed content larger than the budget does not count against it.
+    git(clone,'checkout','-q','-b','feature')
+    (clone/'local.txt').write_text('unpushed commit\n')
+    git(clone,'add','local.txt')
+    git(clone,'commit','-m','feat: add an unpushed commit')
+    # A remote-tracking ref origin does not have, as a bundle restore leaves:
+    # the save asks origin, so the commit stays in the checkpoint.
+    git(clone,'update-ref','refs/remotes/origin/feature','HEAD')
+    (clone/'remove.txt').unlink()
+    (clone/'untracked.txt').write_text('untracked\n')
+    budget = checkpoint.MAX_BYTES
+    checkpoint.MAX_BYTES = 512*1024
+    try:
+        thin = checkpoint.pack(workspace,root/'thin.tar.gz')
+        # With an SSH origin the same workspace is a bundle snapshot, which
+        # counts the pushed tree and exceeds the budget.
+        git(clone,'remote','set-url','origin','ssh://git@example.com/upstream.git')
+        try:
+            checkpoint.pack(workspace,root/'ssh.tar.gz')
+            raise AssertionError('an SSH origin repository skipped its bundle snapshot')
+        except ValueError as error:
+            assert 'budget' in str(error), error
+        git(clone,'remote','set-url','origin','https://github.com/example/upstream.git')
+    finally:
+        checkpoint.MAX_BYTES = budget
+    record = next(r for r in thin['repositories'] if r['path'] == 'clone')
+    assert record['base'] == 'origin' and record['deleted'] == ['remove.txt'], record
+    # The unpushed commit travels in the bundle, not as a changed file.
+    assert record['files'] == ['untracked.txt'], record['files']
+    with tarfile.open(root/'thin.tar.gz') as archive:
+        assert not any(n.endswith('/large.bin') for n in archive.getnames())
+    checkpoint.restore(root/'thin.tar.gz',root/'restored-thin')
+    restored = root/'restored-thin/clone'
+    assert git(restored,'rev-parse','HEAD') == git(clone,'rev-parse','HEAD')
+    assert git(restored,'branch','--show-current') == 'feature'
+    assert git(restored,'config','--get','remote.origin.url') == 'https://github.com/example/upstream.git'
+    assert (restored/'large.bin').stat().st_size == 1024*1024
+    assert (restored/'local.txt').read_text() == 'unpushed commit\n'
+    assert (restored/'untracked.txt').read_text() == 'untracked\n'
+    assert not (restored/'remove.txt').exists()
+    print('PASS: an HTTPS origin repository saves only unpushed commits and changed files, within budget, and restores from origin; an SSH origin keeps the full bundle')
+
+    # Origin-based restore replaces each saved path over the origin checkout,
+    # whatever type the agent changed it from, and recreates refs origin lacks.
+    types_upstream = root/'types-upstream'
+    types_upstream.mkdir()
+    git(types_upstream,'init','-b','main')
+    git(types_upstream,'config','user.name','Checkpoint Fixture')
+    git(types_upstream,'config','user.email','fixture@example.invalid')
+    for name in ('a.txt','b.txt','c.txt'):
+        (types_upstream/name).write_text(name+'\n')
+    (types_upstream/'d').mkdir()
+    (types_upstream/'d/x.txt').write_text('in a directory\n')
+    for name in ('linked','other'):
+        (types_upstream/name).mkdir()
+        (types_upstream/name/'f.txt').write_text(name+'\n')
+    (types_upstream/'retarget').symlink_to('a.txt')
+    (types_upstream/'to-file').symlink_to('a.txt')
+    git(types_upstream,'add','.')
+    git(types_upstream,'commit','-m','test: create typed paths')
+    types = workspace/'types'
+    subprocess.check_call(['git','clone','-q',str(types_upstream),str(types)],stderr=subprocess.DEVNULL)
+    git(types,'remote','set-url','origin','https://github.com/example/types.git')
+    git(root,'config','--global','url.'+str(types_upstream)+'.insteadOf','https://github.com/example/types.git')
+    git(types,'config','user.name','Checkpoint Fixture')
+    git(types,'config','user.email','fixture@example.invalid')
+    (types/'retarget').unlink()
+    (types/'retarget').symlink_to('b.txt')
+    (types/'to-file').unlink()
+    (types/'to-file').write_text('now a regular file\n')
+    (types/'c.txt').unlink()
+    (types/'c.txt').mkdir()
+    (types/'c.txt/inner.txt').write_text('file became a directory\n')
+    (types/'d/x.txt').unlink()
+    (types/'d').rmdir()
+    (types/'d').write_text('directory became a file\n')
+    (types/'linked/f.txt').unlink()
+    (types/'linked').rmdir()
+    (types/'linked').symlink_to('other')
+    git(types,'tag','light')
+    git(types,'-c','tag.gpgsign=false','tag','-a','-m','annotated, unpushed','annotated')
+    git(types,'branch','wip')
+    typed = checkpoint.pack(workspace,root/'types.tar.gz')
+    assert typed['version'] == 2
+    assert next(r for r in typed['repositories'] if r['path'] == 'types')['base'] == 'origin'
+    checkpoint.restore(root/'types.tar.gz',root/'restored-types')
+    restored = root/'restored-types/types'
+    assert os.readlink(restored/'retarget') == 'b.txt'
+    assert not (restored/'to-file').is_symlink()
+    assert (restored/'to-file').read_text() == 'now a regular file\n'
+    assert (restored/'a.txt').read_text() == 'a.txt\n', 'a write went through the old symlink'
+    assert (restored/'c.txt/inner.txt').read_text() == 'file became a directory\n'
+    assert (restored/'d').read_text() == 'directory became a file\n'
+    assert os.readlink(restored/'linked') == 'other'
+    assert (restored/'other/f.txt').read_text() == 'other\n'
+    types_record = next(r for r in typed['repositories'] if r['path'] == 'types')
+    assert 'linked/f.txt' in types_record['deleted'] and 'linked/f.txt' not in types_record['files']
+    assert git(restored,'status','--porcelain') == git(types,'status','--porcelain')
+    for ref in ('refs/tags/light','refs/tags/annotated','refs/heads/wip'):
+        assert git(restored,'rev-parse',ref) == git(types,'rev-parse',ref), ref
+    assert git(restored,'cat-file','-t','annotated') == 'tag'
+    assert git(restored,'cat-file','tag','annotated') == git(types,'cat-file','tag','annotated')
+    # An annotated tag message the agent adds is secret-scanned: the manifest
+    # carries it base64-encoded, and the manifest scan decodes base64.
+    git(types,'-c','tag.gpgsign=false','tag','-a','-m','github_token = "ghp_'+'aB3dE6gH9jK2mN5pQ8sT1vW4yZ7cF0iL3oR6'+'"','leaky')
+    try:
+        checkpoint.pack(workspace,root/'leaky.tar.gz')
+        raise AssertionError('secret scanner admitted a credential in an annotated tag message')
+    except ValueError:
+        assert checkpoint.STEP[0] == 'scanning for secrets', checkpoint.STEP[0]
+    git(types,'tag','-d','leaky')
+    # A crafted deletion cannot reach through a symlinked parent.
+    forged = root/'forged-types'
+    with tarfile.open(root/'types.tar.gz') as archive:
+        archive.extractall(forged, filter='data')
+    forged_manifest = json.loads((forged/'snapshot/manifest.json').read_text())
+    (root/'outside.txt').write_text('outside\n')
+    git(types_upstream,'rm','-rq','d')
+    (types_upstream/'escape').symlink_to(root)
+    git(types_upstream,'add','escape')
+    git(types_upstream,'commit','-m','test: add a symlink out of the repository')
+    record = next(r for r in forged_manifest['repositories'] if r['path'] == 'types')
+    record['head'] = git(types_upstream,'rev-parse','HEAD')
+    record['branch'] = ''
+    record['files'], record['refs'], record['tags'] = [], [], {}
+    record['deleted'] = ['escape/outside.txt']
+    (forged/'snapshot/manifest.json').write_text(json.dumps(forged_manifest))
+    with tarfile.open(root/'forged-types.tar.gz','w:gz') as archive:
+        archive.add(forged/'snapshot',arcname='snapshot')
+    checkpoint.restore(root/'forged-types.tar.gz',root/'restored-forged-types')
+    assert (root/'outside.txt').read_text() == 'outside\n'
+    # A malformed record is refused as a checkpoint error, not a crash.
+    record['refs'] = [['refs/heads/x', 2]]
+    (forged/'snapshot/manifest.json').write_text(json.dumps(forged_manifest))
+    with tarfile.open(root/'malformed.tar.gz','w:gz') as archive:
+        archive.add(forged/'snapshot',arcname='snapshot')
+    try:
+        checkpoint.restore(root/'malformed.tar.gz',root/'restored-malformed')
+        raise AssertionError('a malformed origin record was restored')
+    except ValueError:
+        pass
+    assert not (root/'restored-malformed').exists()
+    print('PASS: origin restore replaces retargeted symlinks, symlinks turned files, and file/directory swaps in place; unpushed tags, annotated tag objects and branches survive; deletions never follow a symlink')
+
+    # The bundle holds only what the agent owns, never origin's tags or
+    # remote-tracking refs. Restore fetches a prerequisite origin stopped
+    # advertising: here the branch the agent built on is deleted after the save.
+    topic_upstream = root/'topic-upstream'
+    topic_upstream.mkdir()
+    git(topic_upstream,'init','-b','main')
+    git(topic_upstream,'config','user.name','Checkpoint Fixture')
+    git(topic_upstream,'config','user.email','fixture@example.invalid')
+    # GitHub serves any commit in the repository by name.
+    git(topic_upstream,'config','uploadpack.allowAnySHA1InWant','true')
+    (topic_upstream/'base.txt').write_text('base\n')
+    git(topic_upstream,'add','.')
+    git(topic_upstream,'commit','-m','test: base')
+    git(topic_upstream,'tag','v1')
+    # A release tag on a commit no branch reaches, as bifrost's releases are.
+    git(topic_upstream,'checkout','-q','-b','release')
+    (topic_upstream/'release.txt').write_text('release\n')
+    git(topic_upstream,'add','.')
+    git(topic_upstream,'commit','-m','test: release')
+    git(topic_upstream,'tag','v2')
+    git(topic_upstream,'checkout','-q','main')
+    git(topic_upstream,'branch','-D','release')
+    git(topic_upstream,'checkout','-q','-b','topic')
+    (topic_upstream/'topic.txt').write_text('topic\n')
+    git(topic_upstream,'add','.')
+    # A prerequisite header line longer than one 256-byte read, with '-' at
+    # the split point.
+    git(topic_upstream,'commit','-m','test: '+'a'*208+'-topic')
+    git(topic_upstream,'checkout','-q','-b','pushed')
+    (topic_upstream/'pushed.txt').write_text('pushed\n')
+    git(topic_upstream,'add','.')
+    git(topic_upstream,'commit','-m','test: pushed')
+    git(topic_upstream,'checkout','-q','topic')
+    git(topic_upstream,'checkout','-q','main')
+    topic = workspace/'topic'
+    subprocess.check_call(['git','clone','-q',str(topic_upstream),str(topic)],stderr=subprocess.DEVNULL)
+    git(topic,'remote','set-url','origin','https://github.com/example/topic.git')
+    # file:// clones over the fetch protocol, so a restore clone lacks commits
+    # no ref reaches; a plain path would copy the whole object store.
+    git(root,'config','--global','url.file://'+str(topic_upstream)+'.insteadOf','https://github.com/example/topic.git')
+    git(topic,'config','user.name','Checkpoint Fixture')
+    git(topic,'config','user.email','fixture@example.invalid')
+    git(topic,'checkout','-q','-b','agent','origin/topic')
+    (topic/'agent.txt').write_text('built on topic\n')
+    git(topic,'add','agent.txt')
+    git(topic,'commit','-m','test: build on topic')
+    # A pushed branch with nothing unpushed, and a local tag on it, whose
+    # branch origin deletes after the save (as a squash merge does).
+    pushed = workspace/'pushed'
+    subprocess.check_call(['git','clone','-q','file://'+str(topic_upstream),str(pushed)],stderr=subprocess.DEVNULL)
+    git(pushed,'remote','set-url','origin','https://github.com/example/topic.git')
+    git(pushed,'checkout','-q','-b','pushed','origin/pushed')
+    git(pushed,'tag','mine')
+    saved = checkpoint.pack(workspace,root/'topic.tar.gz')
+    pushed_index = [r['path'] for r in saved['repositories']].index('pushed')
+    index = [r['path'] for r in saved['repositories']].index('topic')
+    unpacked = root/'topic-unpacked'
+    with tarfile.open(root/'topic.tar.gz') as archive:
+        archive.extractall(unpacked, filter='data')
+    heads = git(topic,'bundle','list-heads',str(unpacked/'snapshot/repositories'/str(index)/'history.bundle'))
+    assert git(topic,'rev-parse','-q','--verify','refs/tags/v2'), 'fixture clone lacks the release tag'
+    assert 'refs/remotes/' not in heads and 'refs/tags/' not in heads, heads
+    git(topic_upstream,'branch','-D','topic')
+    git(topic_upstream,'branch','-D','pushed')
+    assert not (unpacked/'snapshot/repositories'/str(pushed_index)/'history.bundle').exists()
+    lost = git(topic,'rev-parse','origin/topic')
+    probe = root/'topic-probe'
+    git(root,'clone','-q','--no-checkout','https://github.com/example/topic.git',str(probe))
+    assert subprocess.run(['git','-C',str(probe),'cat-file','-e',lost]).returncode != 0, 'the clone still has the deleted branch'
+    checkpoint.restore(root/'topic.tar.gz',root/'restored-topic')
+    restored = root/'restored-topic/topic'
+    assert git(restored,'rev-parse','HEAD') == git(topic,'rev-parse','HEAD')
+    assert (restored/'topic.txt').read_text() == 'topic\n'
+    assert (restored/'agent.txt').read_text() == 'built on topic\n'
+    restored_pushed = root/'restored-topic/pushed'
+    assert git(restored_pushed,'rev-parse','HEAD') == git(pushed,'rev-parse','HEAD')
+    assert git(restored_pushed,'branch','--show-current') == 'pushed'
+    assert git(restored_pushed,'rev-parse','mine') == git(pushed,'rev-parse','mine')
+    assert (restored_pushed/'pushed.txt').read_text() == 'pushed\n'
+    print('PASS: the bundle excludes origin tags and remote-tracking refs; restore fetches a prerequisite, HEAD and a tag whose branches origin deleted after the save')
+
+    # Thousands of origin branches do not grow any single scan argument.
+    many_upstream = root/'many-upstream'
+    many_upstream.mkdir()
+    git(many_upstream,'init','-b','main')
+    git(many_upstream,'config','user.name','Checkpoint Fixture')
+    git(many_upstream,'config','user.email','fixture@example.invalid')
+    (many_upstream/'base.txt').write_text('base\n')
+    git(many_upstream,'add','.')
+    git(many_upstream,'commit','-m','test: base')
+    stream = []
+    for number in range(4000):
+        message = 'branch %d' % number
+        stream.append('commit refs/heads/b%d\ncommitter F <f@example.invalid> 0 +0000\ndata %d\n%s\nfrom refs/heads/main\n\n'
+                      % (number, len(message), message))
+    subprocess.run(['git','-C',str(many_upstream),'fast-import','--quiet'],input=''.join(stream).encode(),check=True)
+    many = workspace/'many'
+    subprocess.check_call(['git','clone','-q',str(many_upstream),str(many)],stderr=subprocess.DEVNULL)
+    git(many,'remote','set-url','origin','https://github.com/example/many.git')
+    git(root,'config','--global','url.'+str(many_upstream)+'.insteadOf','https://github.com/example/many.git')
+    git(many,'config','user.name','Checkpoint Fixture')
+    git(many,'config','user.email','fixture@example.invalid')
+    (many/'agent.txt').write_text('unpushed\n')
+    git(many,'add','agent.txt')
+    git(many,'commit','-m','test: unpushed')
+    assert len(set(git(many,'for-each-ref','--format=%(objectname)','refs/remotes/').split())) > 3200
+    crowded = checkpoint.pack(workspace,root/'many.tar.gz')
+    assert next(r for r in crowded['repositories'] if r['path'] == 'many')['base'] == 'origin'
+    shutil.rmtree(many)
+    print('PASS: an origin with 4,000 distinct branch tips packs; the history scan stays within argument limits')
+
+    # Unreachable origins cost one shared deadline, not one per repository.
+    server = socket.socket()
+    server.bind(('127.0.0.1', 0))
+    server.listen()
+    held = []
+    threading.Thread(target=lambda: [held.append(server.accept()) for _ in range(8)], daemon=True).start()
+    hanging = 'https://127.0.0.1:%d/example.git' % server.getsockname()[1]
+    deadline = checkpoint.ORIGIN_SECONDS
+    checkpoint.ORIGIN_SECONDS = 2
+    try:
+        started = time.monotonic()
+        listings = checkpoint.origin_listings([hanging]*4 + ['ssh://git@example.com/x.git'])
+        elapsed = time.monotonic() - started
+    finally:
+        checkpoint.ORIGIN_SECONDS = deadline
+    assert listings == [None]*5, listings
+    assert elapsed < 5, elapsed
+    print('PASS: four hanging origins and an SSH origin resolve to bundle saves within one shared deadline')
 
     (root/'private').write_text('outside workspace')
     (repo/'escape').symlink_to(root/'private')
