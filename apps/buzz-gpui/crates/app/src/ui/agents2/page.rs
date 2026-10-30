@@ -191,6 +191,8 @@ pub struct Agents2Page {
     import: Option<Entity<BringOver>>,
     browse: Option<Entity<AgentBrowse>>,
     teams: Option<Entity<TeamsPanel>>,
+    #[cfg(feature = "voltage-sandbox")]
+    migration: Option<Entity<super::remote_migration::RemoteMigration>>,
     build: Option<Entity<Build>>,
     more_open: bool,
     /// The Provider settings submenu is open.
@@ -223,6 +225,8 @@ impl Agents2Page {
             import: None,
             browse: None,
             teams: None,
+            #[cfg(feature = "voltage-sandbox")]
+            migration: None,
             build: None,
             more_open: false,
             providers_open: false,
@@ -426,11 +430,32 @@ impl Agents2Page {
         cx.notify();
     }
 
+    #[cfg(feature = "voltage-sandbox")]
+    fn open_migration(&mut self, team: Option<String>, cx: &mut Context<Self>) {
+        let panel = cx.new(|cx| super::remote_migration::RemoteMigration::new(team, cx));
+        cx.subscribe(
+            &panel,
+            |this, _, _: &super::remote_migration::CloseMigration, cx| {
+                this.migration = None;
+                cx.notify();
+            },
+        )
+        .detach();
+        self.more_open = false;
+        self.migration = Some(panel);
+        cx.notify();
+    }
+
     fn open_teams(&mut self, cx: &mut Context<Self>) {
         self.more_open = false;
         let panel = cx.new(TeamsPanel::new);
         cx.subscribe(&panel, |this, _, _: &CloseTeams, cx| this.browse(None, cx))
             .detach();
+        #[cfg(feature = "voltage-sandbox")]
+        cx.subscribe(&panel, |this, _, event: &super::teams::MoveTeam, cx| {
+            this.open_migration(Some(event.0.clone()), cx);
+        })
+        .detach();
         self.teams = Some(panel);
         self.frame = Frame::Browse {
             selected: None,
@@ -539,10 +564,26 @@ impl Agents2Page {
             }
             None => {
                 let teams_open = matches!(self.frame, Frame::Browse { teams: true, .. });
-                header.label(Some(IconName::Robot), "Agents").when(
+                let header = header.label(Some(IconName::Robot), "Agents").when(
                     self.tab == TabId::Yours && ready && !types(cx).is_empty(),
                     |this| this.action(self.more(teams_open, window, cx)),
-                )
+                );
+                #[cfg(feature = "voltage-sandbox")]
+                let header = header.when(
+                    self.tab == TabId::Yours
+                        && ready
+                        && type_of(crate::agents2::remote_migration::TARGET, cx).is_some(),
+                    |header| {
+                        header.action(
+                            super::migration_controls::Button::new(
+                                "agents-move-remote",
+                                "Move to remote",
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.open_migration(None, cx))),
+                        )
+                    },
+                );
+                header
             }
         }
     }
@@ -1091,6 +1132,11 @@ impl Render for Agents2Page {
             .child(div().flex_1().min_h_0().child(body))
             .children(self.create.clone())
             .children(self.provider_dialog(window, cx))
+            .map(|page| {
+                #[cfg(feature = "voltage-sandbox")]
+                let page = page.children(self.migration.clone());
+                page
+            })
     }
 }
 

@@ -31,6 +31,7 @@ pub enum Picker {
 const FAST: &[(&str, &str)] = &[("off", "Off"), ("on", "On")];
 
 pub struct SettingsTab {
+    shared_destination: bool,
     view: AgentView,
     /// The saved settings the draft started from.
     saved: Config,
@@ -134,6 +135,7 @@ impl SettingsTab {
             }));
         }
         let mut tab = Self {
+            shared_destination: false,
             view,
             runtime: saved.runtime.clone(),
             effort: saved.effort.clone(),
@@ -149,6 +151,14 @@ impl SettingsTab {
             _subscriptions: subscriptions,
         };
         tab.load_on_file(window, cx);
+        tab
+    }
+
+    /// Batch settings leave each agent's instructions intact and use the
+    /// enrolled profile for credentials rather than copying environments.
+    pub fn shared(view: AgentView, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut tab = Self::new(view, window, cx);
+        tab.shared_destination = true;
         tab
     }
 
@@ -506,7 +516,7 @@ impl Render for SettingsTab {
                         &c,
                     ))),
             )
-            .child(field(
+            .when(!self.shared_destination, |body| body.child(field(
                 "Environment",
                 TextArea::new(&self.env)
                     .rows(6)
@@ -523,7 +533,7 @@ impl Render for SettingsTab {
                 saving,
                 "Sent as the harness's system prompt when a thread's Sandbox starts.",
                 &c,
-            ))
+            )))
             .map(|this| {
                 let sending = self.enroll.sending;
                 let owner = enroll_form::owner(cx).map(|owner| owner.pubkey_hex());
