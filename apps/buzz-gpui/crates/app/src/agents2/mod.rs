@@ -22,6 +22,8 @@ pub mod listings;
 pub mod objects;
 mod presence;
 pub mod registry;
+#[cfg(feature = "voltage-sandbox")]
+pub mod remote_migration;
 pub mod runtime;
 mod service;
 pub mod store;
