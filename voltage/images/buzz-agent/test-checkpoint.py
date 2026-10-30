@@ -5,7 +5,7 @@ import sys
 SCRIPT = r'''
 import base64, hashlib, importlib.machinery, importlib.util, io, json, os
 from pathlib import Path
-import socket, subprocess, tarfile, tempfile, threading, time
+import shutil, socket, subprocess, tarfile, tempfile, threading, time
 
 loader = importlib.machinery.SourceFileLoader('checkpoint', '/usr/local/bin/buzz-agent-checkpoint')
 spec = importlib.util.spec_from_loader(loader.name, loader)
@@ -223,6 +223,9 @@ with tempfile.TemporaryDirectory() as temp:
         (types_upstream/name).write_text(name+'\n')
     (types_upstream/'d').mkdir()
     (types_upstream/'d/x.txt').write_text('in a directory\n')
+    for name in ('linked','other'):
+        (types_upstream/name).mkdir()
+        (types_upstream/name/'f.txt').write_text(name+'\n')
     (types_upstream/'retarget').symlink_to('a.txt')
     (types_upstream/'to-file').symlink_to('a.txt')
     git(types_upstream,'add','.')
@@ -243,6 +246,9 @@ with tempfile.TemporaryDirectory() as temp:
     (types/'d/x.txt').unlink()
     (types/'d').rmdir()
     (types/'d').write_text('directory became a file\n')
+    (types/'linked/f.txt').unlink()
+    (types/'linked').rmdir()
+    (types/'linked').symlink_to('other')
     git(types,'tag','light')
     git(types,'-c','tag.gpgsign=false','tag','-a','-m','annotated, unpushed','annotated')
     git(types,'branch','wip')
@@ -257,11 +263,24 @@ with tempfile.TemporaryDirectory() as temp:
     assert (restored/'a.txt').read_text() == 'a.txt\n', 'a write went through the old symlink'
     assert (restored/'c.txt/inner.txt').read_text() == 'file became a directory\n'
     assert (restored/'d').read_text() == 'directory became a file\n'
+    assert os.readlink(restored/'linked') == 'other'
+    assert (restored/'other/f.txt').read_text() == 'other\n'
+    types_record = next(r for r in typed['repositories'] if r['path'] == 'types')
+    assert 'linked/f.txt' in types_record['deleted'] and 'linked/f.txt' not in types_record['files']
     assert git(restored,'status','--porcelain') == git(types,'status','--porcelain')
     for ref in ('refs/tags/light','refs/tags/annotated','refs/heads/wip'):
         assert git(restored,'rev-parse',ref) == git(types,'rev-parse',ref), ref
     assert git(restored,'cat-file','-t','annotated') == 'tag'
     assert git(restored,'cat-file','tag','annotated') == git(types,'cat-file','tag','annotated')
+    # An annotated tag message the agent adds is secret-scanned: the manifest
+    # carries it base64-encoded, and the manifest scan decodes base64.
+    git(types,'-c','tag.gpgsign=false','tag','-a','-m','github_token = "ghp_'+'aB3dE6gH9jK2mN5pQ8sT1vW4yZ7cF0iL3oR6'+'"','leaky')
+    try:
+        checkpoint.pack(workspace,root/'leaky.tar.gz')
+        raise AssertionError('secret scanner admitted a credential in an annotated tag message')
+    except ValueError:
+        assert checkpoint.STEP[0] == 'scanning for secrets', checkpoint.STEP[0]
+    git(types,'tag','-d','leaky')
     # A crafted deletion cannot reach through a symlinked parent.
     forged = root/'forged-types'
     with tarfile.open(root/'types.tar.gz') as archive:
@@ -282,6 +301,17 @@ with tempfile.TemporaryDirectory() as temp:
         archive.add(forged/'snapshot',arcname='snapshot')
     checkpoint.restore(root/'forged-types.tar.gz',root/'restored-forged-types')
     assert (root/'outside.txt').read_text() == 'outside\n'
+    # A malformed record is refused as a checkpoint error, not a crash.
+    record['refs'] = [['refs/heads/x', 2]]
+    (forged/'snapshot/manifest.json').write_text(json.dumps(forged_manifest))
+    with tarfile.open(root/'malformed.tar.gz','w:gz') as archive:
+        archive.add(forged/'snapshot',arcname='snapshot')
+    try:
+        checkpoint.restore(root/'malformed.tar.gz',root/'restored-malformed')
+        raise AssertionError('a malformed origin record was restored')
+    except ValueError:
+        pass
+    assert not (root/'restored-malformed').exists()
     print('PASS: origin restore replaces retargeted symlinks, symlinks turned files, and file/directory swaps in place; unpushed tags, annotated tag objects and branches survive; deletions never follow a symlink')
 
     # The bundle holds only what the agent owns, never origin's tags or
@@ -309,7 +339,14 @@ with tempfile.TemporaryDirectory() as temp:
     git(topic_upstream,'checkout','-q','-b','topic')
     (topic_upstream/'topic.txt').write_text('topic\n')
     git(topic_upstream,'add','.')
-    git(topic_upstream,'commit','-m','test: topic')
+    # A prerequisite header line longer than one 256-byte read, with '-' at
+    # the split point.
+    git(topic_upstream,'commit','-m','test: '+'a'*208+'-topic')
+    git(topic_upstream,'checkout','-q','-b','pushed')
+    (topic_upstream/'pushed.txt').write_text('pushed\n')
+    git(topic_upstream,'add','.')
+    git(topic_upstream,'commit','-m','test: pushed')
+    git(topic_upstream,'checkout','-q','topic')
     git(topic_upstream,'checkout','-q','main')
     topic = workspace/'topic'
     subprocess.check_call(['git','clone','-q',str(topic_upstream),str(topic)],stderr=subprocess.DEVNULL)
@@ -323,7 +360,15 @@ with tempfile.TemporaryDirectory() as temp:
     (topic/'agent.txt').write_text('built on topic\n')
     git(topic,'add','agent.txt')
     git(topic,'commit','-m','test: build on topic')
+    # A pushed branch with nothing unpushed, and a local tag on it, whose
+    # branch origin deletes after the save (as a squash merge does).
+    pushed = workspace/'pushed'
+    subprocess.check_call(['git','clone','-q','file://'+str(topic_upstream),str(pushed)],stderr=subprocess.DEVNULL)
+    git(pushed,'remote','set-url','origin','https://github.com/example/topic.git')
+    git(pushed,'checkout','-q','-b','pushed','origin/pushed')
+    git(pushed,'tag','mine')
     saved = checkpoint.pack(workspace,root/'topic.tar.gz')
+    pushed_index = [r['path'] for r in saved['repositories']].index('pushed')
     index = [r['path'] for r in saved['repositories']].index('topic')
     unpacked = root/'topic-unpacked'
     with tarfile.open(root/'topic.tar.gz') as archive:
@@ -332,6 +377,8 @@ with tempfile.TemporaryDirectory() as temp:
     assert git(topic,'rev-parse','-q','--verify','refs/tags/v2'), 'fixture clone lacks the release tag'
     assert 'refs/remotes/' not in heads and 'refs/tags/' not in heads, heads
     git(topic_upstream,'branch','-D','topic')
+    git(topic_upstream,'branch','-D','pushed')
+    assert not (unpacked/'snapshot/repositories'/str(pushed_index)/'history.bundle').exists()
     lost = git(topic,'rev-parse','origin/topic')
     probe = root/'topic-probe'
     git(root,'clone','-q','--no-checkout','https://github.com/example/topic.git',str(probe))
@@ -341,7 +388,42 @@ with tempfile.TemporaryDirectory() as temp:
     assert git(restored,'rev-parse','HEAD') == git(topic,'rev-parse','HEAD')
     assert (restored/'topic.txt').read_text() == 'topic\n'
     assert (restored/'agent.txt').read_text() == 'built on topic\n'
-    print('PASS: the bundle excludes origin tags and remote-tracking refs; restore fetches a prerequisite whose branch origin deleted after the save')
+    restored_pushed = root/'restored-topic/pushed'
+    assert git(restored_pushed,'rev-parse','HEAD') == git(pushed,'rev-parse','HEAD')
+    assert git(restored_pushed,'branch','--show-current') == 'pushed'
+    assert git(restored_pushed,'rev-parse','mine') == git(pushed,'rev-parse','mine')
+    assert (restored_pushed/'pushed.txt').read_text() == 'pushed\n'
+    print('PASS: the bundle excludes origin tags and remote-tracking refs; restore fetches a prerequisite, HEAD and a tag whose branches origin deleted after the save')
+
+    # Thousands of origin branches do not grow any single scan argument.
+    many_upstream = root/'many-upstream'
+    many_upstream.mkdir()
+    git(many_upstream,'init','-b','main')
+    git(many_upstream,'config','user.name','Checkpoint Fixture')
+    git(many_upstream,'config','user.email','fixture@example.invalid')
+    (many_upstream/'base.txt').write_text('base\n')
+    git(many_upstream,'add','.')
+    git(many_upstream,'commit','-m','test: base')
+    stream = []
+    for number in range(4000):
+        message = 'branch %d' % number
+        stream.append('commit refs/heads/b%d\ncommitter F <f@example.invalid> 0 +0000\ndata %d\n%s\nfrom refs/heads/main\n\n'
+                      % (number, len(message), message))
+    subprocess.run(['git','-C',str(many_upstream),'fast-import','--quiet'],input=''.join(stream).encode(),check=True)
+    many = workspace/'many'
+    subprocess.check_call(['git','clone','-q',str(many_upstream),str(many)],stderr=subprocess.DEVNULL)
+    git(many,'remote','set-url','origin','https://github.com/example/many.git')
+    git(root,'config','--global','url.'+str(many_upstream)+'.insteadOf','https://github.com/example/many.git')
+    git(many,'config','user.name','Checkpoint Fixture')
+    git(many,'config','user.email','fixture@example.invalid')
+    (many/'agent.txt').write_text('unpushed\n')
+    git(many,'add','agent.txt')
+    git(many,'commit','-m','test: unpushed')
+    assert len(set(git(many,'for-each-ref','--format=%(objectname)','refs/remotes/').split())) > 3200
+    crowded = checkpoint.pack(workspace,root/'many.tar.gz')
+    assert next(r for r in crowded['repositories'] if r['path'] == 'many')['base'] == 'origin'
+    shutil.rmtree(many)
+    print('PASS: an origin with 4,000 distinct branch tips packs; the history scan stays within argument limits')
 
     # Unreachable origins cost one shared deadline, not one per repository.
     server = socket.socket()

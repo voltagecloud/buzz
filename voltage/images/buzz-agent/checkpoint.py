@@ -89,13 +89,13 @@ def public_origin(repo):
     return urlunsplit((parsed.scheme, host, parsed.path, '', ''))
 
 
-def scan(directory, *, history=False, revisions=b''):
+def scan(directory, *, history=False, revisions=()):
     """Refuse a credential the agent added: commits not on a remote, or files.
 
     History and files already on a remote are on the forge, where the agent's
-    token can read them, so the scan leaves them out. `revisions` are an
-    origin-based save's bundle revisions, so the scan covers exactly the
-    commits it uploads."""
+    token can read them, so the scan leaves them out. `revisions` select an
+    origin-based save's bundled commits in a few arguments, so the scan covers
+    exactly what it uploads."""
     # Immutable image configuration prevents workspace allowlists from bypassing
     # the scan. Scanner output can contain secrets even on errors, so suppress it.
     previous = STEP[0]
@@ -106,8 +106,8 @@ def scan(directory, *, history=False, revisions=b''):
                '--gitleaks-ignore-path', '/dev/null', '--ignore-gitleaks-allow',
                '--no-banner', '--redact', '--timeout', '60']
     if history:
-        command += ['--log-opts=' + (' '.join(revisions.decode().split())
-                                     if revisions else '--all HEAD --not --remotes')]
+        command += ['--log-opts=' + (' '.join(revisions) if revisions
+                                     else '--all HEAD --not --remotes')]
     run(*command, timeout=65, env=env)
     step(previous)
 
@@ -248,17 +248,28 @@ def pack(workspace, output):
                 total += sum(len(content) for content in record['tags'].values())
             destination = stage / 'repositories' / str(index)
             (destination / 'files').mkdir(parents=True)
+            beyond = []
             if base == 'origin':
                 # Only what the agent owns, beyond origin's branches: never
                 # origin's remote-tracking refs or tags, whose boundaries would
-                # sit on branches origin may delete before the restore.
+                # sit on branches origin may delete before the restore. A ref at
+                # or behind an origin tip adds no commit.
                 owned = ['HEAD'] + [ref for ref, _ in record['refs']]
                 if git(repo, 'for-each-ref', '--format=%(refname)', 'refs/stash').strip():
                     owned.append('refs/stash')
-                revisions = ''.join(name + '\n' for name in owned).encode() + tips
+                beyond = [name for name in owned if git(
+                    repo, 'rev-list', '--max-count=1', '--stdin', input=(name + '\n').encode() + tips).strip()]
+                revisions = ''.join(name + '\n' for name in beyond).encode() + tips
+                if beyond:
+                    # The same commits as the bundle, bounded by their boundary
+                    # rather than by every origin tip, which can exceed one
+                    # argument's size limit.
+                    boundary = [line[1:] for line in git(repo, 'rev-list', '--boundary', '--stdin',
+                                                         input=revisions).decode().splitlines()
+                                if line.startswith('-')]
+                    scan(repo, history=True, revisions=beyond + ['^' + value for value in boundary])
             else:
-                revisions = b''
-            scan(repo, history=True, revisions=revisions)
+                scan(repo, history=True)
             review_changes(repo, review / str(index))
             bundle = destination / 'history.bundle'
             if base == 'bundle':
@@ -268,7 +279,7 @@ def pack(workspace, output):
             else:
                 # Only commits origin lacks, and only files that differ from HEAD.
                 # git refuses an empty bundle, so a fully pushed repository has none.
-                if git(repo, 'rev-list', '--max-count=1', '--stdin', input=revisions).strip():
+                if beyond:
                     git(repo, 'bundle', 'create', str(bundle), '--stdin', input=revisions)
                 names = (git(repo, 'ls-files', '-z', '--others', '--exclude-standard') + b'\0'
                          + git(repo, 'diff', '--name-only', '--no-renames', '-z', 'HEAD'))
@@ -280,11 +291,18 @@ def pack(workspace, output):
                     record['excluded'].append(str(path))
                     continue
                 source = repo / path
+                if any((repo / PurePosixPath(*path.parts[:depth])).is_symlink()
+                       for depth in range(1, len(path.parts))):
+                    # A directory replaced by a symlink: the symlink is its own
+                    # entry, and nothing is read through it.
+                    if base == 'origin':
+                        record['deleted'].append(str(path))
+                    continue
                 if not source.exists() and not source.is_symlink():
                     if base == 'origin':
                         record['deleted'].append(str(path))
                     continue  # A bundle snapshot represents a deletion by absence.
-                if source.is_dir():
+                if source.is_dir() and not source.is_symlink():
                     continue  # Submodule repositories are discovered separately.
                 info = source.lstat()
                 target = destination / 'files' / path
@@ -373,9 +391,15 @@ def restore_repositories(stage, manifest, destination):
                 run('git', '-c', 'core.hooksPath=/dev/null', 'clone', '--no-checkout',
                     str(source / 'history.bundle'), str(repo))
             elif base == 'origin':
+                validate_origin_record(record)
                 clone_origin(record['origin'], repo)
                 if (source / 'history.bundle').exists():
                     fetch_bundle(repo, source / 'history.bundle')
+                # HEAD or a saved ref can sit on a branch origin deleted after
+                # the save, such as a pushed branch removed by a squash merge.
+                fetch_missing(repo, [record['head']] + [value for _, value in record['refs']
+                                                        if value not in record['tags']]
+                              + [tag_target(content) for content in record['tags'].values()])
                 restore_refs(repo, record)
             else:
                 raise ValueError('Unsupported checkpoint repository base')
@@ -457,6 +481,47 @@ def place(repo, files, path):
         raise ValueError('Checkpoint file is missing from the archive')
 
 
+def validate_origin_record(record):
+    """Refuse a malformed origin record before acting on it."""
+    if not (isinstance(record.get('origin'), str) and isinstance(record.get('files'), list)
+            and isinstance(record.get('deleted', []), list) and isinstance(record.get('refs', []), list)
+            and isinstance(record.get('tags', {}), dict)
+            and all(isinstance(value, str) for value in record['files'] + record.get('deleted', []))
+            and all(isinstance(pair, list) and len(pair) == 2 and all(isinstance(v, str) for v in pair)
+                    for pair in record.get('refs', []))
+            and all(isinstance(key, str) and isinstance(value, str)
+                    for key, value in record.get('tags', {}).items())):
+        raise ValueError('Invalid checkpoint repository record')
+    record.setdefault('refs', [])
+    record.setdefault('tags', {})
+
+
+def tag_target(content):
+    """The object an annotated tag names, from its saved content."""
+    first = base64.b64decode(content, validate=True).split(b'\n', 1)[0].decode()
+    if not re.fullmatch('object [0-9a-f]{40,64}', first):
+        raise ValueError('Invalid checkpoint tag object')
+    return first.split(' ', 1)[1]
+
+
+def fetch_missing(repo, values):
+    """Fetch the named commits the clone lacks from origin.
+
+    GitHub still serves a commit by name after its branch is deleted or
+    force-pushed; a commit origin no longer has fails the restore here."""
+    for value in values:
+        if not re.fullmatch('[0-9a-f]{40,64}', value):
+            raise ValueError('Invalid checkpoint revision')
+    found = git(repo, 'cat-file', '--batch-check=%(objectname) %(objecttype)',
+                input=''.join(value + '\n' for value in sorted(set(values))).encode())
+    missing = [line.split(' ', 1)[0] for line in found.decode().splitlines()
+               if line.endswith(' missing')]
+    if missing:
+        git(repo, '-c', 'http.lowSpeedLimit=1000', '-c', 'http.lowSpeedTime=60', 'fetch',
+            '--no-tags', '--no-write-fetch-head', 'origin', *missing, timeout=None,
+            env=dict(os.environ, GIT_TERMINAL_PROMPT='0'))
+
+
 def restore_refs(repo, record):
     """Recreate the saved branches and tags, annotated tag objects first."""
     for name, content in record.get('tags', {}).items():
@@ -474,33 +539,26 @@ def restore_refs(repo, record):
 def prerequisites(bundle):
     """The commits a bundle builds on, from its header."""
     with open(bundle, 'rb') as stream:
-        if stream.readline() not in (b'# v2 git bundle\n', b'# v3 git bundle\n'):
-            raise ValueError('Unsupported checkpoint bundle')
-        found = []
-        for _ in range(MAX_FILES):
-            line = stream.readline(256)
-            if line in (b'\n', b''):
-                return found
-            if line.startswith(b'-'):
-                value = line[1:].split(b' ', 1)[0].strip().decode()
-                if not re.fullmatch('[0-9a-f]{40,64}', value):
-                    raise ValueError('Invalid checkpoint bundle prerequisite')
-                found.append(value)
-    raise ValueError('Checkpoint bundle header is too large')
+        header = stream.read(1024 * 1024)
+    if b'\n\n' not in header:
+        raise ValueError('Checkpoint bundle header is too large')
+    lines = header.split(b'\n\n', 1)[0].split(b'\n')
+    if lines[0] not in (b'# v2 git bundle', b'# v3 git bundle'):
+        raise ValueError('Unsupported checkpoint bundle')
+    found = []
+    for line in lines[1:]:
+        if line.startswith(b'-'):
+            value = line[1:].split(b' ', 1)[0].decode()
+            if not re.fullmatch('[0-9a-f]{40,64}', value):
+                raise ValueError('Invalid checkpoint bundle prerequisite')
+            found.append(value)
+    return found
 
 
 def fetch_bundle(repo, bundle):
     """Add a checkpoint's unpushed commits, and their refs, to an origin clone."""
-    # A prerequisite can leave origin's branches after the save, when a branch
-    # is deleted or force-pushed; GitHub still serves such a commit by name.
-    found = git(repo, 'cat-file', '--batch-check=%(objectname) %(objecttype)',
-                input=''.join(value + '\n' for value in prerequisites(bundle)).encode())
-    missing = [line.split(' ', 1)[0] for line in found.decode().splitlines()
-               if not line.endswith(' commit')]
-    if missing:
-        git(repo, '-c', 'http.lowSpeedLimit=1000', '-c', 'http.lowSpeedTime=60', 'fetch',
-            '--no-tags', '--no-write-fetch-head', 'origin', *missing, timeout=None,
-            env=dict(os.environ, GIT_TERMINAL_PROMPT='0'))
+    # A prerequisite can leave origin's branches after the save.
+    fetch_missing(repo, prerequisites(bundle))
     specs = []
     for line in git(repo, 'bundle', 'list-heads', str(bundle)).decode().splitlines():
         name = line.split(' ', 1)[1] if ' ' in line else ''

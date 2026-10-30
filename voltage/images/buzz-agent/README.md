@@ -68,6 +68,7 @@ The bundle holds only what the agent owns: HEAD, local branches, the stash, and 
 If a branch the checkpoint builds on was deleted or force-pushed after the save, restore fetches its commit from origin by name, which GitHub still serves; restore fails only if origin no longer has the commit.
 Any other repository (no remote, an SSH origin, origin unreachable in time, or nothing pushed) is saved whole: full history and every file.
 A checkpoint without an origin-based repository keeps manifest version 1, which older images restore.
+Git notes (`refs/notes`) and stash entries other than the latest are not saved.
 
 Explicit checkpoint recovery sets `BUZZ_CHECKPOINT_RESTORE_KEY` in the launch Secret; it is empty otherwise.
 After the developer profile bootstrap and before the harness starts, the entrypoint runs `buzz-agent-checkpoint restore-once`.
