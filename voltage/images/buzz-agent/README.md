@@ -60,6 +60,11 @@ New sessions load the developer's current account profile.
 Checkpoints use the developer's S3 prefix and service account from Terraform.
 The harness stops adapter processes before invoking `buzz-agent-checkpoint save`, including cancellation during startup.
 A failed save retains the Sandbox for recovery; do not delete its workspace.
+A checkpoint holds at most 256 MiB of source and 50,000 files.
+A repository whose HTTPS `origin` shares a branch tip with it, as `git ls-remote` reports at save time, is saved against origin: only commits beyond origin's branches, changed and untracked files, and deletions.
+Its restore clones `origin` with the Sandbox's GitHub credential, so pushed content of any size does not count against the budget.
+Restore fails if origin has since lost a commit the checkpoint builds on, for example after a force-push.
+Any other repository (no remote, an SSH origin, origin unreachable, or nothing pushed) is saved whole: full history and every file.
 
 Explicit checkpoint recovery sets `BUZZ_CHECKPOINT_RESTORE_KEY` in the launch Secret; it is empty otherwise.
 After the developer profile bootstrap and before the harness starts, the entrypoint runs `buzz-agent-checkpoint restore-once`.

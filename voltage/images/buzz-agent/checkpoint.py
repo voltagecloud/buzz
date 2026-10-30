@@ -35,15 +35,15 @@ def step(name):
     STEP[0] = name
 
 
-def run(*args, cwd=None, timeout=60, env=None):
-    result = subprocess.run(args, cwd=cwd, env=env, capture_output=True, timeout=timeout)
+def run(*args, cwd=None, timeout=60, env=None, input=None):
+    result = subprocess.run(args, cwd=cwd, env=env, input=input, capture_output=True, timeout=timeout)
     if result.returncode:
         raise ValueError('Checkpoint command failed; command output suppressed')
     return result.stdout
 
 
-def git(repo, *args):
-    return run('git', '-c', 'core.hooksPath=/dev/null', '-C', str(repo), *args)
+def git(repo, *args, **options):
+    return run('git', '-c', 'core.hooksPath=/dev/null', '-C', str(repo), *args, **options)
 
 
 def safe_path(value):
@@ -130,9 +130,32 @@ def review_changes(repo, review):
             write(path, b'\n'.join(added) + b'\n')
 
 
+def origin_tips(repo, origin):
+    """Origin's branch tips that this clone has, as `^<commit>` rev-list lines.
+
+    A clone of origin restores everything reachable from them, so a checkpoint
+    needs only the commits and working-tree changes beyond them. Asks origin:
+    local remote-tracking refs can be stale, and after a bundle restore they
+    name commits origin never had. Empty when restore cannot clone origin: it
+    is not HTTPS (the scheme the Sandbox's GitHub credential serves), cannot
+    be reached now, or shares no branch tip with this clone."""
+    if urlsplit(origin).scheme != 'https':
+        return b''
+    try:
+        listing = git(repo, 'ls-remote', '--heads', 'origin', timeout=30,
+                      env=dict(os.environ, GIT_TERMINAL_PROMPT='0'))
+    except (ValueError, subprocess.TimeoutExpired):
+        return b''
+    tips = {line.split(b'\t', 1)[0] for line in listing.splitlines() if b'\t' in line}
+    found = git(repo, 'cat-file', '--batch-check=%(objectname) %(objecttype)',
+                input=b''.join(tip + b'\n' for tip in sorted(tips)))
+    return b''.join(b'^' + line.split(b' ', 1)[0] + b'\n'
+                    for line in found.splitlines() if line.endswith(b' commit'))
+
+
 def pack(workspace, output):
     workspace = workspace.resolve(strict=True)
-    manifest = {'version': 1, 'repositories': []}
+    manifest = {'version': 2, 'repositories': []}
     total = 0
     count = 0
     with tempfile.TemporaryDirectory(prefix='agent-checkpoint-') as temp, \
@@ -144,17 +167,31 @@ def pack(workspace, output):
             relative = repo.relative_to(workspace).as_posix()
             if relative == '.':
                 raise ValueError('Use a workspace directory containing repositories')
-            record = {'path': relative, 'origin': public_origin(repo),
+            origin = public_origin(repo)
+            tips = origin_tips(repo, origin)
+            base = 'origin' if tips else 'bundle'
+            record = {'path': relative, 'origin': origin, 'base': base,
                       'head': git(repo, 'rev-parse', 'HEAD').decode().strip(),
                       'branch': git(repo, 'branch', '--show-current').decode().strip(),
-                      'excluded': [], 'files': []}
+                      'excluded': [], 'files': [], 'deleted': []}
             destination = stage / 'repositories' / str(index)
             (destination / 'files').mkdir(parents=True)
             scan(repo, history=True)
             review_changes(repo, review / str(index))
-            git(repo, 'bundle', 'create', str(destination / 'history.bundle'), '--all', 'HEAD')
-            total += (destination / 'history.bundle').stat().st_size
-            names = git(repo, 'ls-files', '-z', '--cached', '--others', '--exclude-standard')
+            bundle = destination / 'history.bundle'
+            if base == 'bundle':
+                # The whole history, and every file: restore needs nothing else.
+                git(repo, 'bundle', 'create', str(bundle), '--all', 'HEAD')
+                names = git(repo, 'ls-files', '-z', '--cached', '--others', '--exclude-standard')
+            else:
+                # Only commits origin lacks, and only files that differ from HEAD.
+                # git refuses an empty bundle, so a fully pushed repository has none.
+                if git(repo, 'rev-list', '--max-count=1', '--all', 'HEAD', '--stdin', input=tips).strip():
+                    git(repo, 'bundle', 'create', str(bundle), '--all', 'HEAD', '--stdin', input=tips)
+                names = (git(repo, 'ls-files', '-z', '--others', '--exclude-standard') + b'\0'
+                         + git(repo, 'diff', '--name-only', '--no-renames', '-z', 'HEAD'))
+            if bundle.exists():
+                total += bundle.stat().st_size
             for raw in sorted(set(names.split(b'\0')) - {b''}):
                 path = safe_path(os.fsdecode(raw))
                 if excluded(path):
@@ -162,7 +199,9 @@ def pack(workspace, output):
                     continue
                 source = repo / path
                 if not source.exists() and not source.is_symlink():
-                    continue  # A tracked deletion is represented by absence.
+                    if base == 'origin':
+                        record['deleted'].append(str(path))
+                    continue  # A bundle snapshot represents a deletion by absence.
                 if source.is_dir():
                     continue  # Submodule repositories are discovered separately.
                 info = source.lstat()
@@ -221,7 +260,7 @@ def restore(archive_path, destination):
             archive.extractall(temp, filter='data')
         stage = Path(temp) / 'snapshot'
         manifest = json.loads((stage / 'manifest.json').read_text())
-        if manifest.get('version') != 1:
+        if manifest.get('version') not in (1, 2):
             raise ValueError('Unsupported checkpoint version')
         destination.mkdir(mode=0o700, parents=True)
         try:
@@ -244,26 +283,64 @@ def restore_repositories(stage, manifest, destination):
                 raise ValueError('Checkpoint repository path is reserved')
             source = stage / 'repositories' / str(index)
             repo = destination / relative
-            run('git', '-c', 'core.hooksPath=/dev/null', 'clone', '--no-checkout',
-                str(source / 'history.bundle'), str(repo))
             if not re.fullmatch('[0-9a-f]{40,64}', record['head']):
                 raise ValueError('Invalid checkpoint revision')
+            # Version 1 checkpoints are all bundle snapshots.
+            base = record.get('base', 'bundle')
+            if base == 'bundle':
+                run('git', '-c', 'core.hooksPath=/dev/null', 'clone', '--no-checkout',
+                    str(source / 'history.bundle'), str(repo))
+            elif base == 'origin':
+                clone_origin(record['origin'], repo)
+                if (source / 'history.bundle').exists():
+                    fetch_bundle(repo, source / 'history.bundle')
+            else:
+                raise ValueError('Unsupported checkpoint repository base')
             git(repo, 'checkout', '--detach', record['head'])
             if record['branch']:
                 git(repo, 'check-ref-format', '--branch', record['branch'])
                 git(repo, 'checkout', '-B', record['branch'])
             git(repo, 'remote', 'set-url', 'origin', record['origin'])
-            # Absence from the snapshot means deletion, except for excluded paths:
-            # they were never saved, so they keep their committed content.
-            for raw in git(repo, 'ls-files', '-z').split(b'\0'):
-                if raw:
-                    path = safe_path(os.fsdecode(raw))
-                    target = repo / path
-                    if not excluded(path) and (target.is_file() or target.is_symlink()):
-                        target.unlink()
+            if base == 'bundle':
+                # Absence from the snapshot means deletion, except for excluded
+                # paths: they were never saved, so they keep their committed content.
+                deleted = [os.fsdecode(raw) for raw in git(repo, 'ls-files', '-z').split(b'\0') if raw]
+            else:
+                deleted = record.get('deleted', [])
+            for value in deleted:
+                path = safe_path(value)
+                target = repo / path
+                if not excluded(path) and (target.is_file() or target.is_symlink()):
+                    target.unlink()
             shutil.copytree(source / 'files', repo, dirs_exist_ok=True, symlinks=True)
             review_changes(repo, review / str(index))
         scan(review)
+
+
+def clone_origin(origin, repo):
+    """Clone a checkpoint's pushed base with the Sandbox's Git credentials.
+
+    A large repository can clone slowly but steadily, so there is no overall
+    deadline; Git fails the clone only when the transfer stalls."""
+    if urlsplit(origin).scheme != 'https':
+        raise ValueError('Checkpoint origin base requires an HTTPS origin')
+    run('git', '-c', 'core.hooksPath=/dev/null', '-c', 'http.lowSpeedLimit=1000',
+        '-c', 'http.lowSpeedTime=60', 'clone', '--no-checkout', '--', origin, str(repo),
+        timeout=None, env=dict(os.environ, GIT_TERMINAL_PROMPT='0'))
+
+
+def fetch_bundle(repo, bundle):
+    """Add a checkpoint's unpushed commits, and their refs, to an origin clone."""
+    specs = []
+    for line in git(repo, 'bundle', 'list-heads', str(bundle)).decode().splitlines():
+        name = line.split(' ', 1)[1] if ' ' in line else ''
+        if name == 'HEAD':
+            specs.append('HEAD')  # A detached HEAD commit is not on any branch.
+        else:
+            git(repo, 'check-ref-format', name)
+            specs.append('+' + name + ':' + name)
+    # The bundle's prerequisites are origin commits; a missing one fails here.
+    git(repo, 'fetch', '--update-head-ok', '--no-tags', str(bundle), *specs)
 
 
 def storage():
