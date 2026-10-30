@@ -1,3 +1,5 @@
+// Modified by Voltage: use the selected distribution name.
+import '../../shared/branding/app_brand.dart';
 import 'dart:async';
 import 'dart:io';
 
@@ -83,7 +85,7 @@ class VoiceNoteComposerRecorder extends HookConsumerWidget {
         }
       } catch (_) {
         if (context.mounted) {
-          error.value = 'Buzz could not finish the voice note.';
+          error.value = '$appDisplayName could not finish the voice note.';
           isStopping.value = false;
         }
       }
@@ -117,7 +119,7 @@ class VoiceNoteComposerRecorder extends HookConsumerWidget {
         } catch (_) {
           if (active) {
             error.value =
-                'Buzz could not start recording. Check microphone access.';
+                '$appDisplayName could not start recording. Check microphone access.';
           }
         }
       }());

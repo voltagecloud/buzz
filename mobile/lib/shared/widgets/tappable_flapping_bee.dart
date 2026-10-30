@@ -1,4 +1,7 @@
+// Modified by Voltage: label the independent Commons mark accurately.
 import 'dart:math' show cos, pi;
+import '../branding/app_brand.dart';
+import '../branding/commons_mark.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
@@ -25,6 +28,13 @@ class TappableFlappingBee extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    if (isVoltageCommons) {
+      return Semantics(
+        image: true,
+        label: appDisplayName,
+        child: CommonsMark(size: width, color: color),
+      );
+    }
     final animation = useAnimationController(
       duration: const Duration(milliseconds: 480),
     );

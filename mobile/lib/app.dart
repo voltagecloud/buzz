@@ -1,4 +1,6 @@
+// Modified by Voltage: optional independent distribution branding.
 import 'dart:async';
+import 'shared/branding/app_brand.dart';
 import 'shared/widgets/ios_navigation_metrics.dart';
 import 'shared/community/paired_community_landing.dart';
 import 'shared/community/community_loading_surface.dart';
@@ -395,7 +397,7 @@ class App extends HookConsumerWidget {
     return MaterialApp(
       navigatorKey: _mobileRootNavigatorKey,
       navigatorObservers: [voiceNoteRouteObserver],
-      title: 'Buzz',
+      title: appDisplayName,
       theme: AppTheme.light(
         colorScheme: lightScheme,
         topSectionGradient: buzzLightGradient,
@@ -490,7 +492,10 @@ class _SplashScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return const Scaffold(
       body: Center(
-        child: BuzzLoadingIndicator(size: 56, semanticLabel: 'Starting Buzz'),
+        child: BuzzLoadingIndicator(
+          size: 56,
+          semanticLabel: 'Starting $appDisplayName',
+        ),
       ),
     );
   }

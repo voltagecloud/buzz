@@ -1,3 +1,5 @@
+// Modified by Voltage: check both distribution identities and scrollable credits.
+import 'package:buzz/shared/branding/app_brand.dart';
 import 'dart:async';
 import 'dart:io';
 import 'dart:ui' as ui;
@@ -86,12 +88,48 @@ void main() {
         findsOneWidget,
       );
       final beforeScroll = tester.getTopLeft(version).dy;
-      await tester.drag(find.byType(ListView), const Offset(0, 100));
+      await tester.timedDrag(
+        find.byType(ListView),
+        const Offset(0, 20),
+        const Duration(milliseconds: 500),
+      );
       await tester.pumpAndSettle();
       expect(tester.getTopLeft(version).dy, greaterThan(beforeScroll));
       expect(tester.takeException(), isNull);
     });
   }
+
+  testWidgets('Commons exposes independent publisher credit in About', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [savedPrefsProvider.overrideWithValue(prefs)],
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: SettingsPage(
+            profileHeader: const SizedBox.shrink(),
+            identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final about = find.text('About Voltage Commons');
+    if (!isVoltageCommons) {
+      expect(about, findsNothing);
+      return;
+    }
+    await tester.scrollUntilVisible(about, 200);
+    await tester.tap(about);
+    await tester.pumpAndSettle();
+    expect(find.text(appDisplayName), findsOneWidget);
+    expect(find.text(upstreamAttribution), findsOneWidget);
+    expect(find.text('View licenses'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
 
   for (final outcome in ['absent', 'error']) {
     testWidgets('hides notifications while capability loads and is $outcome', (

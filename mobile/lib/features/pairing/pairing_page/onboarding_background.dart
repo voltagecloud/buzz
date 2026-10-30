@@ -1,3 +1,4 @@
+// Modified by Voltage: optional independent Commons distribution.
 part of '../pairing_page.dart';
 
 class _OnboardingBackground extends StatelessWidget {
@@ -12,7 +13,7 @@ class _OnboardingBackground extends StatelessWidget {
       key: const Key('pairing-onboarding-background'),
       decoration: BoxDecoration(
         color: isDark ? const Color(0xFF11181D) : const Color(0xFFE7F0EF),
-        image: isDark
+        image: isDark || isVoltageCommons
             ? null
             : const DecorationImage(
                 // Same supplied artwork and full-image stretch as Buzz 2.0.

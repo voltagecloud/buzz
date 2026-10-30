@@ -1,4 +1,6 @@
+// Modified by Voltage: independent welcome branding.
 import 'dart:async';
+import '../../shared/branding/app_brand.dart';
 import 'dart:math' show sqrt2;
 import 'dart:ui' show ImageFilter;
 

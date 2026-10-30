@@ -7,6 +7,8 @@
 /// half-formed target.
 library;
 
+// Modified by Voltage: accept the independent distribution's OS handoffs.
+import '../branding/app_brand.dart';
 import '../relay/relay_validation.dart';
 
 /// A parsed deep link supported by the app.
@@ -148,7 +150,7 @@ String buildMessageLink({
 /// parameters and fragments are rejected so malformed or ambiguous links never
 /// become navigation targets.
 ChannelDeepLink? parseChannelDeepLink(Uri uri) {
-  if (uri.scheme != 'buzz' || uri.host != 'channel') return null;
+  if (!_isAppScheme(uri.scheme) || uri.host != 'channel') return null;
   if (uri.hasQuery ||
       uri.hasFragment ||
       uri.userInfo.isNotEmpty ||
@@ -174,7 +176,7 @@ ChannelDeepLink? parseChannelDeepLink(Uri uri) {
 /// shape: no path, fragment, credentials, duplicate or unknown parameters; a
 /// UUID channel; and 64-character hexadecimal message/thread event IDs.
 MessageDeepLink? parseMessageDeepLink(Uri uri) {
-  if (uri.scheme != 'buzz' || uri.host != 'message') return null;
+  if (!_isAppScheme(uri.scheme) || uri.host != 'message') return null;
   if (uri.path.isNotEmpty ||
       uri.hasFragment ||
       uri.userInfo.isNotEmpty ||
@@ -225,7 +227,7 @@ MessageDeepLink? parseMessageDeepLink(Uri uri) {
 InviteDeepLink? parseInviteDeepLink(Uri uri) {
   if (uri.hasFragment || uri.userInfo.isNotEmpty) return null;
 
-  if (uri.scheme == 'buzz') {
+  if (_isAppScheme(uri.scheme)) {
     if (uri.host != 'join') return null;
     final relay = uri.queryParameters['relay'];
     final code = uri.queryParameters['code'];
@@ -313,7 +315,8 @@ class EntityDeepLink extends BuzzDeepLink {
 
 /// Parse canonical `buzz://repo|pr|issue` permalinks for inline presentation.
 EntityDeepLink? parseEntityDeepLink(Uri uri) {
-  if (uri.scheme != 'buzz' || !{'repo', 'pr', 'issue'}.contains(uri.host)) {
+  if (!_isAppScheme(uri.scheme) ||
+      !{'repo', 'pr', 'issue'}.contains(uri.host)) {
     return null;
   }
   if (uri.path.isNotEmpty ||
@@ -352,3 +355,7 @@ EntityDeepLink? parseEntityDeepLink(Uri uri) {
     eventId: eventId?.toLowerCase(),
   );
 }
+
+// Canonical shared links remain buzz:// for interoperation with other clients.
+bool _isAppScheme(String scheme) =>
+    scheme == 'buzz' || (isVoltageCommons && scheme == 'voltage-workspace');

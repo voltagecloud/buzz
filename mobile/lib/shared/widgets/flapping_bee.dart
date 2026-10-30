@@ -1,4 +1,7 @@
+// Modified by Voltage: use the Commons mark in the Voltage distribution.
 import 'dart:math' show min;
+import '../branding/app_brand.dart';
+import '../branding/commons_mark.dart';
 
 import 'package:flutter/material.dart';
 
@@ -40,6 +43,13 @@ class FlappingBee extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (isVoltageCommons) {
+      return SizedBox(
+        width: width,
+        height: width * 309 / 466,
+        child: CommonsMark(size: width * 309 / 466, color: color),
+      );
+    }
     return RepaintBoundary(
       child: CustomPaint(
         size: Size(width, width * 309 / 466),

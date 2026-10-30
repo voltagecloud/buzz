@@ -1,3 +1,5 @@
+// Modified by Voltage: attribute the age restriction to the selected app.
+import '../../shared/branding/app_brand.dart';
 import 'package:flutter/material.dart';
 
 import '../../shared/theme/theme.dart';
@@ -26,7 +28,7 @@ class AgeRestrictionPage extends StatelessWidget {
                   ),
                   const SizedBox(height: Grid.lg),
                   Text(
-                    'Buzz is for people 18 and older',
+                    '$appDisplayName is for people 18 and older',
                     textAlign: TextAlign.center,
                     style: context.textTheme.headlineSmall?.copyWith(
                       fontWeight: FontWeight.w600,
@@ -34,7 +36,9 @@ class AgeRestrictionPage extends StatelessWidget {
                   ),
                   const SizedBox(height: Grid.sm),
                   Text(
-                    "You must be 18 or older to use Buzz under Buzz's Terms.",
+                    isVoltageCommons
+                        ? 'You must be 18 or older to use this app.'
+                        : "You must be 18 or older to use Buzz under Buzz's Terms.",
                     textAlign: TextAlign.center,
                     style: context.textTheme.bodyLarge?.copyWith(
                       color: context.colors.onSurfaceVariant,

@@ -1,3 +1,5 @@
+// Modified by Voltage: permission errors identify the selected app.
+import '../../shared/branding/app_brand.dart';
 import 'dart:async';
 import 'dart:collection';
 import 'dart:io';

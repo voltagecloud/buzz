@@ -1,3 +1,5 @@
+// Modified by Voltage: use the selected distribution name.
+import '../branding/app_brand.dart';
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:local_auth/local_auth.dart';
@@ -25,7 +27,7 @@ class LocalSensitiveActionAuthorizer implements SensitiveActionAuthorizer {
   Future<DeviceAuthResult> authorizeIdentityAction({
     required bool biometricOnly,
   }) => _authorize(
-    localizedReason: 'Confirm sending your Buzz identity to desktop',
+    localizedReason: 'Confirm sending your $appDisplayName identity to desktop',
     biometricOnly: biometricOnly,
   );
 
