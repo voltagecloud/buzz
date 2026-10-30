@@ -1,3 +1,4 @@
+// Modified by Voltage: optional independent Commons distribution.
 #include? "Pods/Target Support Files/Pods-Runner/Pods-Runner.release.xcconfig"
 #include "Generated.xcconfig"
 
@@ -6,6 +7,9 @@
 // files by writing `mobile/ios/Flutter/AppOverrides.xcconfig` (gitignored).
 BUNDLE_IDENTIFIER = xyz.block.buzz.mobile
 APP_DISPLAY_NAME = Buzz
+BUZZ_APP_ICON_NAME = AppIcon
+BUZZ_LAUNCH_STORYBOARD = LaunchScreen
+BUZZ_URL_SCHEME = buzz
 CODE_SIGN_STYLE = Automatic
 CODE_SIGN_IDENTITY = iPhone Developer
 BUZZ_DEVELOPMENT_TEAM = EYF346PHUG

@@ -7,6 +7,8 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../theme/theme.dart';
+// Modified by Voltage: the Commons mark has no bee-eye animation.
+import '../branding/app_brand.dart';
 import 'flapping_bee.dart';
 
 /// Replaces the standard pull-to-refresh spinner with Buzz's loading bee.
@@ -392,7 +394,7 @@ class BeeRefreshIndicator extends HookConsumerWidget {
                                       : null,
                                 ),
                               ),
-                              if (showEyeEmoji)
+                              if (showEyeEmoji && !isVoltageCommons)
                                 Positioned(
                                   top: 2,
                                   left: 0,

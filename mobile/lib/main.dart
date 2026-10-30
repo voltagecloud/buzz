@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+// Modified by Voltage: include upstream distribution license notices.
 import 'app.dart';
+import 'shared/branding/app_brand.dart';
 import 'features/age_gate/age_signal_push_bootstrap.dart';
 import 'features/invites/invite_join_provider.dart';
 import 'shared/push/push_bridge.dart';
@@ -13,6 +15,7 @@ void main() => runBuzzApp(const App());
 
 Future<void> runBuzzApp(Widget app) async {
   WidgetsFlutterBinding.ensureInitialized();
+  registerDistributionLicenses();
   installBuzzPushMethodHandler();
   await syncPendingBuzzPushNotificationResponse();
 

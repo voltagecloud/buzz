@@ -5,6 +5,8 @@ Flutter mobile client for Buzz.
 See [VISION_MOBILE.md](../VISION_MOBILE.md) for intended behavior and
 architecture.
 
+For Voltage's independent iPhone build, see [Voltage Commons](../voltage/mobile/README.md).
+
 ## Setup
 
 Use the Flutter SDK pinned by the repository. Activate Hermit from the repo

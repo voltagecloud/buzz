@@ -323,7 +323,8 @@ String _cameraErrorMessage(Object error) {
     return switch (error.code) {
       'CameraAccessDenied' ||
       'CameraAccessDeniedWithoutPrompt' ||
-      'CameraAccessRestricted' => 'Camera access is turned off for Buzz.',
+      'CameraAccessRestricted' =>
+        'Camera access is turned off for $appDisplayName.',
       'no-cameras' => 'Camera isn’t available on this device.',
       _ => 'Camera couldn’t start. Try again.',
     };

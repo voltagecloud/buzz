@@ -1,4 +1,7 @@
+// Modified by Voltage: optional Commons welcome identity.
 import 'dart:ui' as ui;
+import '../../../shared/branding/app_brand.dart';
+import '../../../shared/branding/commons_mark.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -38,7 +41,7 @@ class _OnboardingWordmarkState extends State<OnboardingWordmark>
     _motionEnabled =
         !MediaQuery.disableAnimationsOf(context) &&
         TickerMode.valuesOf(context).enabled;
-    if (_motionEnabled && !_loading) {
+    if (!isVoltageCommons && _motionEnabled && !_loading) {
       _loading = true;
       _loadArtwork();
     }
@@ -104,6 +107,34 @@ class _OnboardingWordmarkState extends State<OnboardingWordmark>
 
   @override
   Widget build(BuildContext context) {
+    if (isVoltageCommons) {
+      final ink = widget.color ?? const Color(0xFF163B46);
+      return Semantics(
+        label: appDisplayName,
+        header: true,
+        child: ExcludeSemantics(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              CommonsMark(size: 64, color: ink),
+              const SizedBox(height: 8),
+              Flexible(
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Text(
+                    appDisplayName,
+                    style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                      color: ink,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
     return Semantics(
       label: 'Buzz',
       image: true,
