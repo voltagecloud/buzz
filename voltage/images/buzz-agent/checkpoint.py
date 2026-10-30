@@ -89,13 +89,13 @@ def public_origin(repo):
     return urlunsplit((parsed.scheme, host, parsed.path, '', ''))
 
 
-def scan(directory, *, history=False, negatives=b''):
+def scan(directory, *, history=False, revisions=b''):
     """Refuse a credential the agent added: commits not on a remote, or files.
 
     History and files already on a remote are on the forge, where the agent's
-    token can read them, so the scan leaves them out. `negatives` are the
-    `^<commit>` origin tips of an origin-based save: its bundle holds every
-    commit beyond them, so the scan covers exactly those."""
+    token can read them, so the scan leaves them out. `revisions` are an
+    origin-based save's bundle revisions, so the scan covers exactly the
+    commits it uploads."""
     # Immutable image configuration prevents workspace allowlists from bypassing
     # the scan. Scanner output can contain secrets even on errors, so suppress it.
     previous = STEP[0]
@@ -106,8 +106,8 @@ def scan(directory, *, history=False, negatives=b''):
                '--gitleaks-ignore-path', '/dev/null', '--ignore-gitleaks-allow',
                '--no-banner', '--redact', '--timeout', '60']
     if history:
-        command += ['--log-opts=--all HEAD ' + (' '.join(negatives.decode().split())
-                                                if negatives else '--not --remotes')]
+        command += ['--log-opts=' + (' '.join(revisions.decode().split())
+                                     if revisions else '--all HEAD --not --remotes')]
     run(*command, timeout=65, env=env)
     step(previous)
 
@@ -200,7 +200,8 @@ def origin_base(repo, listing):
 
 
 def local_refs(repo, origin_refs):
-    """Branches, and tags origin lacks, for restore to recreate exactly.
+    """Branches, and tags origin lacks, for the bundle and for restore to
+    recreate exactly.
 
     Annotated tag objects travel by content: a bundle omits a ref whose target
     origin already has, and a tag object is not on origin."""
@@ -247,7 +248,17 @@ def pack(workspace, output):
                 total += sum(len(content) for content in record['tags'].values())
             destination = stage / 'repositories' / str(index)
             (destination / 'files').mkdir(parents=True)
-            scan(repo, history=True, negatives=tips)
+            if base == 'origin':
+                # Only what the agent owns, beyond origin's branches: never
+                # origin's remote-tracking refs or tags, whose boundaries would
+                # sit on branches origin may delete before the restore.
+                owned = ['HEAD'] + [ref for ref, _ in record['refs']]
+                if git(repo, 'for-each-ref', '--format=%(refname)', 'refs/stash').strip():
+                    owned.append('refs/stash')
+                revisions = ''.join(name + '\n' for name in owned).encode() + tips
+            else:
+                revisions = b''
+            scan(repo, history=True, revisions=revisions)
             review_changes(repo, review / str(index))
             bundle = destination / 'history.bundle'
             if base == 'bundle':
@@ -257,8 +268,8 @@ def pack(workspace, output):
             else:
                 # Only commits origin lacks, and only files that differ from HEAD.
                 # git refuses an empty bundle, so a fully pushed repository has none.
-                if git(repo, 'rev-list', '--max-count=1', '--all', 'HEAD', '--stdin', input=tips).strip():
-                    git(repo, 'bundle', 'create', str(bundle), '--all', 'HEAD', '--stdin', input=tips)
+                if git(repo, 'rev-list', '--max-count=1', '--stdin', input=revisions).strip():
+                    git(repo, 'bundle', 'create', str(bundle), '--stdin', input=revisions)
                 names = (git(repo, 'ls-files', '-z', '--others', '--exclude-standard') + b'\0'
                          + git(repo, 'diff', '--name-only', '--no-renames', '-z', 'HEAD'))
             if bundle.exists():
@@ -460,8 +471,36 @@ def restore_refs(repo, record):
         git(repo, 'update-ref', ref, value)
 
 
+def prerequisites(bundle):
+    """The commits a bundle builds on, from its header."""
+    with open(bundle, 'rb') as stream:
+        if stream.readline() not in (b'# v2 git bundle\n', b'# v3 git bundle\n'):
+            raise ValueError('Unsupported checkpoint bundle')
+        found = []
+        for _ in range(MAX_FILES):
+            line = stream.readline(256)
+            if line in (b'\n', b''):
+                return found
+            if line.startswith(b'-'):
+                value = line[1:].split(b' ', 1)[0].strip().decode()
+                if not re.fullmatch('[0-9a-f]{40,64}', value):
+                    raise ValueError('Invalid checkpoint bundle prerequisite')
+                found.append(value)
+    raise ValueError('Checkpoint bundle header is too large')
+
+
 def fetch_bundle(repo, bundle):
     """Add a checkpoint's unpushed commits, and their refs, to an origin clone."""
+    # A prerequisite can leave origin's branches after the save, when a branch
+    # is deleted or force-pushed; GitHub still serves such a commit by name.
+    found = git(repo, 'cat-file', '--batch-check=%(objectname) %(objecttype)',
+                input=''.join(value + '\n' for value in prerequisites(bundle)).encode())
+    missing = [line.split(' ', 1)[0] for line in found.decode().splitlines()
+               if not line.endswith(' commit')]
+    if missing:
+        git(repo, '-c', 'http.lowSpeedLimit=1000', '-c', 'http.lowSpeedTime=60', 'fetch',
+            '--no-tags', '--no-write-fetch-head', 'origin', *missing, timeout=None,
+            env=dict(os.environ, GIT_TERMINAL_PROMPT='0'))
     specs = []
     for line in git(repo, 'bundle', 'list-heads', str(bundle)).decode().splitlines():
         name = line.split(' ', 1)[1] if ' ' in line else ''

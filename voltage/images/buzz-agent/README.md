@@ -64,7 +64,8 @@ A checkpoint holds at most 256 MiB of source and 50,000 files.
 A repository whose HTTPS `origin` shares a branch tip with it, as `git ls-remote` reports at save time, is saved against origin: only commits beyond origin's branches, changed and untracked files, deletions, local branches, and tags origin lacks (annotated tag objects by content).
 The save asks every origin at once, using the normalized URL and global Git configuration that restore uses, with one 20-second deadline for all of them.
 Its restore clones `origin` with the Sandbox's GitHub credential, so pushed content of any size does not count against the budget.
-Restore fails if origin has since lost a commit the checkpoint builds on, for example after a force-push.
+The bundle holds only what the agent owns: HEAD, local branches, the stash, and tags origin lacks, beyond origin's branch tips.
+If a branch the checkpoint builds on was deleted or force-pushed after the save, restore fetches its commit from origin by name, which GitHub still serves; restore fails only if origin no longer has the commit.
 Any other repository (no remote, an SSH origin, origin unreachable in time, or nothing pushed) is saved whole: full history and every file.
 A checkpoint without an origin-based repository keeps manifest version 1, which older images restore.
 

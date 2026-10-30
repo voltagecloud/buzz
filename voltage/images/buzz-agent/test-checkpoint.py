@@ -284,6 +284,65 @@ with tempfile.TemporaryDirectory() as temp:
     assert (root/'outside.txt').read_text() == 'outside\n'
     print('PASS: origin restore replaces retargeted symlinks, symlinks turned files, and file/directory swaps in place; unpushed tags, annotated tag objects and branches survive; deletions never follow a symlink')
 
+    # The bundle holds only what the agent owns, never origin's tags or
+    # remote-tracking refs. Restore fetches a prerequisite origin stopped
+    # advertising: here the branch the agent built on is deleted after the save.
+    topic_upstream = root/'topic-upstream'
+    topic_upstream.mkdir()
+    git(topic_upstream,'init','-b','main')
+    git(topic_upstream,'config','user.name','Checkpoint Fixture')
+    git(topic_upstream,'config','user.email','fixture@example.invalid')
+    # GitHub serves any commit in the repository by name.
+    git(topic_upstream,'config','uploadpack.allowAnySHA1InWant','true')
+    (topic_upstream/'base.txt').write_text('base\n')
+    git(topic_upstream,'add','.')
+    git(topic_upstream,'commit','-m','test: base')
+    git(topic_upstream,'tag','v1')
+    # A release tag on a commit no branch reaches, as bifrost's releases are.
+    git(topic_upstream,'checkout','-q','-b','release')
+    (topic_upstream/'release.txt').write_text('release\n')
+    git(topic_upstream,'add','.')
+    git(topic_upstream,'commit','-m','test: release')
+    git(topic_upstream,'tag','v2')
+    git(topic_upstream,'checkout','-q','main')
+    git(topic_upstream,'branch','-D','release')
+    git(topic_upstream,'checkout','-q','-b','topic')
+    (topic_upstream/'topic.txt').write_text('topic\n')
+    git(topic_upstream,'add','.')
+    git(topic_upstream,'commit','-m','test: topic')
+    git(topic_upstream,'checkout','-q','main')
+    topic = workspace/'topic'
+    subprocess.check_call(['git','clone','-q',str(topic_upstream),str(topic)],stderr=subprocess.DEVNULL)
+    git(topic,'remote','set-url','origin','https://github.com/example/topic.git')
+    # file:// clones over the fetch protocol, so a restore clone lacks commits
+    # no ref reaches; a plain path would copy the whole object store.
+    git(root,'config','--global','url.file://'+str(topic_upstream)+'.insteadOf','https://github.com/example/topic.git')
+    git(topic,'config','user.name','Checkpoint Fixture')
+    git(topic,'config','user.email','fixture@example.invalid')
+    git(topic,'checkout','-q','-b','agent','origin/topic')
+    (topic/'agent.txt').write_text('built on topic\n')
+    git(topic,'add','agent.txt')
+    git(topic,'commit','-m','test: build on topic')
+    saved = checkpoint.pack(workspace,root/'topic.tar.gz')
+    index = [r['path'] for r in saved['repositories']].index('topic')
+    unpacked = root/'topic-unpacked'
+    with tarfile.open(root/'topic.tar.gz') as archive:
+        archive.extractall(unpacked, filter='data')
+    heads = git(topic,'bundle','list-heads',str(unpacked/'snapshot/repositories'/str(index)/'history.bundle'))
+    assert git(topic,'rev-parse','-q','--verify','refs/tags/v2'), 'fixture clone lacks the release tag'
+    assert 'refs/remotes/' not in heads and 'refs/tags/' not in heads, heads
+    git(topic_upstream,'branch','-D','topic')
+    lost = git(topic,'rev-parse','origin/topic')
+    probe = root/'topic-probe'
+    git(root,'clone','-q','--no-checkout','https://github.com/example/topic.git',str(probe))
+    assert subprocess.run(['git','-C',str(probe),'cat-file','-e',lost]).returncode != 0, 'the clone still has the deleted branch'
+    checkpoint.restore(root/'topic.tar.gz',root/'restored-topic')
+    restored = root/'restored-topic/topic'
+    assert git(restored,'rev-parse','HEAD') == git(topic,'rev-parse','HEAD')
+    assert (restored/'topic.txt').read_text() == 'topic\n'
+    assert (restored/'agent.txt').read_text() == 'built on topic\n'
+    print('PASS: the bundle excludes origin tags and remote-tracking refs; restore fetches a prerequisite whose branch origin deleted after the save')
+
     # Unreachable origins cost one shared deadline, not one per repository.
     server = socket.socket()
     server.bind(('127.0.0.1', 0))
