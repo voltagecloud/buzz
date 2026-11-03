@@ -10,6 +10,12 @@ Every commit an agent makes is signed with a key that is on your GitHub account,
 
 ## How it works
 
+An unchanged phone app can trigger registered agents through [server mention launches](../docs/server-mention-launch.md).
+This requires the manager feature to be enabled; no mobile rebuild is required.
+
+The diagrams and steps below describe the Voltage desktop app's explicit control-request path.
+For the unchanged phone app, follow the server mention launch guide linked above.
+
 ```mermaid
 flowchart LR
     subgraph laptop["Developer's machine"]

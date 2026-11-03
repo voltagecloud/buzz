@@ -69,6 +69,10 @@ pub struct ServeArgs {
     /// `buzz-backend-relay` clients, which send none of them.
     #[arg(long, env = "BUZZ_SANDBOX_PROVIDER_CONFIG")]
     sandbox_provider_config: Option<String>,
+    /// Start registered agents from ordinary owner mentions. Requires namespace
+    /// Secret list/get/create/update permissions; no mobile client changes.
+    #[arg(long, env = "BUZZ_SANDBOX_MENTION_LAUNCH", default_value_t = false)]
+    mention_launch: bool,
     /// GitHub REST API base for the enrollment login check.
     #[arg(long, env = "BUZZ_GITHUB_API_URL", default_value = enroll::DEFAULT_GITHUB_API_URL)]
     github_api_url: String,
@@ -119,7 +123,14 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
     if let Some(broker) = broker {
         let stop = CancellationToken::new();
         let relay = async {
-            run(manager, &args.relay_url, auth_tag, stop.cancelled()).await;
+            run_services(
+                manager,
+                &args.relay_url,
+                auth_tag,
+                args.mention_launch,
+                stop.cancelled(),
+            )
+            .await;
             stop.cancel();
         };
         let signal = async {
@@ -131,9 +142,41 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
         let (result, (), ()) = join!(broker.run(stop.clone()), relay, signal);
         result?;
     } else {
-        run(manager, &args.relay_url, auth_tag, shutdown()).await;
+        run_services(
+            manager,
+            &args.relay_url,
+            auth_tag,
+            args.mention_launch,
+            shutdown(),
+        )
+        .await;
     }
     Ok(())
+}
+
+/// The mention listener shares the manager's lifetime, configuration and keys.
+pub(crate) async fn run_services(
+    manager: Arc<Manager>,
+    relay: &str,
+    auth: Option<Tag>,
+    mention_launch: bool,
+    shutdown: impl Future<Output = ()>,
+) {
+    let stop = CancellationToken::new();
+    let signal = async {
+        shutdown.await;
+        stop.cancel();
+    };
+    let mentions = async {
+        if mention_launch {
+            crate::mentions::run(Arc::clone(&manager), relay, stop.clone()).await;
+        }
+    };
+    join!(
+        run(Arc::clone(&manager), relay, auth, stop.cancelled()),
+        mentions,
+        signal
+    );
 }
 
 /// Never echoes the key or the file's content.

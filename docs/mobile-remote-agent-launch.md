@@ -1,5 +1,8 @@
 # Start remote agents from mobile
 
+For an unchanged App Store client, use [server mention launches](server-mention-launch.md).
+The protocol below describes the optional modified-client path.
+
 Mention an owned Remote workspace agent from mobile to start its session in that thread.
 The desktop can be closed after the agent has registered its launch settings with the manager.
 

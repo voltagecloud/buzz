@@ -37,6 +37,8 @@ pub struct State {
     pub fail_secret_creates: usize,
     /// Store the Secret, then fail this many create responses with a 500.
     pub fail_secret_create_responses: usize,
+    /// Fail Secret updates before writing, for durable inbox recovery tests.
+    pub fail_secret_updates: usize,
     /// Fail Pod-owned credential Secret creates, leaving recovery journals intact.
     pub fail_binding_secret_creates: usize,
     /// Fail this many Sandbox creates with a 500.
@@ -186,6 +188,10 @@ impl State {
                 ok(&json!({"apiVersion":"v1","kind":"Status","status":"Success"}))
             }
             ["api", "v1", "namespaces", _, "secrets", name] if method == Method::PUT => {
+                if self.fail_secret_updates > 0 {
+                    self.fail_secret_updates -= 1;
+                    return status(500, "InternalError");
+                }
                 let Some(prior) = self.secrets.get(*name) else {
                     return status(404, "NotFound");
                 };
@@ -197,6 +203,8 @@ impl State {
                     return status(409, "Conflict");
                 }
                 secret.metadata.uid = prior["metadata"]["uid"].as_str().map(str::to_owned);
+                secret.metadata.creation_timestamp =
+                    serde_json::from_value(prior["metadata"]["creationTimestamp"].clone()).unwrap();
                 secret.metadata.resource_version = Some(self.next_rv());
                 secret.data.get_or_insert_with(Default::default).extend(
                     secret
@@ -214,6 +222,19 @@ impl State {
                 Some(secret) => ok(secret),
                 None => status(404, "NotFound"),
             },
+            ["api", "v1", "namespaces", namespace, "secrets"] if method == Method::GET => {
+                let items: Vec<_> = self
+                    .secrets
+                    .values()
+                    .filter(|secret| {
+                        secret["metadata"]["namespace"] == *namespace
+                            && secret["metadata"]["labels"]["buzz.voltage.cloud/mobile-launch"]
+                                == "v1"
+                    })
+                    .cloned()
+                    .collect();
+                ok(&json!({"apiVersion":"v1", "kind":"SecretList", "metadata":{}, "items":items}))
+            }
             ["api", "v1", "namespaces", _, "secrets"] if method == Method::POST => {
                 if self.fail_secret_creates > 0 {
                     self.fail_secret_creates -= 1;
@@ -241,6 +262,9 @@ impl State {
                 });
                 secret.metadata.resource_version = Some(self.next_rv());
                 secret.metadata.uid = Some(self.next_uid("secret"));
+                secret.metadata.creation_timestamp = Some(
+                    k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(chrono::Utc::now()),
+                );
                 let stored = serde_json::to_value(&secret).unwrap();
                 self.secrets.insert(name, stored.clone());
                 if self.fail_secret_create_responses > 0 {

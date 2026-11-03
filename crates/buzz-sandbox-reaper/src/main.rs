@@ -14,6 +14,7 @@ mod config;
 mod enroll;
 mod evidence;
 mod manager;
+mod mentions;
 mod mobile_launch;
 mod plan;
 mod profile;
