@@ -9,8 +9,31 @@ use crate::error::CliError;
 use crate::validate::{read_or_stdin, validate_hex64};
 use crate::{AgentsCmd, RespondToArg};
 
+#[cfg(test)]
+#[path = "agents_sharing_tests.rs"]
+mod sharing_tests;
+
 pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), CliError> {
     match command {
+        AgentsCmd::Share { agent, channel } => sharing(client, &agent, channel, true).await,
+        AgentsCmd::Unshare { agent, channel } => sharing(client, &agent, channel, false).await,
+        AgentsCmd::Sharing {
+            agent,
+            channel,
+            owner,
+        } => {
+            validate_hex64(&agent)?;
+            let agent = PublicKey::from_hex(&agent).map_err(|e| CliError::Usage(e.to_string()))?;
+            let owner = owner.unwrap_or_else(|| client.keys().public_key().to_hex());
+            validate_hex64(&owner)?;
+            let output = client
+                .query(&json!({"kinds":[buzz_core::kind::KIND_AGENT_CHANNEL_GRANT],
+                "authors":[owner], "#h":[channel],
+                "#d":[buzz_sdk::sharing::Grant::coordinate(agent, channel)], "limit":1}))
+                .await?;
+            println!("{output}");
+            Ok(())
+        }
         AgentsCmd::DraftCreate {
             channel,
             display_name,
@@ -165,6 +188,42 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
 
         AgentsCmd::Archived => cmd_archived(client).await,
     }
+}
+
+async fn sharing(
+    client: &BuzzClient,
+    agent: &str,
+    channel: uuid::Uuid,
+    enabled: bool,
+) -> Result<(), CliError> {
+    validate_hex64(agent)?;
+    if client.auth_tag_owner_hex().is_some() {
+        return Err(CliError::Auth(
+            "sharing requires the human owner's signing key".into(),
+        ));
+    }
+    let agent = PublicKey::from_hex(agent).map_err(|e| CliError::Usage(e.to_string()))?;
+    let raw = client
+        .query(&json!({"kinds":[0], "authors":[agent], "limit":1}))
+        .await?;
+    let profiles: Vec<nostr::Event> = serde_json::from_str(&raw)
+        .map_err(|e| CliError::Other(format!("invalid agent profile response: {e}")))?;
+    let profile = profiles
+        .first()
+        .ok_or_else(|| CliError::Auth("agent has no current profile".into()))?;
+    if profile.pubkey != agent
+        || buzz_sdk::sharing::profile_owner(profile, nostr::Timestamp::now().as_secs()).ok()
+            != Some(client.keys().public_key())
+    {
+        return Err(CliError::Auth(
+            "only the verified human owner may change sharing".into(),
+        ));
+    }
+    let builder = buzz_sdk::sharing::Grant::builder(agent, channel, enabled)
+        .map_err(|e| CliError::Usage(e.to_string()))?;
+    let event = client.sign_event(builder)?;
+    println!("{}", client.submit_event(event).await?);
+    Ok(())
 }
 
 /// Require `BUZZ_AUTH_TAG` and parse the owner pubkey from it. Used only by

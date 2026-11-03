@@ -301,6 +301,33 @@ impl RespondToArg {
 
 #[derive(Subcommand)]
 pub enum AgentsCmd {
+    /// Let current members invoke your agent in one channel using explicit mentions
+    Share {
+        /// Agent pubkey (hex); you must sign as its human owner
+        agent: String,
+        /// Channel UUID; owner and agent must both be members
+        #[arg(long)]
+        channel: uuid::Uuid,
+    },
+    /// Revoke channel invocation by publishing a disabled grant head
+    Unshare {
+        /// Agent pubkey (hex)
+        agent: String,
+        /// Channel UUID
+        #[arg(long)]
+        channel: uuid::Uuid,
+    },
+    /// Read this owner's current sharing grant for one agent and channel
+    Sharing {
+        /// Agent pubkey (hex)
+        agent: String,
+        /// Channel UUID
+        #[arg(long)]
+        channel: uuid::Uuid,
+        /// Human owner pubkey; defaults to the signing identity
+        #[arg(long)]
+        owner: Option<String>,
+    },
     /// Open a prefilled create-agent form in the owner's Buzz Desktop
     DraftCreate {
         /// Current channel UUID; the new agent is added here after save
@@ -2436,7 +2463,10 @@ mod tests {
                 "archived",
                 "draft-create",
                 "draft-update",
-                "unarchive"
+                "share",
+                "sharing",
+                "unarchive",
+                "unshare"
             ]
         );
         assert_eq!(
@@ -2579,7 +2609,7 @@ mod tests {
     #[test]
     fn subcommand_counts_are_stable() {
         let expected: Vec<(&str, usize)> = vec![
-            ("agents", 5),
+            ("agents", 8),
             ("canvas", 4),
             ("channels", 16),
             ("dms", 4),
