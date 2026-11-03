@@ -3072,6 +3072,10 @@ async fn run_harness(
         .await
         .map_err(|e| anyhow::anyhow!("channel discovery error: {e}"))?;
 
+    if let Some(binding) = &config.bound_session {
+        binding.validate_channel_metadata(channel_info_map.get(&binding.channel_id()))?;
+    }
+
     tracing::info!("discovered {} channel(s)", channel_info_map.len());
     let channel_ids: Vec<Uuid> = channel_info_map.keys().copied().collect();
 
@@ -3532,7 +3536,7 @@ async fn run_harness(
                                     observer.as_ref(),
                                     owner_hex,
                                     relay.event_publisher(),
-                                    config.bound_session.as_ref().map(|binding| binding.channel_id),
+                                    config.bound_session.as_ref().map(|binding| binding.channel_id()),
                                 );
                             } else {
                                 tracing::warn!("observer control frame received but no owner resolved — dropping");
@@ -4579,11 +4583,12 @@ fn bound_session_admits(
     let Some(binding) = binding else {
         return true;
     };
-    if buzz_event.channel_id != binding.channel_id {
+    if buzz_event.channel_id != binding.channel_id() {
         return false;
     }
     match routed_scope {
         Some(scope) => binding.accepts(scope),
+        None if matches!(binding, config::BoundSession::DirectMessage { .. }) => true,
         None => {
             u32::from(buzz_event.event.kind.as_u16()) != KIND_STREAM_MESSAGE
                 || binding.accepts(&scope::SessionScope::derive(
@@ -7273,10 +7278,38 @@ mod bound_session_admission_tests {
     }
 
     fn binding() -> config::BoundSession {
-        config::BoundSession {
+        config::BoundSession::Thread {
             channel_id: Uuid::new_v4(),
             thread_root: "a".repeat(64),
         }
+    }
+
+    #[test]
+    fn a_bound_dm_admits_conversation_events_but_no_channel_thread() {
+        let channel = Uuid::new_v4();
+        let binding = config::BoundSession::DirectMessage {
+            dm_channel_id: channel,
+        };
+        for root in [None, Some("a".repeat(64))] {
+            let event = buzz_event(channel, 9, "plain owner DM", root.as_deref());
+            assert!(bound_session_admits(Some(&binding), &event, None));
+            let dm = scope::SessionScope::derive(
+                scope::SessionPolicy::Thread,
+                channel,
+                true,
+                &event.event,
+            );
+            assert!(bound_session_admits(Some(&binding), &event, Some(&dm)));
+            let thread = scope::SessionScope::derive(
+                scope::SessionPolicy::Thread,
+                channel,
+                false,
+                &event.event,
+            );
+            assert!(!bound_session_admits(Some(&binding), &event, Some(&thread)));
+        }
+        let foreign = buzz_event(Uuid::new_v4(), 9, "another DM", None);
+        assert!(!bound_session_admits(Some(&binding), &foreign, None));
     }
 
     /// The pre-check runs before `!shutdown` / `!cancel`, so an owner command
@@ -7287,7 +7320,7 @@ mod bound_session_admission_tests {
         let foreign_root = "b".repeat(64);
         for command in ["!shutdown", "!cancel"] {
             let foreign_thread = buzz_event(
-                binding.channel_id,
+                binding.channel_id(),
                 KIND_STREAM_MESSAGE as u16,
                 command,
                 Some(&foreign_root),
@@ -7304,7 +7337,7 @@ mod bound_session_admission_tests {
                 Uuid::new_v4(),
                 KIND_STREAM_MESSAGE as u16,
                 command,
-                Some(&binding.thread_root),
+                binding.thread_root(),
             );
             assert!(!bound_session_admits(
                 Some(&binding),
@@ -7313,10 +7346,10 @@ mod bound_session_admission_tests {
             ));
 
             let in_thread = buzz_event(
-                binding.channel_id,
+                binding.channel_id(),
                 KIND_STREAM_MESSAGE as u16,
                 command,
-                Some(&binding.thread_root),
+                binding.thread_root(),
             );
             assert!(bound_session_admits(Some(&binding), &in_thread, None));
         }
@@ -7326,14 +7359,14 @@ mod bound_session_admission_tests {
     fn only_in_thread_prompts_are_admitted() {
         let binding = binding();
         let in_scope = scope::SessionScope::Thread {
-            channel_id: binding.channel_id,
-            root_event_id: binding.thread_root.clone(),
+            channel_id: binding.channel_id(),
+            root_event_id: binding.thread_root().unwrap().to_owned(),
         };
         let reply = buzz_event(
-            binding.channel_id,
+            binding.channel_id(),
             KIND_STREAM_MESSAGE as u16,
             "@agent continue",
-            Some(&binding.thread_root),
+            binding.thread_root(),
         );
         assert!(bound_session_admits(Some(&binding), &reply, None));
         assert!(bound_session_admits(
@@ -7347,11 +7380,11 @@ mod bound_session_admission_tests {
             foreign_channel_id,
             KIND_STREAM_MESSAGE as u16,
             "@agent start",
-            Some(&binding.thread_root),
+            binding.thread_root(),
         );
         let foreign_scope = scope::SessionScope::Thread {
             channel_id: foreign_channel_id,
-            root_event_id: binding.thread_root.clone(),
+            root_event_id: binding.thread_root().unwrap().to_owned(),
         };
         assert!(!bound_session_admits(
             Some(&binding),
@@ -7367,10 +7400,10 @@ mod bound_session_admission_tests {
         // An edit carries its thread on the original, so the pre-check can
         // only check its channel; the routed scope decides admission.
         let edit_kind = buzz_core::kind::KIND_STREAM_MESSAGE_EDIT as u16;
-        let edit = buzz_event(binding.channel_id, edit_kind, "@agent edited", None);
+        let edit = buzz_event(binding.channel_id(), edit_kind, "@agent edited", None);
         assert!(bound_session_admits(Some(&binding), &edit, None));
         let edited_foreign_thread = scope::SessionScope::Thread {
-            channel_id: binding.channel_id,
+            channel_id: binding.channel_id(),
             root_event_id: "c".repeat(64),
         };
         assert!(!bound_session_admits(

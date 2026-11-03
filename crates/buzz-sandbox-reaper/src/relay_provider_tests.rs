@@ -223,3 +223,47 @@ fn sandbox_provider_config_is_checked_at_startup() {
         assert!(error.contains(expected), "{text}: {error}");
     }
 }
+
+/// Real encrypted provider requests reach the manager and bind one owner DM.
+#[tokio::test]
+async fn direct_message_deploy_reuses_one_bound_workspace_through_the_manager() {
+    let mut relay = FakeRelay::start().await;
+    let manager_keys = keys("11");
+    let (cluster, stop, server) = start_manager(&mut relay, &manager_keys).await;
+    let channel = "0b6c1f0e-2a7d-4c1e-9f3a-5d2b8e4c7a10";
+    let mut deploy = provider_request("deploy", &relay.url, &manager_keys.public_key(), 600);
+    deploy["provider_config"]["sandbox"] = json!({"dm_channel_id":channel});
+    let first = buzz_backend_relay::run(deploy.clone(), BOUND).await;
+    assert_eq!(first["ok"], true, "{first}");
+    deploy["request_id"] = json!("deploy-dm-2");
+    let second = buzz_backend_relay::run(deploy, BOUND).await;
+    assert_eq!(second["ok"], true, "{second}");
+    assert_eq!(first["agent_id"], second["agent_id"]);
+    {
+        let cluster = cluster.lock().unwrap();
+        assert_eq!(cluster.sandboxes.len(), 1);
+        let secret = cluster
+            .secrets
+            .values()
+            .find(|secret| secret["data"].is_object())
+            .unwrap();
+        use base64::Engine;
+        let decode = |name: &str| {
+            String::from_utf8(
+                base64::engine::general_purpose::STANDARD
+                    .decode(secret["data"][name].as_str().unwrap())
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+        assert_eq!(decode("BUZZ_ACP_SUBSCRIBE"), "all");
+        assert_eq!(decode("BUZZ_ACP_RESPOND_TO"), "owner");
+        assert_eq!(decode("BUZZ_ACP_CHANNELS"), channel);
+        assert_eq!(
+            serde_json::from_str::<Value>(&decode("BUZZ_ACP_BOUND_SESSION")).unwrap(),
+            json!({"dm_channel_id":channel})
+        );
+    }
+    stop.send(()).unwrap();
+    tokio::time::timeout(BOUND, server).await.unwrap().unwrap();
+}

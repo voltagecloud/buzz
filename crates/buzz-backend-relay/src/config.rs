@@ -125,9 +125,20 @@ pub fn config_schema() -> Value {
                             "required": ["mode"],
                             "properties": {"mode": {"type": "string", "enum": ["checkpoint", "fresh"]}}}
                     }
+                },
+                {
+                    "type": "object", "additionalProperties": false,
+                    "required": ["dm_channel_id"],
+                    "properties": {
+                        "dm_channel_id": {"type": "string", "format": "uuid",
+                            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
+                        "recovery": {"type": "object", "additionalProperties": false,
+                            "required": ["mode"],
+                            "properties": {"mode": {"type": "string", "enum": ["checkpoint", "fresh"]}}}
+                    }
                 }],
-                "x-buzz-ui-type": "boolean", "default": true, "title": "Workspace per thread",
-                "description": "The session manager runs Agent Sandbox sessions only. Desktop stores true and binds the mentioned thread at launch; deploy accepts only {\"channel_id\": \"<UUID>\", \"thread_root\": \"<event ID>\"}."
+                "x-buzz-ui-type": "boolean", "default": true, "title": "Remote workspace",
+                "description": "The desktop binds a channel thread or one entire direct-message conversation at launch. Send a message in the agent DM or mention the agent in a channel. deploy requires a thread scope or {\"dm_channel_id\": \"<UUID>\"}; bare true is not a launch scope."
             },
             "identity_policy": {
                 "type": "object", "additionalProperties": false,

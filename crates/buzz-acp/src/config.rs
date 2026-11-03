@@ -19,31 +19,76 @@ use uuid::Uuid;
 
 use crate::filter::SubscriptionRule;
 
-/// Immutable conversation binding for a remote workspace.
+/// Immutable channel-thread or direct-message binding for a remote workspace.
 #[derive(Debug, Clone, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BoundSession {
-    pub channel_id: Uuid,
-    pub thread_root: String,
+#[serde(untagged, deny_unknown_fields)]
+pub enum BoundSession {
+    /// One published thread in a channel.
+    Thread {
+        channel_id: Uuid,
+        thread_root: String,
+    },
+    /// One complete direct-message conversation.
+    DirectMessage { dm_channel_id: Uuid },
 }
 
 impl BoundSession {
+    /// The only channel admitted by this workspace.
+    pub fn channel_id(&self) -> Uuid {
+        match self {
+            Self::Thread { channel_id, .. } => *channel_id,
+            Self::DirectMessage { dm_channel_id } => *dm_channel_id,
+        }
+    }
+
+    /// The published root for a channel thread; DMs have no root.
+    pub fn thread_root(&self) -> Option<&str> {
+        match self {
+            Self::Thread { thread_root, .. } => Some(thread_root),
+            Self::DirectMessage { .. } => None,
+        }
+    }
+
+    pub(crate) fn validate_channel_metadata(
+        &self,
+        info: Option<&crate::relay::ChannelInfo>,
+    ) -> Result<(), ConfigError> {
+        if matches!(self, Self::DirectMessage { .. })
+            && info.is_none_or(|info| info.channel_type != "dm")
+        {
+            return Err(ConfigError::ConfigFile(
+                "bound direct-message workspace requires verified DM channel metadata".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Whether a routed event belongs to this immutable scope.
     pub fn accepts(&self, scope: &crate::scope::SessionScope) -> bool {
-        scope.channel_id() == self.channel_id && scope.root_event_id() == Some(&self.thread_root)
+        match self {
+            Self::Thread {
+                channel_id,
+                thread_root,
+            } => scope.channel_id() == *channel_id && scope.root_event_id() == Some(thread_root),
+            Self::DirectMessage { dm_channel_id } => {
+                scope.channel_id() == *dm_channel_id && !scope.is_thread()
+            }
+        }
     }
 }
 
 fn parse_bound_session(value: &str) -> Result<BoundSession, String> {
     let binding: BoundSession = serde_json::from_str(value).map_err(|_| {
-        "bound session requires a channel UUID and canonical thread root".to_string()
+        "bound session requires a channel thread or a direct-message channel UUID".to_string()
     })?;
-    if binding.thread_root.len() != 64
-        || !binding
-            .thread_root
-            .bytes()
-            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-    {
-        return Err("bound session thread_root must be a lowercase event ID".into());
+    if let Some(thread_root) = binding.thread_root() {
+        if thread_root.len() != 64
+            || !thread_root
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        {
+            return Err("bound session thread_root must be a lowercase event ID".into());
+        }
     }
     Ok(binding)
 }
@@ -997,11 +1042,21 @@ impl Config {
     /// `propagate_legacy_env_vars()` before the tokio runtime starts (in the
     /// sync `fn main()` wrapper) — see Rust 2024 edition safety.
     pub fn from_args(mut args: CliArgs) -> Result<Self, ConfigError> {
-        if args.bound_session.is_some() {
+        if let Some(binding) = &args.bound_session {
+            let direct_message = matches!(binding, BoundSession::DirectMessage { .. });
+            let subscription = if direct_message {
+                SubscribeMode::All
+            } else {
+                SubscribeMode::Mentions
+            };
             let refusal = if args.respond_to != RespondTo::Owner {
                 Some("--respond-to owner")
-            } else if args.subscribe != SubscribeMode::Mentions {
-                Some("--subscribe mentions")
+            } else if args.subscribe != subscription {
+                Some(if direct_message {
+                    "--subscribe all"
+                } else {
+                    "--subscribe mentions"
+                })
             } else if args.no_mention_filter {
                 Some("no --no-mention-filter")
             } else if args.session_policy != crate::scope::SessionPolicy::Thread {
@@ -1018,6 +1073,12 @@ impl Config {
                     "--bound-session requires {requirement}"
                 )));
             }
+        }
+        if matches!(args.bound_session, Some(BoundSession::DirectMessage { .. }))
+            && args.kinds.is_none()
+        {
+            // Every owner message may wake a bound DM, but auxiliary events may not.
+            args.kinds = Some(default_mention_kinds());
         }
         let keys = Keys::parse(&args.private_key)?;
         // Best-effort zeroize: overwrite the raw private key string to reduce
@@ -1690,6 +1751,126 @@ mod tests {
                 .to_string()
             )
             .is_err());
+        }
+    }
+
+    #[test]
+    fn a_bound_dm_requires_verified_metadata_and_owner_only_subscription() {
+        let channel = Uuid::new_v4();
+        let binding = serde_json::json!({"dm_channel_id":channel}).to_string();
+        let parsed = parse_bound_session(&binding).unwrap();
+        assert!(parsed.validate_channel_metadata(None).is_err());
+        for (kind, accepted) in [("dm", true), ("stream", false), ("", false)] {
+            let info = crate::relay::ChannelInfo {
+                name: "test".into(),
+                channel_type: kind.into(),
+                description: None,
+            };
+            assert_eq!(
+                parsed.validate_channel_metadata(Some(&info)).is_ok(),
+                accepted
+            );
+        }
+        for invalid in [
+            serde_json::json!({"dm_channel_id":channel,"thread_root":"a".repeat(64)}),
+            serde_json::json!({"dm_channel_id":channel,"channel_id":channel}),
+            serde_json::json!({"dm_channel_id":"invalid"}),
+        ] {
+            assert!(parse_bound_session(&invalid.to_string()).is_err());
+        }
+        let key = Keys::generate().secret_key().to_secret_hex();
+        let owner = Keys::generate().public_key().to_hex();
+        let args = || {
+            CliArgs::try_parse_from([
+                "buzz-acp",
+                "--private-key",
+                &key,
+                "--agent-owner",
+                &owner,
+                "--bound-session",
+                &binding,
+                "--respond-to",
+                "owner",
+                "--subscribe",
+                "all",
+                "--session-policy",
+                "thread",
+                "--heartbeat-interval",
+                "0",
+            ])
+            .unwrap()
+        };
+        assert!(Config::from_args(args()).is_ok());
+        let mut mentions = args();
+        mentions.subscribe = SubscribeMode::Mentions;
+        assert!(Config::from_args(mentions).is_err());
+        let mut siblings = args();
+        siblings.respond_to = RespondTo::OwnerOnly;
+        assert!(Config::from_args(siblings).is_err());
+    }
+
+    #[tokio::test]
+    async fn bound_dm_kind_defaults_reach_relay_and_local_filters() {
+        let keys = Keys::generate();
+        let key = keys.secret_key().to_secret_hex();
+        let owner = keys.public_key().to_hex();
+        let channel = Uuid::new_v4();
+        let binding = serde_json::json!({"dm_channel_id":channel}).to_string();
+        for (bound, override_kinds, expected_kinds, message, reaction, deletion) in [
+            (
+                true,
+                None,
+                Some(default_mention_kinds()),
+                true,
+                false,
+                false,
+            ),
+            (true, Some(vec![7]), Some(vec![7]), false, true, false),
+            (false, None, None, true, true, true),
+        ] {
+            let mut args = CliArgs::try_parse_from([
+                "buzz-acp",
+                "--private-key",
+                &key,
+                "--agent-owner",
+                &owner,
+                "--bound-session",
+                &binding,
+                "--respond-to",
+                "owner",
+                "--subscribe",
+                "all",
+                "--session-policy",
+                "thread",
+                "--heartbeat-interval",
+                "0",
+            ])
+            .unwrap();
+            if !bound {
+                args.bound_session = None;
+            }
+            args.kinds = override_kinds;
+            let config = Config::from_args(args).unwrap();
+            let rules = crate::startup_subscription_rules(&config).unwrap();
+            let relay = resolve_channel_filters(&config, &[channel], &rules);
+            assert_eq!(relay[&channel].kinds, expected_kinds);
+            assert!(!relay[&channel].require_mention);
+            for (kind, admitted) in [
+                (KIND_STREAM_MESSAGE as u16, message),
+                (7, reaction),
+                (5, deletion),
+            ] {
+                let event = nostr::EventBuilder::new(nostr::Kind::Custom(kind), "plain DM event")
+                    .sign_with_keys(&keys)
+                    .unwrap();
+                assert_eq!(
+                    crate::filter::match_event(&event, channel, &rules, &"b".repeat(64))
+                        .await
+                        .is_some(),
+                    admitted,
+                    "bound={bound}, kind={kind}"
+                );
+            }
         }
     }
 

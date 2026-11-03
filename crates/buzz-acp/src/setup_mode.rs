@@ -374,6 +374,10 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
         channel_info_map.len()
     );
 
+    if let Some(binding) = &config.bound_session {
+        binding.validate_channel_metadata(channel_info_map.get(&binding.channel_id()))?;
+    }
+
     let channel_ids: Vec<Uuid> = channel_info_map.keys().copied().collect();
 
     // Build subscription rules: mentions only (setup mode must not react to
@@ -424,14 +428,18 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
             continue;
         }
 
-        if !setup_listener_admits(&buzz_event.event, &pubkey_hex) {
+        if !bound_setup_listener_admits(
+            &buzz_event.event,
+            &pubkey_hex,
+            config.bound_session.as_ref(),
+        ) {
             continue;
         }
 
         if config
             .bound_session
             .as_ref()
-            .is_some_and(|binding| buzz_event.channel_id != binding.channel_id)
+            .is_some_and(|binding| buzz_event.channel_id != binding.channel_id())
         {
             continue;
         }
@@ -492,6 +500,25 @@ fn setup_listener_admits(event: &nostr::Event, pubkey_hex: &str) -> bool {
         return false;
     }
     event.pubkey.to_hex() != pubkey_hex && event_mentions_agent(event, pubkey_hex)
+}
+
+fn bound_setup_listener_admits(
+    event: &nostr::Event,
+    pubkey_hex: &str,
+    binding: Option<&crate::config::BoundSession>,
+) -> bool {
+    if matches!(
+        binding,
+        Some(crate::config::BoundSession::DirectMessage { .. })
+    ) {
+        event.pubkey.to_hex() != pubkey_hex
+            && matches!(
+                u32::from(event.kind.as_u16()),
+                KIND_STREAM_MESSAGE | KIND_STREAM_MESSAGE_EDIT | KIND_WORKFLOW_APPROVAL_REQUESTED
+            )
+    } else {
+        setup_listener_admits(event, pubkey_hex)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -614,10 +641,8 @@ pub(crate) fn should_nudge_for_event(
 
 /// Build the subscription rules used in setup mode.
 ///
-/// Always uses "mentions" mode: setup mode must not react to every event.
-/// Even if the agent's normal config is `subscribe_mode = all`, setup mode
-/// enforces explicit @mention filtering (see `event_mentions_agent` call in
-/// the loop above).
+/// Requires mentions except in an explicitly bound DM. Bound DMs retain
+/// the same owner authorization and conversation checks as normal mode.
 fn build_setup_subscription_rules(config: &Config) -> Vec<filter::SubscriptionRule> {
     use crate::config::SubscribeMode;
 
@@ -626,6 +651,14 @@ fn build_setup_subscription_rules(config: &Config) -> Vec<filter::SubscriptionRu
         .clone()
         .unwrap_or_else(crate::config::default_mention_kinds);
 
+    if matches!(
+        config.bound_session,
+        Some(crate::config::BoundSession::DirectMessage { .. })
+    ) {
+        let mut rule = mentions_rule(kinds);
+        rule.require_mention = false;
+        return vec![rule];
+    }
     match &config.subscribe_mode {
         // Config mode: load the actual rules, but they will be filtered by
         // the explicit event_mentions_agent check in the main loop anyway.
