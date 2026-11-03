@@ -10,6 +10,9 @@ use uuid::Uuid;
 
 use crate::{kind::KIND_AGENT_CHANNEL_GRANT, nip_oa, SdkError};
 
+pub mod policy;
+pub mod task;
+
 /// One versioned owner opt-in. A disabled head is a durable revocation.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
