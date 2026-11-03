@@ -60,13 +60,22 @@ If these UIDs differ, the entrypoint refuses startup. A replacement Pod requires
 New sessions load the developer's current account profile.
 Checkpoints use the developer's S3 prefix and service account from Terraform.
 The harness stops adapter processes before invoking `buzz-agent-checkpoint save`, including cancellation during startup.
-Each save records shallow Git boundaries and validates every bundle in an independent repository before uploading the checkpoint.
-Restore preserves these boundaries, local branches, tags, and remote-tracking refs without contacting the forge.
-For older archives without boundary metadata, restore reconstructs missing parent boundaries and then runs `git fsck`.
+Each full snapshot records shallow Git boundaries and validates its bundle in an independent repository before upload.
+Full-snapshot restore preserves these boundaries, local branches, tags, and remote-tracking refs without contacting the forge.
+For older full snapshots without boundary metadata, restore reconstructs missing parent boundaries and then runs `git fsck`.
 Missing trees, missing blobs, and other integrity failures stop recovery and remove the staged destination.
-The archive format remains version 1. Older images still restore complete histories, but cannot restore shallow bundles.
+Full snapshots retain manifest version 1. Older images restore complete histories, but cannot restore shallow bundles.
 Publish and promote the updated agent image before recovering a session with shallow repositories.
 A failed save retains the Sandbox for recovery; do not delete its workspace.
+A checkpoint holds at most 256 MiB of source and 50,000 files.
+A repository whose HTTPS `origin` shares a branch tip with it, as `git ls-remote` reports at save time, is saved against origin: only commits beyond origin's branches, changed and untracked files, deletions, local branches, and tags origin lacks (annotated tag objects by content).
+The save asks every origin at once, using the normalized URL and global Git configuration that restore uses, with one 20-second deadline for all of them.
+Its restore clones `origin` with the Sandbox's GitHub credential, so pushed content of any size does not count against the budget.
+The bundle holds only what the agent owns: HEAD, local branches, the stash, and tags origin lacks, beyond origin's branch tips.
+If a branch the checkpoint builds on was deleted or force-pushed after the save, restore fetches its commit from origin by name, which GitHub still serves; restore fails only if origin no longer has the commit.
+Any other repository (no remote, an SSH origin, origin unreachable in time, or nothing pushed) is saved whole: full history and every file.
+A checkpoint without an origin-based repository keeps manifest version 1, which older images restore.
+Origin-based snapshots do not save Git notes (`refs/notes`) or stash entries other than the latest.
 
 Explicit checkpoint recovery sets `BUZZ_CHECKPOINT_RESTORE_KEY` in the launch Secret; it is empty otherwise.
 After the developer profile bootstrap and before the harness starts, the entrypoint runs `buzz-agent-checkpoint restore-once`.
