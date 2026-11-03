@@ -89,6 +89,7 @@ voltage/
 !voltage/images/buzz-agent/profile.py
 !voltage/images/buzz-agent/cache.py
 !voltage/images/buzz-agent/checkpoint.py
+!voltage/images/buzz-agent/review.py
 !voltage/images/buzz-agent/checkpoint-gitleaks.toml
 !voltage/images/buzz-agent/gh.sh
 !voltage/images/buzz-agent/via.sh

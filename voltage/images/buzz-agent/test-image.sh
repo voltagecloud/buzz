@@ -8,9 +8,10 @@ docker run --rm --entrypoint /bin/bash "$IMAGE" -ceu '
   test "$(id -g)" = 10001
   test "$HOME" = /home/agent
   test "$(pwd)" = /home/agent
-  for binary in buzz-acp buzz-dev-mcp codex-acp claude-agent-acp codex claude kubectl; do
+  for binary in buzz-acp buzz-dev-mcp codex-acp claude-agent-acp codex claude kubectl buzz-subagent buzz-agent-review; do
     command -v "$binary" >/dev/null
   done
+  buzz-subagent review --help >/dev/null
   codex --version
   claude --version
   kubectl version --client
@@ -33,4 +34,5 @@ docker run --rm --tmpfs /home/agent:uid=10001,gid=10001,mode=0700 \
     claude --version >/dev/null
     command -v codex-acp claude-agent-acp buzz-dev-mcp >/dev/null
   '
+python3 "$(dirname "$0")/test-review.py" "$IMAGE"
 printf 'PASS: agent adapter packaging and unauthenticated ACP initialization (%s)\n' "$IMAGE"

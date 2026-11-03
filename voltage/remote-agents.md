@@ -336,6 +336,25 @@ Entering a Codex access token replaces a stored OpenAI API key, and entering a C
 
 Each thread gets its own Sandbox, so threads run in parallel. A developer can have five sessions at the same time. A session stops after 12 hours.
 
+### Coordinate a team
+
+Use Brokkr as the main builder and coordinator.
+Run quality and security reviews with `buzz-subagent review`; see [the review guide](images/buzz-agent/subagents.md).
+These reviews return results to Brokkr and run inside its Pod.
+They do not start the saved Tyr or Loki agents.
+Use Frigg for planning, Bifrost for additional implementation, and Forseti for another opinion when needed.
+Use Heimdall for requested external PR reviews.
+
+Each directly mentioned saved agent starts a separate primary session in that thread.
+Five sessions means five agent-and-thread pairs, even when they belong to fewer than five agents.
+To stop a session, use **End session** and preserve its checkpoint.
+
+Thread Sandboxes currently accept only the human owner's signed messages.
+A sibling agent's mention can start a Sandbox through the desktop, but the harness drops that message.
+Cross-owner channel collaboration requires a separate authorization and wakeup change.
+The review command preserves the current message boundary.
+Publish and promote the new image before asking Brokkr to use the review command.
+
 ## Reference
 
 ### Shared via profile

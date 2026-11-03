@@ -83,6 +83,7 @@ COPY --chmod=0755 voltage/images/buzz-agent/account.py /usr/local/bin/buzz-agent
 COPY --chmod=0755 voltage/images/buzz-agent/profile.py /usr/local/bin/buzz-agent-profile
 COPY --chmod=0755 voltage/images/buzz-agent/cache.py /usr/local/bin/buzz-agent-cache
 COPY --chmod=0755 voltage/images/buzz-agent/checkpoint.py /usr/local/bin/buzz-agent-checkpoint
+COPY --chmod=0755 voltage/images/buzz-agent/review.py /usr/local/bin/buzz-agent-review
 COPY --chmod=0755 voltage/images/buzz-agent/heavy.py /usr/local/bin/buzz-heavy
 COPY --chmod=0755 voltage/images/buzz-agent/worker.py /usr/local/bin/buzz-agent-worker
 COPY --chmod=0755 voltage/images/buzz-agent/subagent.py /usr/local/bin/buzz-subagent
