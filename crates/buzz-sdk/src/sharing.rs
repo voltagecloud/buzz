@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use crate::{kind::KIND_AGENT_CHANNEL_GRANT, nip_oa, SdkError};
 
+pub mod budget;
 pub mod policy;
 pub mod task;
 

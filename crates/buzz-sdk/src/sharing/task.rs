@@ -2,10 +2,12 @@
 
 use crate::SdkError;
 use nostr::{Event, EventBuilder, EventId, Kind, PublicKey, Tag};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// A mention's signed channel and canonical thread binding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Scope {
     /// The sole canonical channel tag.
     pub channel: Uuid,
@@ -14,7 +16,8 @@ pub struct Scope {
 }
 
 /// Provenance retained across cross-owner agent handoffs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Origin {
     /// The original human's signed task message.
     pub request: EventId,
