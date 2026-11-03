@@ -16,6 +16,8 @@ ignore = [
     { id = "RUSTSEC-2026-0367", reason = "zip 8.6.0 only via the optional mesh-llm feature; manual entry copy, never extracts; guard-verified" },
     { id = "RUSTSEC-2026-0368", reason = "zip 8.6.0 only via the optional mesh-llm feature; manual entry copy, never extracts; guard-verified" },
     { id = "RUSTSEC-2026-0369", reason = "zip 8.6.0 only via the optional mesh-llm feature; manual entry copy, never extracts; guard-verified" },
+    # The same unused extract path can abort on oversized symlink targets (0429).
+    { id = "RUSTSEC-2026-0429", reason = "zip 8.6.0 only via the optional mesh-llm feature; manual entry copy, never ZipArchive::extract; guard-verified" },
     # These desktop transitive dependencies have maintenance notices, not
     # vulnerability reports. Remove when opus, user-idle, and GTK migrate.
     { id = "RUSTSEC-2026-0150", reason = "audiopus_sys via opus; unmaintained with no safe upstream upgrade" },
