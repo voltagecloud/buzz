@@ -7,12 +7,14 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import selectors
 import shutil
 import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import uuid
 from urllib.parse import urlsplit, urlunsplit
 
@@ -35,15 +37,114 @@ def step(name):
     STEP[0] = name
 
 
-def run(*args, cwd=None, timeout=60, env=None):
-    result = subprocess.run(args, cwd=cwd, env=env, capture_output=True, timeout=timeout)
+def run(*args, cwd=None, timeout=60, env=None, input=None):
+    result = subprocess.run(args, cwd=cwd, env=env, input=input, capture_output=True, timeout=timeout)
     if result.returncode:
         raise ValueError('Checkpoint command failed; command output suppressed')
     return result.stdout
 
 
-def git(repo, *args):
-    return run('git', '-c', 'core.hooksPath=/dev/null', '-C', str(repo), *args)
+def git(repo, *args, **kwargs):
+    return run('git', '-c', 'core.hooksPath=/dev/null', '-C', str(repo), *args, **kwargs)
+
+
+def shallow_commits(repo):
+    """Keep the boundaries Git bundles omit from shallow repositories."""
+    path = Path(os.fsdecode(git(repo, 'rev-parse', '--git-path', 'shallow')).strip())
+    if not path.is_absolute():
+        path = repo / path
+    if not path.exists():
+        return []
+    with path.open('rb') as stream:
+        content = stream.read(MAX_FILES * 65 + 1)
+    commits = content.decode().splitlines()
+    if len(content) > MAX_FILES * 65 or any(not re.fullmatch('[0-9a-f]{40,64}', c) for c in commits):
+        raise ValueError('Invalid shallow repository boundaries')
+    return commits
+
+
+def history_check(repo):
+    """Run fsck with a deadline and at most 1 MiB of private diagnostics."""
+    process = subprocess.Popen(['git', '-c', 'core.hooksPath=/dev/null', '-C', str(repo),
+                                'fsck', '--full', '--no-reflogs', '--no-dangling'],
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               env=dict(os.environ, LC_ALL='C'))
+    deadline = time.monotonic() + 60
+    output = bytearray()
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not selector.select(remaining):
+                    raise ValueError('Checkpoint history validation timed out')
+                chunk = os.read(process.stdout.fileno(), 65536)
+                if not chunk:
+                    break
+                output.extend(chunk)
+                if len(output) > 1024 * 1024:
+                    raise ValueError('Checkpoint history diagnostics exceed the output limit')
+        return process.wait(timeout=max(0, deadline - time.monotonic())), bytes(output)
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+        process.stdout.close()
+
+
+def restore_history(bundle, record, repo):
+    """Import and check a bundle without losing its shallow boundaries.
+
+    Older checkpoints did not record those boundaries. For those alone, infer
+    them from missing commit parents, then require every tree and blob to pass
+    Git's integrity check. No network or forge credentials are needed.
+    """
+    head = record['head']
+    if not re.fullmatch('[0-9a-f]{40,64}', head):
+        raise ValueError('Invalid checkpoint revision')
+    object_format = 'sha256' if len(head) == 64 else 'sha1'
+    run('git', '-c', 'core.hooksPath=/dev/null', 'init', '--object-format=' + object_format, str(repo))
+    refs = git(repo, 'bundle', 'unbundle', str(bundle)).decode().splitlines()
+    if len(refs) > MAX_FILES:
+        raise ValueError('Checkpoint has too many Git references')
+    updates = []
+    for line in refs:
+        value, ref = line.split(' ', 1)
+        if not re.fullmatch('[0-9a-f]{' + str(len(head)) + '}', value):
+            raise ValueError('Invalid checkpoint reference')
+        if ref == 'HEAD':
+            continue
+        # Replacement objects must never change the history being validated.
+        if ref.startswith('refs/replace/'):
+            raise ValueError('Unsupported checkpoint reference')
+        git(repo, 'check-ref-format', ref)
+        updates.append(f'update {ref} {value}\n')
+    if updates:
+        # update-ref is atomic; refs are validated before any are installed.
+        git(repo, 'update-ref', '--stdin', input=''.join(updates).encode())
+    # Include a detached HEAD as well as every saved ref in fsck's roots.
+    git(repo, 'update-ref', '--no-deref', 'HEAD', head)
+    shallow = record.get('shallow')
+    if 'shallow' in record:
+        if not isinstance(shallow, list) or len(shallow) > MAX_FILES or any(
+                not isinstance(c, str) or not re.fullmatch('[0-9a-f]{' + str(len(head)) + '}', c)
+                for c in shallow):
+            raise ValueError('Invalid checkpoint shallow boundaries')
+        if shallow:
+            (repo / '.git' / 'shallow').write_text(''.join(c + '\n' for c in shallow))
+    else:
+        # Version 1 archives from older images can contain a shallow bundle
+        # presented as complete history. Recover only missing parent links;
+        # a missing tree/blob or any other corruption still fails fsck below.
+        code, diagnostics = history_check(repo)
+        if code:
+            boundaries = re.findall(rb'broken link from\s+commit ([0-9a-f]{40,64})\n\s+to\s+commit [0-9a-f]{40,64}', diagnostics)
+            if not boundaries or len(boundaries) > MAX_FILES:
+                raise ValueError('Checkpoint history is incomplete')
+            (repo / '.git' / 'shallow').write_bytes(b'\n'.join(sorted(set(boundaries))) + b'\n')
+    if history_check(repo)[0]:
+        raise ValueError('Checkpoint history integrity check failed')
+    git(repo, 'remote', 'add', 'origin', str(bundle))
 
 
 def safe_path(value):
@@ -147,6 +248,7 @@ def pack(workspace, output):
             record = {'path': relative, 'origin': public_origin(repo),
                       'head': git(repo, 'rev-parse', 'HEAD').decode().strip(),
                       'branch': git(repo, 'branch', '--show-current').decode().strip(),
+                      'shallow': shallow_commits(repo),
                       'excluded': [], 'files': []}
             destination = stage / 'repositories' / str(index)
             (destination / 'files').mkdir(parents=True)
@@ -154,6 +256,12 @@ def pack(workspace, output):
             review_changes(repo, review / str(index))
             git(repo, 'bundle', 'create', str(destination / 'history.bundle'), '--all', 'HEAD')
             total += (destination / 'history.bundle').stat().st_size
+            if total > MAX_BYTES:
+                raise ValueError('Checkpoint history exceeds the 256 MiB source budget')
+            # Verify in an independent object store, just as a future restore
+            # will, before advertising or uploading this checkpoint.
+            with tempfile.TemporaryDirectory(prefix='agent-checkpoint-history-') as history_temp:
+                restore_history(destination / 'history.bundle', record, Path(history_temp) / 'repo')
             names = git(repo, 'ls-files', '-z', '--cached', '--others', '--exclude-standard')
             for raw in sorted(set(names.split(b'\0')) - {b''}):
                 path = safe_path(os.fsdecode(raw))
@@ -244,10 +352,7 @@ def restore_repositories(stage, manifest, destination):
                 raise ValueError('Checkpoint repository path is reserved')
             source = stage / 'repositories' / str(index)
             repo = destination / relative
-            run('git', '-c', 'core.hooksPath=/dev/null', 'clone', '--no-checkout',
-                str(source / 'history.bundle'), str(repo))
-            if not re.fullmatch('[0-9a-f]{40,64}', record['head']):
-                raise ValueError('Invalid checkpoint revision')
+            restore_history(source / 'history.bundle', record, repo)
             git(repo, 'checkout', '--detach', record['head'])
             if record['branch']:
                 git(repo, 'check-ref-format', '--branch', record['branch'])
