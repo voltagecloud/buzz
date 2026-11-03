@@ -129,7 +129,7 @@ fn session(pubkey: &str, owner: &Identity, root: char) -> SandboxSession {
             relay: RELAY.into(),
             signer: owner.pubkey_hex(),
         },
-        scope: SandboxScope {
+        scope: SandboxScope::Thread {
             channel_id: CHANNEL.into(),
             thread_root: root.to_string().repeat(64),
         },
@@ -385,4 +385,52 @@ async fn an_agent_deleted_while_a_start_waits_is_not_started() {
         "{refused:?}"
     );
     assert_eq!(provider.requests().len(), 1, "only the first start ran");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_direct_message_scope_reaches_the_provider_and_recovery_unchanged() {
+    let state = tempfile::tempdir().unwrap();
+    let provider = Provider::new(deployed(), "0");
+    let host = host(state.path(), &provider);
+    let (pubkey, owner) = agent(&host).await;
+    let mut session = session(&pubkey, &owner, 'a');
+    session.scope = SandboxScope::DirectMessage {
+        dm_channel_id: CHANNEL.into(),
+    };
+    let encoded = serde_json::to_value(SandboxRequest::Start {
+        session: session.clone(),
+        replay_floor: Some(123),
+    })
+    .unwrap();
+    let decoded: SandboxRequest = serde_json::from_value(encoded).unwrap();
+    assert!(matches!(
+        sandbox(&host, decoded).await,
+        SandboxResponse::Started
+    ));
+    let recover = SandboxRequest::Recover {
+        session,
+        mode: RecoveryMode::Fresh,
+        replay_floor: Some(456),
+    };
+    assert!(matches!(
+        sandbox(&host, recover).await,
+        SandboxResponse::Started
+    ));
+    let [start, recover] = provider.requests().try_into().unwrap();
+    assert_eq!(
+        start["provider_config"]["sandbox"],
+        json!({"dm_channel_id":CHANNEL})
+    );
+    assert_eq!(
+        recover["provider_config"]["sandbox"],
+        json!({"dm_channel_id":CHANNEL,"recovery":{"mode":"fresh"}})
+    );
+    assert_eq!(
+        recover["agent"]["launch"]["policy_env"]["BUZZ_ACP_REPLAY_FLOOR"],
+        "456"
+    );
+    assert_eq!(
+        recover["provider_config"]["identity_policy"]["owner_pubkey"],
+        owner.pubkey_hex()
+    );
 }

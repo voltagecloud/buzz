@@ -88,13 +88,31 @@ pub struct SandboxTenant {
     pub signer: String,
 }
 
-/// The thread a session belongs to.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SandboxScope {
-    /// The channel's UUID.
-    pub channel_id: String,
-    /// The thread's root event id, as lowercase hex.
-    pub thread_root: String,
+/// A published channel thread or a complete direct-message conversation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum SandboxScope {
+    /// One published thread.
+    Thread {
+        /// Channel UUID.
+        channel_id: String,
+        /// Canonical thread root event ID.
+        thread_root: String,
+    },
+    /// One direct-message conversation, reused across messages.
+    DirectMessage {
+        /// DM channel UUID.
+        dm_channel_id: String,
+    },
+}
+
+impl Default for SandboxScope {
+    fn default() -> Self {
+        Self::Thread {
+            channel_id: String::new(),
+            thread_root: String::new(),
+        }
+    }
 }
 
 /// What the agent's type says to launch. Never the agent's key, community
@@ -209,7 +227,7 @@ mod tests {
                 relay: "wss://relay.example".into(),
                 signer: "b".repeat(64),
             },
-            scope: SandboxScope {
+            scope: SandboxScope::Thread {
                 channel_id: "6f1c3c7e-8f0e-4b8e-9d55-1a3c1f5b2e10".into(),
                 thread_root: "c".repeat(64),
             },

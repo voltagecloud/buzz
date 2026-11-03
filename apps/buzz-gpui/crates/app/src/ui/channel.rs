@@ -13,7 +13,9 @@ use super::{scroll, time};
 use crate::community::{ChannelModel, Community};
 use crate::mirror::mirror;
 use buzz_relay_client::fold::MessageRow;
-use buzz_relay_client::{ChannelSummary, EventId, TimelineStatus, UnreadDetail, UnreadWatch};
+use buzz_relay_client::{
+    ChannelSummary, ChannelType, EventId, TimelineStatus, UnreadDetail, UnreadWatch,
+};
 use buzz_ui::{
     ActiveTheme, Button, ButtonSize, ButtonVariant, IconButton, IconButtonSize, IconName,
     PanelHeader, Tab, TabVariant, Tabs, TypeStyled,
@@ -351,6 +353,7 @@ impl ChannelPage {
             cx.new(|_| ChannelActions::new(community.clone(), channel.clone(), on_removed));
         let join = cx.new(|_| JoinNotice::new(community.clone(), channel.clone()));
         subscriptions.push(cx.subscribe(&join, |this, _, _: &Joining, _| this.joining = true));
+        subscriptions.push(super::thread_banners::observe(cx));
         let tasks = vec![
             time::on_new_day(cx, |_, cx| cx.notify()),
             mirror(
@@ -1489,6 +1492,18 @@ impl Render for ChannelPage {
             .message_actions
             .update(cx, |actions, cx| actions.status(cx));
 
+        let session_banners = if self.channel.channel_type == Some(ChannelType::Dm) {
+            super::thread_banners::render(
+                &super::thread_banners::BannerThread {
+                    relay: self.community.read(cx).origin.websocket().to_owned(),
+                    channel: self.channel.id.clone(),
+                    root: String::new(),
+                },
+                cx,
+            )
+        } else {
+            Vec::new()
+        };
         let body = div()
             .flex()
             .flex_col()
@@ -1504,6 +1519,7 @@ impl Render for ChannelPage {
                     .child(error)
             }))
             .children(status)
+            .children(session_banners)
             .child(composer)
             .children(overlays);
         // A thread pushing in over the conversation, which drifts under it.

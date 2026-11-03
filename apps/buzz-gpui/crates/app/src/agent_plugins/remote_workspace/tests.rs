@@ -114,6 +114,23 @@ fn mention(root: &str) -> Arc<EventData> {
     })
 }
 
+fn timer_trigger() -> Trigger {
+    Trigger::Timer {
+        slug: "timer".into(),
+        timer: TimerWatch {
+            interest_id: "i".into(),
+            prompt: "Check in".into(),
+            enabled: true,
+            interval_secs: 60,
+            armed_at: 0,
+            max_occurrences: None,
+            expires_at: None,
+        },
+        interest: None,
+        spent: false,
+    }
+}
+
 fn delivery(trigger: Trigger, host: HostLink) -> Delivery {
     let pubkey = "b".repeat(64);
     Delivery {
@@ -149,6 +166,7 @@ async fn a_mention_starts_its_threads_session() {
             link,
         ),
         RELAY.into(),
+        false,
     )
     .await
     .unwrap();
@@ -175,8 +193,13 @@ async fn a_mention_starts_its_threads_session() {
     };
     assert_eq!(replay_floor, Some(1_700_000_123));
     assert_eq!(session.pubkey, "b".repeat(64));
-    assert_eq!(session.scope.channel_id, CHANNEL);
-    assert_eq!(session.scope.thread_root, root);
+    assert_eq!(
+        session.scope,
+        SandboxScope::Thread {
+            channel_id: CHANNEL.into(),
+            thread_root: root
+        }
+    );
     assert_eq!(session.tenant.relay, RELAY);
     assert_eq!(session.tenant.signer, OWNER);
     let config: serde_json::Value =
@@ -209,27 +232,14 @@ async fn watches_timers_and_strangers_start_nothing() {
         interest: None,
         classifier: None,
     };
-    let timer = Trigger::Timer {
-        slug: "timer".into(),
-        timer: TimerWatch {
-            interest_id: "i".into(),
-            prompt: "Check in".into(),
-            enabled: true,
-            interval_secs: 60,
-            armed_at: 0,
-            max_occurrences: None,
-            expires_at: None,
-        },
-        interest: None,
-        spent: false,
-    };
+    let timer = timer_trigger();
     let mut stranger = (*mention(&"c".repeat(64))).clone();
     stranger.pubkey = "d".repeat(64);
     let stranger = Trigger::Mention {
         event: Arc::new(stranger),
     };
     for trigger in [watch, timer, stranger] {
-        let started = deliver(delivery(trigger, link.clone()), RELAY.into()).await;
+        let started = deliver(delivery(trigger, link.clone()), RELAY.into(), false).await;
         assert!(matches!(started, Ok(None)), "{started:?}");
     }
     assert!(sent.lock().unwrap().is_empty());
@@ -359,7 +369,7 @@ async fn a_relay_mention_starts_its_session_through_the_host() {
         "provider": "relay",
         "provider_config": {"relay_url": RELAY, "manager_pubkey": MANAGER},
     });
-    let started = deliver(delivery, RELAY.into()).await.unwrap();
+    let started = deliver(delivery, RELAY.into(), false).await.unwrap();
     assert!(
         matches!(
             started,
@@ -461,4 +471,80 @@ fn agents_run_through_the_sandbox_manager() {
     );
     assert_eq!(other.provider, "relay");
     assert!(other.validate().is_err(), "the relay takes no namespace");
+}
+
+#[tokio::test]
+async fn plain_owner_messages_in_one_dm_start_the_same_conversation_scope() {
+    let (link, sent) = host().await;
+    for id in ["a".repeat(64), "b".repeat(64)] {
+        let mut event = (*mention(&"c".repeat(64))).clone();
+        event.id = id;
+        event
+            .tags
+            .retain(|tag| tag.first().map(String::as_str) == Some("h"));
+        let started = deliver(
+            delivery(
+                Trigger::Mention {
+                    event: Arc::new(event),
+                },
+                link.clone(),
+            ),
+            RELAY.into(),
+            true,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(started.result.is_ok());
+    }
+    for request in sent.lock().unwrap().iter() {
+        let SandboxRequest::Start {
+            session,
+            replay_floor,
+        } = request
+        else {
+            panic!("expected start");
+        };
+        assert_eq!(
+            session.scope,
+            SandboxScope::DirectMessage {
+                dm_channel_id: CHANNEL.into()
+            }
+        );
+        assert_eq!(*replay_floor, Some(1_700_000_123));
+    }
+    assert_eq!(sent.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn a_channel_less_timer_is_a_successful_noop_before_community_lookup() {
+    let (link, sent) = host().await;
+    let mut delivery = delivery(timer_trigger(), link);
+    delivery.channel = None;
+    assert_eq!(
+        routing(&delivery.trigger, || panic!(
+            "timers must not consult community routing"
+        )),
+        Ok(None)
+    );
+    assert!(sent.lock().unwrap().is_empty());
+}
+
+#[test]
+fn mentions_keep_thread_routing_without_cached_channel_metadata() {
+    use buzz_relay_client::ChannelType;
+    let trigger = Trigger::Mention {
+        event: mention(&"c".repeat(64)),
+    };
+    for (kind, direct_message) in [
+        (None, false),
+        (Some(ChannelType::Stream), false),
+        (Some(ChannelType::Dm), true),
+    ] {
+        assert_eq!(
+            routing(&trigger, || Some((RELAY.into(), kind))),
+            Ok(Some((RELAY.into(), direct_message)))
+        );
+    }
+    assert!(routing(&trigger, || None).is_err());
 }

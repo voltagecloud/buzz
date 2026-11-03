@@ -1446,34 +1446,7 @@ impl Render for ThreadPanel {
             channel: self.channel.clone(),
             root: self.root_id.to_hex(),
         };
-        for (index, banner) in super::thread_banners::for_thread(&thread, cx)
-            .into_iter()
-            .enumerate()
-        {
-            status.push(note(banner.text).into_any_element());
-            if banner.buttons.is_empty() {
-                continue;
-            }
-            let buttons = banner.buttons.into_iter().enumerate().map(|(at, button)| {
-                let action = button.action;
-                Button::new(
-                    ElementId::Name(format!("thread-banner-{index}-{at}").into()),
-                    button.label,
-                )
-                .size(ButtonSize::Sm)
-                .loading(button.loading)
-                .on_click(move |_, window, cx| action(window, cx))
-            });
-            status.push(
-                div()
-                    .px(px(16.))
-                    .pb(px(12.))
-                    .flex()
-                    .gap(px(8.))
-                    .children(buttons)
-                    .into_any_element(),
-            );
-        }
+        status.extend(super::thread_banners::render(&thread, cx));
 
         let typing = typing::overlay(
             &activity.humans,

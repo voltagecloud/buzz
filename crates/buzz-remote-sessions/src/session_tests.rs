@@ -1,7 +1,7 @@
 use super::*;
 
 fn scope(root: &str) -> SessionScope {
-    SessionScope {
+    SessionScope::Thread {
         channel_id: uuid::Uuid::new_v4(),
         thread_root: root.to_string(),
     }
@@ -15,10 +15,13 @@ fn sandbox_scope_is_required_and_bound_to_the_rebuilt_owner() {
     assert!(bind_sandbox_scope(&mut config, None, "agent", &payload, None).is_err());
     assert_eq!(config["sandbox"], true);
     bind_sandbox_scope(&mut config, Some(&scope), "agent", &payload, None).unwrap();
-    assert_eq!(config["sandbox"]["thread_root"], scope.thread_root);
+    assert_eq!(
+        config["sandbox"]["thread_root"],
+        scope.thread_root().unwrap()
+    );
     assert_eq!(
         config["sandbox"]["channel_id"],
-        scope.channel_id.to_string()
+        scope.channel_id().to_string()
     );
     assert_eq!(config["identity_policy"]["owner_pubkey"], "owner");
     assert_eq!(config["identity_policy"]["agent_pubkey"], "agent");
@@ -121,7 +124,7 @@ fn session_scope_reads_the_camel_case_wire_shape_only() {
     }))
     .unwrap();
     assert_eq!(
-        scope.channel_id.to_string(),
+        scope.channel_id().to_string(),
         "f9ee507e-d03c-4570-baa6-02951c38e1cd"
     );
     assert!(serde_json::from_value::<SessionScope>(serde_json::json!({
@@ -363,4 +366,43 @@ fn replay_floor_creates_missing_policy_env() {
         payload["launch"]["policy_env"]["BUZZ_ACP_REPLAY_FLOOR"],
         "42"
     );
+}
+
+#[test]
+fn a_direct_message_scope_binds_the_whole_conversation_and_preserves_owner_checks() {
+    let channel = uuid::Uuid::new_v4();
+    let scope: SessionScope =
+        serde_json::from_value(serde_json::json!({"dmChannelId":channel})).unwrap();
+    assert_eq!(
+        scope,
+        SessionScope::DirectMessage {
+            dm_channel_id: channel
+        }
+    );
+    let payload = serde_json::json!({"launch":{"owner_pubkey":"owner"}});
+    for mode in [
+        None,
+        Some(RecoveryMode::Fresh),
+        Some(RecoveryMode::Checkpoint),
+    ] {
+        let mut config = serde_json::json!({"sandbox":true});
+        bind_sandbox_scope(&mut config, Some(&scope), "agent", &payload, mode).unwrap();
+        assert_eq!(config["sandbox"]["dm_channel_id"], channel.to_string());
+        assert!(config["sandbox"].get("thread_root").is_none());
+        assert_eq!(config["identity_policy"]["owner_pubkey"], "owner");
+    }
+    assert!(serde_json::from_value::<SessionScope>(
+        serde_json::json!({"dmChannelId":channel,"threadRoot":"a".repeat(64)})
+    )
+    .is_err());
+    let mut config = serde_json::json!({"sandbox":true});
+    assert!(bind_sandbox_scope(
+        &mut config,
+        Some(&scope),
+        "agent",
+        &serde_json::json!({}),
+        None
+    )
+    .is_err());
+    assert_eq!(config, serde_json::json!({"sandbox":true}));
 }

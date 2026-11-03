@@ -7,6 +7,7 @@
 use super::{Sent, send};
 use crate::agents2::Agents2;
 use crate::ui::thread_banners::{self, Banner, BannerButton, BannerThread, ThreadBanner};
+use buzz_host::api::SandboxScope;
 use buzz_host::api::{EndState, RecoveryMode, SandboxRequest, SandboxResponse, SandboxSession};
 use buzz_remote_sessions::{
     RecoveryKind, RecoveryPrompt, RecoveryPromptKey, RecoveryPrompts, SessionError, SessionScope,
@@ -152,11 +153,15 @@ pub struct Prompts {
 impl Global for Prompts {}
 
 fn key_of(session: &SandboxSession) -> Option<(RecoveryPromptKey, SessionScope)> {
-    let scope = SessionScope::new(
-        session.scope.channel_id.parse().ok()?,
-        session.scope.thread_root.clone(),
-    )
-    .ok()?;
+    let scope = match &session.scope {
+        SandboxScope::Thread {
+            channel_id,
+            thread_root,
+        } => SessionScope::new(channel_id.parse().ok()?, thread_root.clone()).ok()?,
+        SandboxScope::DirectMessage { dm_channel_id } => SessionScope::DirectMessage {
+            dm_channel_id: dm_channel_id.parse().ok()?,
+        },
+    };
     let key = RecoveryPromptKey::new(
         &session.tenant.relay,
         &session.tenant.signer,
@@ -237,8 +242,15 @@ impl Prompts {
         let Ok(channel) = thread.channel.parse() else {
             return Vec::new();
         };
-        let Ok(scope) = SessionScope::new(channel, thread.root.clone()) else {
-            return Vec::new();
+        let scope = if thread.root.is_empty() {
+            SessionScope::DirectMessage {
+                dm_channel_id: channel,
+            }
+        } else {
+            let Ok(scope) = SessionScope::new(channel, thread.root.clone()) else {
+                return Vec::new();
+            };
+            scope
         };
         let relay = |url: &str| url.trim().trim_end_matches('/').to_owned();
         self.prompts
@@ -386,7 +398,7 @@ mod tests {
                 relay: "wss://relay.example".into(),
                 signer: "a".repeat(64),
             },
-            scope: SandboxScope {
+            scope: SandboxScope::Thread {
                 channel_id: "f9ee507e-d03c-4570-baa6-02951c38e1cd".into(),
                 thread_root: root.to_string().repeat(64),
             },
@@ -464,7 +476,7 @@ mod tests {
                 panic!("expected recovery request")
             };
             assert_eq!(requested, mode);
-            assert_eq!(session.scope.thread_root, "c".repeat(64));
+            assert_eq!(session.scope, self::session('c').scope);
             assert_eq!(replay_floor, Some(1_700_000_123));
         }
     }
@@ -489,6 +501,35 @@ mod tests {
 
         assert!(!prompts.started(&sent('c', Ok(())), "Ada"));
         assert!(prompts.for_thread(&thread('c')).is_empty());
+    }
+
+    #[test]
+    fn a_dm_recovery_is_visible_in_its_conversation_and_replays_the_request() {
+        let mut sent = sent('c', Err(coded("session_ended")));
+        sent.session.scope = SandboxScope::DirectMessage {
+            dm_channel_id: thread('c').channel,
+        };
+        let mut prompts = Prompts::default();
+        assert!(prompts.started(&sent, "Ada"));
+        let mut conversation = thread('c');
+        conversation.root.clear();
+        let shown = prompts.for_thread(&conversation);
+        assert_eq!(shown.len(), 1);
+        let Some(SandboxRequest::Recover {
+            session,
+            replay_floor,
+            ..
+        }) = shown[0]
+            .1
+            .request(Action::Recover(RecoveryMode::Checkpoint))
+        else {
+            panic!("expected recover");
+        };
+        assert_eq!(session.scope, sent.session.scope);
+        assert_eq!(replay_floor, Some(sent.replay_floor));
+        assert!(prompts.for_thread(&thread('c')).is_empty());
+        conversation.channel = uuid::Uuid::new_v4().to_string();
+        assert!(prompts.for_thread(&conversation).is_empty());
     }
 
     #[test]

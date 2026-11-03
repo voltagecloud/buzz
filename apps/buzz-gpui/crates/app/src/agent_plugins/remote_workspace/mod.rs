@@ -65,7 +65,7 @@ impl AgentType for RemoteWorkspace {
 
     fn description(&self) -> Option<SharedString> {
         Some(
-            "Each thread runs in its own Kubernetes Sandbox, started by the agent's host or the Sandbox manager."
+            "Each channel thread or direct-message conversation runs in its own Kubernetes Sandbox."
                 .into(),
         )
     }
@@ -122,19 +122,33 @@ impl AgentType for RemoteWorkspace {
     }
 
     fn run(&self, delivery: Delivery, cx: &mut App) -> Task<Result<(), String>> {
-        let relay = Agents2::global(cx).and_then(|agents| {
-            agents
-                .read(cx)
+        let route = routing(&delivery.trigger, || {
+            let agents = Agents2::global(cx)?;
+            let agents = agents.read(cx);
+            let agent = agents
                 .running()
                 .iter()
-                .find(|agent| agent.pubkey == delivery.agent.pubkey)
-                .map(|agent| agent.relay.clone())
+                .find(|agent| agent.pubkey == delivery.agent.pubkey)?;
+            let community = agents.relay(&agent.pubkey)?;
+            let channel_type = delivery.channel.as_deref().and_then(|channel| {
+                community
+                    .read(cx)
+                    .snapshot
+                    .channels
+                    .iter()
+                    .find(|item| item.id == channel)
+                    .and_then(|item| item.channel_type)
+            });
+            Some((agent.relay.clone(), channel_type))
         });
-        let Some(relay) = relay else {
-            return Task::ready(Err("The agent is not running in a community".into()));
+        let (relay, direct_message) = match route {
+            Ok(Some(route)) => route,
+            Ok(None) => return Task::ready(Ok(())),
+            Err(error) => return Task::ready(Err(error)),
         };
         let name = delivery.agent.name.clone();
-        let started = crate::runtime::Runtime::handle(cx).spawn(deliver(delivery, relay));
+        let started =
+            crate::runtime::Runtime::handle(cx).spawn(deliver(delivery, relay, direct_message));
         cx.spawn(async move |cx| {
             let sent = started
                 .await
@@ -152,11 +166,29 @@ impl AgentType for RemoteWorkspace {
     }
 }
 
+/// Ignore autonomous triggers before lookup; unknown channel metadata keeps
+/// the existing channel-thread route for explicit mentions.
+fn routing(
+    trigger: &Trigger,
+    lookup: impl FnOnce() -> Option<(String, Option<buzz_relay_client::ChannelType>)>,
+) -> Result<Option<(String, bool)>, String> {
+    if !matches!(trigger, Trigger::Mention { .. }) {
+        return Ok(None);
+    }
+    lookup()
+        .map(|(relay, kind)| Some((relay, kind == Some(buzz_relay_client::ChannelType::Dm))))
+        .ok_or_else(|| "The agent or its community is no longer available.".into())
+}
+
 /// The session a mention starts, and how its start ended. Watches, timers
 /// and mentions from anyone but the owner start nothing; a mention that
 /// cannot start one fails before anything is sent.
-pub(crate) async fn deliver(delivery: Delivery, relay: String) -> Result<Option<Sent>, String> {
-    let Some(start) = start_of(&delivery, relay) else {
+pub(crate) async fn deliver(
+    delivery: Delivery,
+    relay: String,
+    direct_message: bool,
+) -> Result<Option<Sent>, String> {
+    let Some(start) = start_of(&delivery, relay, direct_message) else {
         return Ok(None);
     };
     let (session, replay_floor) = start?;
@@ -192,7 +224,11 @@ pub(crate) struct Sent {
 
 /// The mention's thread session and the time the harness replays from,
 /// for a mention by the owner or an agent it attested.
-fn start_of(delivery: &Delivery, relay: String) -> Option<Result<(SandboxSession, u64), String>> {
+fn start_of(
+    delivery: &Delivery,
+    relay: String,
+    direct_message: bool,
+) -> Option<Result<(SandboxSession, u64), String>> {
     let Trigger::Mention { event } = &delivery.trigger else {
         return None;
     };
@@ -213,9 +249,15 @@ fn start_of(delivery: &Delivery, relay: String) -> Option<Result<(SandboxSession
             relay,
             signer: agent.owner.clone(),
         },
-        scope: SandboxScope {
-            channel_id: channel,
-            thread_root: crate::agents2::working::thread_root(event),
+        scope: if direct_message {
+            SandboxScope::DirectMessage {
+                dm_channel_id: channel,
+            }
+        } else {
+            SandboxScope::Thread {
+                channel_id: channel,
+                thread_root: crate::agents2::working::thread_root(event),
+            }
         },
         spec: config.spec(&agent.name, delivery.team.as_deref()),
     };

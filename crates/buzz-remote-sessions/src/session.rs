@@ -8,21 +8,28 @@ use crate::SessionError;
 /// (unix seconds). The local spawn sets the same variable.
 pub const REPLAY_FLOOR_ENV_VAR: &str = "BUZZ_ACP_REPLAY_FLOOR";
 
-/// Published channel and canonical thread that own a remote workspace.
-///
-/// The fields are plain wire values. [`SessionScope::new`] validates them,
-/// and every invocation re-checks a deserialized scope before using it.
+/// A published channel thread or an entire direct-message conversation.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SessionScope {
-    pub channel_id: uuid::Uuid,
-    pub thread_root: String,
+#[serde(untagged, rename_all_fields = "camelCase", deny_unknown_fields)]
+pub enum SessionScope {
+    /// One canonical published channel thread.
+    Thread {
+        /// Channel UUID.
+        channel_id: uuid::Uuid,
+        /// Canonical root event ID.
+        thread_root: String,
+    },
+    /// One direct-message conversation, reused for every message in it.
+    DirectMessage {
+        /// DM channel UUID.
+        dm_channel_id: uuid::Uuid,
+    },
 }
 
 impl SessionScope {
-    /// A scope for `thread_root`, the thread's lowercase 64-hex root event id.
+    /// Validate and bind one published thread.
     pub fn new(channel_id: uuid::Uuid, thread_root: String) -> Result<Self, SessionError> {
-        let scope = Self {
+        let scope = Self::Thread {
             channel_id,
             thread_root,
         };
@@ -30,14 +37,31 @@ impl SessionScope {
         Ok(scope)
     }
 
+    /// The channel owning either kind of workspace.
+    pub fn channel_id(&self) -> uuid::Uuid {
+        match self {
+            Self::Thread { channel_id, .. } => *channel_id,
+            Self::DirectMessage { dm_channel_id } => *dm_channel_id,
+        }
+    }
+
+    /// The published root, absent for a complete DM conversation.
+    pub fn thread_root(&self) -> Option<&str> {
+        match self {
+            Self::Thread { thread_root, .. } => Some(thread_root),
+            Self::DirectMessage { .. } => None,
+        }
+    }
+
     fn check(&self) -> Result<(), String> {
-        if self.thread_root.len() != 64
-            || !self
-                .thread_root
-                .bytes()
-                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-        {
-            return Err("Remote workspace requires a canonical thread root".into());
+        if let Self::Thread { thread_root, .. } = self {
+            if thread_root.len() != 64
+                || !thread_root
+                    .bytes()
+                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            {
+                return Err("Remote workspace requires a canonical thread root".into());
+            }
         }
         Ok(())
     }
@@ -130,9 +154,15 @@ pub(crate) fn bind_sandbox_scope(
         .pointer("/launch/owner_pubkey")
         .and_then(|v| v.as_str())
         .ok_or("Remote workspace requires a verified owner")?;
-    config["sandbox"] = serde_json::json!({
-        "channel_id": scope.channel_id.to_string(), "thread_root": scope.thread_root,
-    });
+    config["sandbox"] = match scope {
+        SessionScope::Thread {
+            channel_id,
+            thread_root,
+        } => serde_json::json!({"channel_id":channel_id.to_string(), "thread_root":thread_root}),
+        SessionScope::DirectMessage { dm_channel_id } => {
+            serde_json::json!({"dm_channel_id":dm_channel_id.to_string()})
+        }
+    };
     if let Some(mode) = recovery {
         config["sandbox"]["recovery"] = serde_json::json!({ "mode": mode });
     }

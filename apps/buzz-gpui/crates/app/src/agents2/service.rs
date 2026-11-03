@@ -36,7 +36,9 @@ use crate::runtime::Runtime;
 use buzz_host::api::{AppAgentRequest, AppAgentResponse, AppAgentSummary, PortableAgent};
 use buzz_host_rpc::ConnectionState;
 use buzz_identity::Identity;
-use buzz_relay_client::{LiveBatch, RelayOrigin, Session, SessionStatus};
+use buzz_relay_client::{
+    ChannelSummary, ChannelType, LiveBatch, RelayOrigin, Session, SessionStatus,
+};
 use futures::FutureExt as _;
 use gpui_kit::{App, AppContext, Context, Entity, EntityId, Global, Subscription, Task};
 use serde_json::Value;
@@ -505,6 +507,14 @@ pub(crate) fn admit(window: &mut Window, queued: usize, now: Instant) -> bool {
     true
 }
 
+/// A plain message addresses an agent only in its two-party owner DM.
+fn owner_dm(channel: &ChannelSummary, owner: &str, agent: &str) -> bool {
+    channel.channel_type == Some(ChannelType::Dm)
+        && channel.members.len() == 2
+        && channel.members.iter().any(|member| member == owner)
+        && channel.members.iter().any(|member| member == agent)
+}
+
 /// What one event wakes an agent of `owner` for. Another of the owner's
 /// agents wakes it only by naming it, wherever: were a reply to it enough,
 /// two agents replying to each other would never stop. The claimed owner
@@ -516,6 +526,7 @@ pub(crate) fn heard(
     event: &Arc<EventData>,
     wrote: &dyn Fn(&str) -> bool,
     watches: &[CompiledWatch],
+    direct_message: bool,
 ) -> Vec<Trigger> {
     let mention = || {
         vec![Trigger::Mention {
@@ -533,7 +544,7 @@ pub(crate) fn heard(
             Vec::new()
         };
     }
-    if addressed_to(event, agent, wrote) {
+    if (direct_message && event.pubkey == owner) || addressed_to(event, agent, wrote) {
         return if CHAT_KINDS.contains(&event.kind) {
             mention()
         } else {
@@ -1715,6 +1726,13 @@ impl Agents2 {
                 .attention_enabled
                 .then(|| self.relay(&agent.pubkey))
                 .flatten();
+            let direct_message = self.relay(&agent.pubkey).is_some_and(|community| {
+                batch.channel.as_deref().is_some_and(|id| {
+                    community.read(cx).snapshot.channels.iter().any(|channel| {
+                        channel.id == id && owner_dm(channel, &agent.owner, &agent.pubkey)
+                    })
+                })
+            });
             let Some(runner) = self.runners.get_mut(&agent.pubkey) else {
                 continue;
             };
@@ -1753,7 +1771,14 @@ impl Agents2 {
                     .as_ref()
                     .is_some_and(|community| member(community, &agent.pubkey, event, cx));
                 let watches: &[CompiledWatch] = if watching { &watches } else { &[] };
-                for trigger in heard(&agent.pubkey, &agent.owner, event, &wrote, watches) {
+                for trigger in heard(
+                    &agent.pubkey,
+                    &agent.owner,
+                    event,
+                    &wrote,
+                    watches,
+                    direct_message,
+                ) {
                     let matched = match &trigger {
                         Trigger::Watch { slug, .. } => agent
                             .attention
