@@ -50,6 +50,10 @@ for developer in ('fixture', 'other-developer'):
     (repo/'source.txt').write_text('initial\n')
     run('git', '-C', str(repo), 'add', '.')
     run('git', '-C', str(repo), '-c', 'commit.gpgsign=false', 'commit', '-m', 'test: initialize fixture')
+    (repo/'history.txt').write_text('shallow history\n')
+    run('git', '-C', str(repo), 'add', 'history.txt')
+    run('git', '-C', str(repo), '-c', 'commit.gpgsign=false', 'commit', '-m', 'test: create shallow boundary')
+    (repo/'.git/shallow').write_text(run('git', '-C', str(repo), 'rev-parse', 'HEAD'))
     (repo/'source.txt').write_text('edited\n')
     env = dict(os.environ, BUZZ_CHECKPOINT_PREFIX=developer+'/')
     keys[developer] = json.loads(run('buzz-agent-checkpoint', 'save', '--workspace', str(workspace), env=env))['key']

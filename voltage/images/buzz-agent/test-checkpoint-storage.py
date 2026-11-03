@@ -29,6 +29,10 @@ run('git','-C',str(repo),'remote','add','origin','https://github.com/example/fix
 (repo/'source.txt').write_text('initial\n')
 run('git','-C',str(repo),'add','.')
 run('git','-C',str(repo),'-c','commit.gpgsign=false','commit','-m','test: initialize fixture')
+(repo/'history.txt').write_text('shallow history\n')
+run('git','-C',str(repo),'add','history.txt')
+run('git','-C',str(repo),'-c','commit.gpgsign=false','commit','-m','test: create shallow boundary')
+(repo/'.git/shallow').write_bytes(run('git','-C',str(repo),'rev-parse','HEAD'))
 (repo/'source.txt').write_text('edited\n')
 receipt=json.loads(run('buzz-agent-checkpoint','save'))
 assert receipt['repositories']==1

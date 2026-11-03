@@ -34,6 +34,7 @@ python3 -O test-native-agent.py buzz-agent:local
 python3 test-policy.py buzz-agent:local
 python3 test-accounts.py buzz-agent:local
 python3 test-checkpoint.py buzz-agent:local
+python3 test-checkpoint-shallow.py buzz-agent:local
 python3 test-checkpoint-storage.py buzz-agent:local
 python3 test-restore.py buzz-agent:local
 python3 test-gate.py buzz-agent:local
@@ -59,6 +60,12 @@ If these UIDs differ, the entrypoint refuses startup. A replacement Pod requires
 New sessions load the developer's current account profile.
 Checkpoints use the developer's S3 prefix and service account from Terraform.
 The harness stops adapter processes before invoking `buzz-agent-checkpoint save`, including cancellation during startup.
+Each save records shallow Git boundaries and validates every bundle in an independent repository before uploading the checkpoint.
+Restore preserves these boundaries, local branches, tags, and remote-tracking refs without contacting the forge.
+For older archives without boundary metadata, restore reconstructs missing parent boundaries and then runs `git fsck`.
+Missing trees, missing blobs, and other integrity failures stop recovery and remove the staged destination.
+The archive format remains version 1. Older images still restore complete histories, but cannot restore shallow bundles.
+Publish and promote the updated agent image before recovering a session with shallow repositories.
 A failed save retains the Sandbox for recovery; do not delete its workspace.
 
 Explicit checkpoint recovery sets `BUZZ_CHECKPOINT_RESTORE_KEY` in the launch Secret; it is empty otherwise.
