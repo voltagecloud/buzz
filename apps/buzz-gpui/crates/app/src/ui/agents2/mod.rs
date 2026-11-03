@@ -8,8 +8,12 @@ pub(crate) mod card;
 mod create;
 mod manage;
 mod memory;
+#[cfg(feature = "voltage-sandbox")]
+mod migration_controls;
 mod packs;
 mod page;
+#[cfg(feature = "voltage-sandbox")]
+mod remote_migration;
 pub(crate) mod routes;
 mod tabs;
 mod teams;

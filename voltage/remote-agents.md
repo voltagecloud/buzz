@@ -273,7 +273,11 @@ Create a key at [openrouter.ai/keys](https://openrouter.ai/keys). The **Buzz age
 
 1. In the Buzz app, open **Agents → Your agents**.
 2. Select **Create agent**, then select **Remote workspace** in the agent type list.
-   To convert an existing Codex or Claude Code agent instead, open it and select **Remote workspace** under **Settings → Provider**. The agent keeps its instructions.
+   To move a team or several existing agents, select **Agents → Your agents → Move to remote**.
+   Choose a team or individual agents, use a new or existing remote configuration, and review the batch.
+   Already-remote agents remain unchanged.
+   See [Move existing agents to Remote workspace](../apps/buzz-gpui/docs/remote-agent-migration.md) for preservation and recovery details.
+   For one agent, you can also select **Remote workspace** under **Settings → Provider**.
 3. Fill in **Settings**, then select **Save**.
 
 | Field | Value |

@@ -43,6 +43,17 @@ pub fn init(cx: &mut App) {
 
 struct RemoteWorkspace;
 
+/// Shared destination editor for a batch; per-agent instructions and
+/// environments are deliberately absent from this form.
+pub(crate) fn migration_settings(
+    view: crate::agents2::AgentView,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyView {
+    cx.new(|cx| settings::SettingsTab::shared(view, window, cx))
+        .into()
+}
+
 impl AgentType for RemoteWorkspace {
     fn id(&self) -> &'static str {
         TYPE_ID

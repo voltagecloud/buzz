@@ -8,6 +8,9 @@ same look. It can also manage agents running on other machines through
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
 
+Voltage builds also support moving saved teams or selected agents through **Agents → Your agents → Move to remote**.
+See [Move existing agents to Remote workspace](docs/remote-agent-migration.md) for setup, preserved settings, and recovery.
+
 ## Laptop: install the app (Ubuntu)
 
 ```sh

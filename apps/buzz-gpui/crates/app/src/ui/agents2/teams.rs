@@ -19,6 +19,13 @@ use gpui_kit::*;
 /// The panel asks to close.
 pub struct CloseTeams;
 
+/// Review moving this saved team to Remote workspace.
+#[cfg(feature = "voltage-sandbox")]
+pub struct MoveTeam(pub String);
+
+#[cfg(feature = "voltage-sandbox")]
+impl EventEmitter<MoveTeam> for TeamsPanel {}
+
 /// The editor of one team, or of a new one.
 struct Editor {
     /// `None` for a new team.
@@ -202,6 +209,8 @@ impl TeamsPanel {
                 .collect::<Vec<_>>()
                 .join(", ");
             let edit = team.clone();
+            #[cfg(feature = "voltage-sandbox")]
+            let move_id = team.id.clone();
             div()
                 .flex()
                 .items_center()
@@ -229,6 +238,21 @@ impl TeamsPanel {
                                 }),
                         ),
                 )
+                .map(|row| {
+                    #[cfg(feature = "voltage-sandbox")]
+                    let row = row.child(
+                        super::migration_controls::Button::new(
+                            ("team-move-remote", index),
+                            "Move to remote",
+                        )
+                        .size(ButtonSize::Sm)
+                        .tooltip(format!("Move {} to Remote workspace", team.name))
+                        .on_click(
+                            cx.listener(move |_, _, _, cx| cx.emit(MoveTeam(move_id.clone()))),
+                        ),
+                    );
+                    row
+                })
                 .child(
                     Button::new(("team-edit", index), "Edit")
                         .size(ButtonSize::Sm)
