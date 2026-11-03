@@ -157,14 +157,24 @@ impl Context {
                     },
                 })
             }
-            SandboxRequest::Recover { session, mode } => {
+            SandboxRequest::Recover {
+                session,
+                mode,
+                replay_floor,
+            } => {
                 let (thread, sessions) = self.prepare(session).await?;
                 let mode = match mode {
                     RecoveryMode::Checkpoint => remote::RecoveryMode::Checkpoint,
                     RecoveryMode::Fresh => remote::RecoveryMode::Fresh,
                 };
                 sessions
-                    .recover(&thread.pubkey, thread.tenant(), &thread.scope, mode)
+                    .recover_with_replay_floor(
+                        &thread.pubkey,
+                        thread.tenant(),
+                        &thread.scope,
+                        mode,
+                        replay_floor,
+                    )
                     .await?;
                 Ok(SandboxResponse::Started)
             }

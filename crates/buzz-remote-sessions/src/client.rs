@@ -203,13 +203,27 @@ impl<S: InvocationSource> RemoteSessions<S> {
         session: &SessionScope,
         mode: RecoveryMode,
     ) -> Result<(), SessionError> {
+        self.recover_with_replay_floor(agent_pubkey, tenant, session, mode, None)
+            .await
+    }
+
+    /// Recover and replay the signed mention whose start failed.
+    /// The floor is an operation input, never persisted as agent configuration.
+    pub async fn recover_with_replay_floor(
+        &self,
+        agent_pubkey: &str,
+        tenant: Tenant<'_>,
+        session: &SessionScope,
+        mode: RecoveryMode,
+        replay_floor_unix: Option<u64>,
+    ) -> Result<(), SessionError> {
         let tenant = tenant.require_both()?;
         self.run_deploy(
             agent_pubkey,
             tenant,
             Some(session),
             Action::Recover(mode),
-            None,
+            replay_floor_unix,
         )
         .await
     }

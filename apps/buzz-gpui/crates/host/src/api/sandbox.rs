@@ -32,6 +32,9 @@ pub enum SandboxRequest {
     Recover {
         session: SandboxSession,
         mode: RecoveryMode,
+        /// Failed mention to replay after recovery; absent for an unprompted recovery.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replay_floor: Option<u64>,
     },
     /// Whether the agent's provider can end and recover sessions. Answers
     /// [`SandboxResponse::Lifecycle`].
@@ -243,6 +246,7 @@ mod tests {
         let recover = SandboxRequest::Recover {
             session: session(),
             mode: RecoveryMode::Checkpoint,
+            replay_floor: None,
         };
         assert!(matches!(
             rmp_serde::from_slice(&wire(&recover)).unwrap(),
