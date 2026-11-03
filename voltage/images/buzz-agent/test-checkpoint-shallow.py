@@ -135,6 +135,33 @@ with tempfile.TemporaryDirectory() as temp:
         checkpoint.git = original_git
     print('PASS: save validates its bundle in an independent repository before producing an archive')
 
+    # Exercise the integration with origin-based snapshots too. The URL rewrite
+    # supplies a local forge; the container still has no network access.
+    git(root, 'config', '--global', 'url.'+upstream.as_uri()+'.insteadOf',
+        'https://github.com/example/fixture.git')
+    origin_archive = root/'origin.tar.gz'
+    origin_manifest = checkpoint.pack(workspace, origin_archive)
+    assert origin_manifest['version'] == 2
+    assert origin_manifest['repositories'][0]['base'] == 'origin'
+    origin_destination = root/'restored-origin'
+    checkpoint.restore(origin_archive, origin_destination)
+    origin_repo = origin_destination/'example'
+    assert git(origin_repo, 'rev-parse', 'HEAD').decode().strip() == head
+    assert git(origin_repo, 'status', '--porcelain') == original_status
+    assert (origin_repo/'source.txt').read_text() == 'working edit\n'
+    assert git(origin_repo, 'rev-parse', '--is-shallow-repository').strip() == b'false'
+    git(origin_repo, 'fsck', '--full')
+    # If the origin cannot be read, the same shallow checkout must still use
+    # the independent bundle validation and recovery from #99.
+    git(root, 'config', '--global', '--unset-all',
+        'url.'+upstream.as_uri()+'.insteadOf')
+    fallback_archive = root/'fallback.tar.gz'
+    fallback_manifest = checkpoint.pack(workspace, fallback_archive)
+    assert fallback_manifest['version'] == 1
+    assert fallback_manifest['repositories'][0]['base'] == 'bundle'
+    verify(fallback_archive, 'restored-fallback')
+    print('PASS: shallow origin snapshots restore full history; an unavailable origin falls back to a verified shallow bundle')
+
     # A damaged archive can produce large fsck diagnostics. Exercise the real
     # child process boundary and verify it is reaped when the output is capped.
     tools = root/'tools'
