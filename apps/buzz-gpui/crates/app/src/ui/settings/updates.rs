@@ -221,6 +221,10 @@ fn notes(cx: &App) -> Option<AnyElement> {
         .with_link(c.text_link)
         .with_border(c.border_standard)
         .with_code_background(c.affordance_subtle)
+        .with_inline_code(HighlightStyle {
+            background_color: Some(c.affordance_subtle),
+            ..Default::default()
+        })
         .with_selection(c.text_link.opacity(0.25));
     let view_on_github = button("update-release-page", "View on GitHub")
         .icon_end(IconName::ArrowSquareOut)

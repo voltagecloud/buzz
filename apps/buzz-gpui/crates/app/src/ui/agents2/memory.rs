@@ -634,6 +634,10 @@ fn memory_body(key: &str, body: &str, rich: bool, cx: &App) -> AnyElement {
         .with_link(c.text_link)
         .with_border(c.border_standard)
         .with_code_background(c.affordance_subtle)
+        .with_inline_code(HighlightStyle {
+            background_color: Some(c.affordance_subtle),
+            ..Default::default()
+        })
         .with_selection(c.text_link.opacity(0.25));
     TextView::markdown(
         SharedString::from(format!("memory-body-{key}")),
