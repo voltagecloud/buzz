@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The bundled Node, re-signed with the app: the code-generation
+     entitlements Node's own release is signed with (tools/osx-entitlements.plist),
+     without get-task-allow, which notarization refuses, and without those
+     for loading native addons or DYLD_ variables, which Buzz's plugins do not
+     use. -->
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <key>com.apple.security.cs.disable-executable-page-protection</key>
+  <true/>
+</dict>
+</plist>
