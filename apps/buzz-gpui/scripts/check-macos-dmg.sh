@@ -42,6 +42,10 @@ app="$work/Buzz.app"
 # The bundled Node runs every bundled plugin.
 "$app/Contents/Resources/node/bin/node" "$here/scripts/check-plugins.mjs" \
   "$app/Contents/Resources/plugins"
+if [ "${BUZZ_GPUI_VOLTAGE:-0}" = 1 ]; then
+  "$app/Contents/Resources/node/bin/node" "$here/scripts/check-remote-provider.mjs" \
+    "$app/Contents/MacOS/buzz-backend-relay"
+fi
 du -sh "$app"
 codesign --verify --deep --strict "$app"
 

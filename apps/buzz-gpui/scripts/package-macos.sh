@@ -32,12 +32,15 @@ export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-Wl,-headerpad_max_install_names"
 version="$(cargo metadata --no-deps --format-version 1 \
   | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "buzz-gpui"))')"
 arch="$(uname -m)"
-cargo build --locked --release -p buzz-gpui
+bash scripts/build-package.sh
 
 work="$(mktemp -d)"
 app="$work/Buzz.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" dist
 cp target/release/buzz-gpui "$app/Contents/MacOS/"
+if [ "${BUZZ_GPUI_VOLTAGE:-0}" = 1 ]; then
+  cp target/release/buzz-backend-relay "$app/Contents/MacOS/"
+fi
 
 iconset="$work/buzz.iconset"
 mkdir "$iconset"

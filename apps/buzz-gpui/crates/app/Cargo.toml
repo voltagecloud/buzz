@@ -148,3 +148,10 @@ assets = [
     ["target/release/bundle/node/LICENSE", "usr/lib/buzz-gpui/node/", "644"],
     ["target/release/bundle/plugins/**/*", "usr/share/buzz-gpui/plugins/", "644"],
 ]
+
+[package.metadata.deb.variants.voltage]
+name = "buzz-gpui"
+features = ["voltage-sandbox"]
+merge-assets.append = [
+    ["target/release/buzz-backend-relay", "usr/bin/buzz-backend-relay", "755"],
+]

@@ -111,7 +111,10 @@ def main():
         if (system / name).exists():
             available[name] = system / name
     pending = []
-    for exe in ("buzz-gpui.exe", "buzzd.exe"):
+    executables = ["buzz-gpui.exe", "buzzd.exe"]
+    if os.environ.get("BUZZ_GPUI_VOLTAGE") == "1":
+        executables.append("buzz-backend-relay.exe")
+    for exe in executables:
         shutil.copy2(repo / "target" / "release" / exe, stage / "bin")
         pending.append(stage / "bin" / exe)
     for name in PLUGINS:

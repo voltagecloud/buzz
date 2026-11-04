@@ -13,13 +13,14 @@ set -euo pipefail
 node_version=22.23.3
 node_sha256=df450af89261115ef9f9e3830c3eeb2cc9213b63c720b1af623cb5dcbe2e02de
 here="$(cd "$(dirname "$0")/.." && pwd)"
+repo="$(cd "$here/../.." && pwd)"
 cache="$HOME/.cache/buzz-gpui-deb"
 mkdir -p "$here/dist" "$cache/cargo" "$cache/rustup" "$cache/target"
 # Never leave an older package around to be mistaken for this build.
 rm -f "$here"/dist/*.deb
 
 docker run --rm \
-  -v "$here:$here" \
+  -v "$repo:$repo" \
   -v "$cache/cargo:/root/.cargo" \
   -v "$cache/rustup:/root/.rustup" \
   -v "$cache/target:$here/target-deb" \
@@ -28,6 +29,7 @@ docker run --rm \
   -e NODE_VERSION="$node_version" \
   -e NODE_SHA256="$node_sha256" \
   -e BUZZ_GPUI_RELEASE_VERSION \
+  -e BUZZ_GPUI_VOLTAGE \
   -w "$here" \
   ubuntu:26.04 bash -euo pipefail -c '
     export DEBIAN_FRONTEND=noninteractive
@@ -63,12 +65,22 @@ docker run --rm \
       curl -sSf https://sh.rustup.rs | sh -s -- -y -q --profile minimal --no-modify-path
     fi
     . /root/.cargo/env
-    rustup toolchain list | grep -q stable || rustup default stable
+    # The repository root pins the relay toolchain; GPUI uses its own pin.
+    rustup toolchain install 1.98.1 --profile minimal --no-self-update
+    export RUSTUP_TOOLCHAIN=1.98.1
     command -v cargo-deb >/dev/null || cargo install -q --locked cargo-deb
     # cargo-deb maps the target/release asset paths onto CARGO_TARGET_DIR.
-    cargo build --locked --release -p buzz-gpui
-    cargo deb --no-build -p buzz-gpui -o dist/ \
+    bash scripts/build-package.sh
+    variant=()
+    if [ "${BUZZ_GPUI_VOLTAGE:-0}" = 1 ]; then variant=(--variant voltage); fi
+    cargo deb --no-build -p buzz-gpui "${variant[@]}" -o dist/ \
       ${BUZZ_GPUI_RELEASE_VERSION:+--deb-version "$BUZZ_GPUI_RELEASE_VERSION"}
+    if [ "${BUZZ_GPUI_VOLTAGE:-0}" = 1 ]; then
+      extracted=$(mktemp -d)
+      dpkg-deb -x dist/*.deb "$extracted"
+      "$bundle/node/bin/node" scripts/check-remote-provider.mjs "$extracted/usr/bin/buzz-backend-relay"
+      rm -rf "$extracted"
+    fi
     chown -R "$OWNER" dist
   '
 ls -la "$here"/dist/*.deb
