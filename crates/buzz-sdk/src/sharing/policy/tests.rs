@@ -2,8 +2,7 @@ use super::*;
 use nostr::{EventBuilder, Keys, Tag, Timestamp};
 use std::{
     future::{ready, Future},
-    sync::Arc,
-    task::{Context, Poll, Wake, Waker},
+    task::{Context, Poll, Waker},
 };
 use uuid::Uuid;
 
@@ -157,12 +156,7 @@ impl Fixture {
     }
 }
 fn complete<F: Future>(future: F) -> F::Output {
-    struct Noop;
-    impl Wake for Noop {
-        fn wake(self: Arc<Self>) {}
-    }
-    let waker = Waker::from(Arc::new(Noop));
-    match std::pin::pin!(future).poll(&mut Context::from_waker(&waker)) {
+    match std::pin::pin!(future).poll(&mut Context::from_waker(Waker::noop())) {
         Poll::Ready(result) => result,
         Poll::Pending => panic!("fixture futures must complete immediately"),
     }
