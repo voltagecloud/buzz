@@ -7,6 +7,9 @@ use std::{
 };
 use uuid::Uuid;
 
+#[path = "workflow_tests.rs"]
+mod workflows;
+
 struct Fixture {
     relay: Keys,
     owner: Keys,

@@ -43,6 +43,39 @@ parent event. A durable manager journal permits four handoffs total and at most
 two admissions per agent under one human-to-initial-agent task. A duplicate
 admission consumes no additional budget. The task expires after seven days.
 
+## Schedule remote work
+
+In desktop, open **Workflows**, choose a channel, and create a workflow with a
+**Schedule** trigger and a **Send message** step. Put an explicit `@AgentName`
+mention and the task instructions in the saved step text. The schedule editor
+supports hourly, daily, weekly, and custom cron schedules. Schedule times use UTC.
+
+The relay runs the schedule while the owner's desktop is closed. Leave the step's
+reply target unset so each fire starts a new channel thread and wakes the remote
+agent through the ordinary mention listener. Register the agent from desktop once.
+Keep its runtime set to Remote workspace. Both owner and agent must remain explicit
+channel members. This path requires the matching manager and harness versions and the
+existing `shared_tasks: true` configuration described below.
+
+An owner's workflow can invoke their private agent without a channel sharing
+grant. A teammate's workflow requires the target agent's current channel grant.
+Every admission checks current ownership, channel and workspace membership, and
+archive status. Existing task budgets also apply to workflow handoffs.
+
+Only the active relay's signed workflow proof delegates the workflow owner's
+authority. A mention inserted through trigger-controlled template substitutions
+does not delegate it. The signed event and budget receipt keep the relay as the
+actual signer; the verified workflow owner supplies the human authorization.
+
+Disable the workflow to stop future scheduled messages. This does not cancel an
+already emitted task. An unthreaded fire has a separate root and budget. Schedules
+use the existing server scheduler and durable fire claims. Remote sessions use
+their normal lifecycle and the configured compute and model budget.
+
+To test after rollout, schedule a short task that replies in the channel, close
+desktop, and wait for the scheduled time. Confirm a remote session starts and
+replies beneath that scheduled message. Disable the workflow after the test.
+
 ## Rollout
 
 The implementation is off by default. Before enabling it:
@@ -85,3 +118,9 @@ This runs real relay admission, wake listeners, harness processes, and CLI
 commands for two owners and two agents, followed by revocation. A deterministic
 ACP adapter replaces the model and a simulated Kubernetes API replaces the
 cluster. It does not validate a real image pull, cloud Pod, or external model.
+
+With the same environment variables, run
+`cargo test -p buzz-sandbox-reaper scheduled_workflow_wakes -- --ignored --nocapture`
+to exercise an actual relay cron fire, private-agent wake, and a reply from the
+shipped harness while the owner's connection is closed. The local test uses a
+one-minute cron schedule and can take approximately two minutes.

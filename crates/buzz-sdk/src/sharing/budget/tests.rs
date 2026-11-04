@@ -12,6 +12,7 @@ pub fn task() -> Task {
             root: id,
         },
         requester: human,
+        origin_requester: human,
         agent,
         owner: human,
         origin: Origin {

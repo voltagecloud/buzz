@@ -19,7 +19,7 @@ pub struct Scope {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Origin {
-    /// The original human's signed task message.
+    /// The original human task, signed directly or delegated by the verified relay.
     pub request: EventId,
     /// The agent that human initially addressed.
     pub agent: PublicKey,
