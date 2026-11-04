@@ -1,6 +1,7 @@
 //! Client for Buzz relays.
 
 pub mod account;
+pub mod agent_sharing;
 pub mod archive;
 pub mod audience;
 pub mod budget;

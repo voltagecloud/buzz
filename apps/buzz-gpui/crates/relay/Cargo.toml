@@ -37,6 +37,8 @@ url = "2"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+buzz-sdk = { path = "../../../../crates/buzz-sdk" }
+nostr-wire = { package = "nostr", version = "0.44" }
 crc32fast = "1"
 tempfile = "3"
 # Test builds also trust `SSL_CERT_FILE`, for the test relay's own CA.

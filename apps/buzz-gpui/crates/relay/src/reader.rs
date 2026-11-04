@@ -797,7 +797,7 @@ mod scheduling_tests {
         assert_eq!(fake.peak.load(SeqCst), 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn deadline_counts_queue_time() {
         let fake = Fake::new(false);
         let reader = spawn_reader(
