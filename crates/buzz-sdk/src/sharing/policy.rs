@@ -29,13 +29,15 @@ pub struct Task {
     pub scope: Scope,
     /// The actual signed requester, never replaced with the authorizing owner.
     pub requester: PublicKey,
+    /// Actual signer of the original task, including a verified relay delegation.
+    pub origin_requester: PublicKey,
     /// Addressed agent.
     pub agent: PublicKey,
     /// Target agent's current owner.
     pub owner: PublicKey,
     /// Original human request and preceding admission.
     pub origin: Origin,
-    /// Original human identity.
+    /// Original authorizing human, including a verified workflow owner.
     pub human: PublicKey,
     /// Initial agent's owner; chooses its existing namespace for the journal.
     pub origin_owner: PublicKey,
@@ -62,6 +64,7 @@ where
     Fut: Future<Output = Result<Vec<Event>, ()>>,
 {
     let scope = task::scope(event, agent, now).map_err(|_| Error::Denied("invalid mention"))?;
+    let requester = crate::workflow::owner(event, relay, agent).unwrap_or(event.pubkey);
     let stored = one(
         &mut query,
         json!({"kinds":[9,40002], "ids":[event.id], "#h":[scope.channel], "limit":1}),
@@ -102,14 +105,16 @@ where
     }) {
         return Err(Error::Denied("conversation cannot be shared"));
     }
-    for member in [owner, agent, event.pubkey] {
+    for member in [owner, agent, requester] {
         member_role(&roster, member)?;
     }
     let target = profile(&mut query, agent).await?;
     if profile_owner(&target, now).ok() != Some(owner) {
         return Err(Error::Denied("agent ownership changed"));
     }
-    grant(&mut query, owner, agent, &scope, event, now).await?;
+    if requester != owner {
+        grant(&mut query, owner, agent, &scope, event, now).await?;
+    }
     // Channel roles and self-authored profiles can change. Only a direct
     // workspace member may originate a human budget; an agent cannot gain a
     // fresh budget by stripping its profile credential or rejoining as member.
@@ -125,13 +130,13 @@ where
     {
         return Err(Error::Unavailable);
     }
-    let requester = profile(&mut query, event.pubkey).await?;
-    let automated = is_agent(&requester, member_role(&roster, event.pubkey)?, now)?;
+    let requester_profile = profile(&mut query, requester).await?;
+    let automated = is_agent(&requester_profile, member_role(&roster, requester)?, now)?;
     let claimed = task::origin(event).map_err(|_| Error::Denied("invalid task ancestry"))?;
     let origin = if automated {
         claimed.ok_or(Error::Denied("agent handoff requires task ancestry"))?
     } else {
-        workspace_human(&humans, event.pubkey)?;
+        workspace_human(&humans, requester)?;
         if claimed.is_some() {
             return Err(Error::Denied("human tasks cannot claim agent ancestry"));
         }
@@ -159,11 +164,12 @@ where
     {
         return Err(Error::Denied("request is outside this task"));
     }
-    let human = profile(&mut query, root.pubkey).await?;
-    if is_agent(&human, member_role(&roster, root.pubkey)?, now)? {
+    let human_key = crate::workflow::owner(&root, relay, origin.agent).unwrap_or(root.pubkey);
+    let human = profile(&mut query, human_key).await?;
+    if is_agent(&human, member_role(&roster, human_key)?, now)? {
         return Err(Error::Denied("an agent cannot reset the human budget"));
     }
-    workspace_human(&humans, root.pubkey)?;
+    workspace_human(&humans, human_key)?;
     if automated {
         ancestry(&mut query, event, &root, origin, scope, now).await?;
     }
@@ -172,16 +178,17 @@ where
     let origin_owner =
         profile_owner(&initial, now).map_err(|_| Error::Denied("invalid initial agent owner"))?;
     member_role(&roster, origin_owner)?;
-    if root.pubkey != origin_owner {
+    if human_key != origin_owner {
         grant(&mut query, origin_owner, origin.agent, &scope, &root, now).await?;
     }
     Ok(Task {
         scope,
         requester: event.pubkey,
+        origin_requester: root.pubkey,
         agent,
         owner,
         origin,
-        human: root.pubkey,
+        human: human_key,
         origin_owner,
         trigger: event.id,
         handoff: automated,

@@ -68,7 +68,7 @@ impl Budget {
             receipts: vec![Receipt {
                 event: task.origin.request,
                 agent: task.origin.agent,
-                requester: task.human,
+                requester: task.origin_requester,
                 handoff: false,
             }],
         };
@@ -106,7 +106,7 @@ impl Budget {
         let first = &self.receipts[0];
         if first.event != self.request
             || first.agent != self.agent
-            || first.requester != self.human
+            || first.requester != task.origin_requester
             || first.handoff
         {
             return Err(Error::Journal);

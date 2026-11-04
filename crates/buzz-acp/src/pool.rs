@@ -2521,8 +2521,8 @@ pub async fn run_prompt_task(
                 continue;
             }
             match sharing.authorize(&item.event).await {
-                Ok(None) => {}
-                Ok(Some(reason)) => {
+                Ok(crate::sharing::Admission::Allowed(_)) => {}
+                Ok(crate::sharing::Admission::Refused(reason)) => {
                     denied = Some(reason);
                     break;
                 }

@@ -41,6 +41,7 @@ async fn encrypted_admission_uses_fresh_ids_and_request_scoped_reply_filters() {
     let requests = Arc::new(Mutex::new(Vec::<String>::new()));
     let captured = requests.clone();
     let manager_pub = manager.public_key();
+    let human = Keys::generate().public_key();
     let server = tokio::spawn(async move {
         for _ in 0..5 {
             let (stream, _) = listener.accept().await.unwrap();
@@ -105,10 +106,12 @@ async fn encrypted_admission_uses_fresh_ids_and_request_scoped_reply_filters() {
                             ))
                             .await
                             .unwrap();
-                        let response = if attempt == 0 || attempt == 3 {
-                            json!({"ok":true})
-                        } else {
-                            json!({"ok":false,"code":"shared_task_denied","error":"sharing was revoked"})
+                        let response = match attempt {
+                            0 => json!({"ok":true}),
+                            3 => json!({"ok":true,"human":human}),
+                            _ => {
+                                json!({"ok":false,"code":"shared_task_denied","error":"sharing was revoked"})
+                            }
                         };
                         let reply =
                             buzz_session_control::Reply::done(opened.request.request_id, response);
@@ -134,10 +137,13 @@ async fn encrypted_admission_uses_fresh_ids_and_request_scoped_reply_filters() {
         }
     });
     let (client, event) = fixture(url, manager_pub, directory.path().into());
-    assert!(client.authorize(&event).await.unwrap().is_none());
     assert_eq!(
-        client.authorize(&event).await.unwrap().as_deref(),
-        Some("sharing was revoked")
+        client.authorize(&event).await.unwrap(),
+        Admission::Allowed(event.pubkey)
+    );
+    assert_eq!(
+        client.authorize(&event).await.unwrap(),
+        Admission::Refused("sharing was revoked".into())
     );
     let (rest, rest_server) =
         crate::author_gate_tests::nip11_server(json!({"self":manager_pub})).await;
@@ -189,8 +195,8 @@ async fn encrypted_admission_uses_fresh_ids_and_request_scoped_reply_filters() {
     .unwrap();
     assert_eq!(
         allowed.into_parts().1,
-        event.pubkey.to_hex(),
-        "shared requests retain the actual signer"
+        human.to_hex(),
+        "a verified manager response supplies the workflow's authorizing human"
     );
     rest_server.abort();
     server.await.unwrap();
@@ -199,6 +205,44 @@ async fn encrypted_admission_uses_fresh_ids_and_request_scoped_reply_filters() {
     assert_ne!(
         ids[0], ids[1],
         "a cached transport approval must not survive revocation"
+    );
+}
+
+#[test]
+fn delegated_author_metadata_cannot_replace_a_handoff_signer_or_accept_malformed_humans() {
+    let directory = tempfile::tempdir().unwrap();
+    let (client, root) = fixture(
+        "ws://127.0.0.1:1".into(),
+        Keys::generate().public_key(),
+        directory.path().into(),
+    );
+    let human = Keys::generate().public_key();
+    assert_eq!(
+        admitted_author(&json!({"human":human}), &root).unwrap(),
+        human
+    );
+    for value in [
+        json!(null),
+        json!(42),
+        json!("invalid"),
+        json!(human.to_hex().to_uppercase()),
+    ] {
+        assert!(admitted_author(&json!({"human":value}), &root).is_err());
+    }
+    let handoff = buzz_sdk::sharing::task::handoff(
+        &root,
+        client.keys.public_key(),
+        Keys::generate().public_key(),
+        "continue",
+        Timestamp::now().as_secs(),
+    )
+    .unwrap()
+    .sign_with_keys(&client.keys)
+    .unwrap();
+    assert_eq!(
+        admitted_author(&json!({"human":human}), &handoff).unwrap(),
+        client.keys.public_key(),
+        "a handoff must retain its actual agent signer"
     );
 }
 

@@ -18,6 +18,13 @@ mod tests;
 #[error("shared task admission unavailable; retry or recover this task")]
 pub struct Error;
 
+/// A verified manager admission, or a permanent refusal safe to show the user.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Admission {
+    Allowed(PublicKey),
+    Refused(String),
+}
+
 /// Agent credentials used only for encrypted requests and signed channel replies.
 /// Deliberately has no Debug implementation.
 #[derive(Clone)]
@@ -72,16 +79,18 @@ impl Client {
     }
 
     /// Return a permanent refusal separately from a retryable transport failure.
-    pub(crate) async fn authorize(&self, event: &Event) -> Result<Option<String>, Error> {
+    pub(crate) async fn authorize(&self, event: &Event) -> Result<Admission, Error> {
         if !self.accepts(event) {
-            return Ok(Some("task is outside this bound conversation".into()));
+            return Ok(Admission::Refused(
+                "task is outside this bound conversation".into(),
+            ));
         }
         tokio::time::timeout(Duration::from_secs(50), self.exchange(event))
             .await
             .map_err(|_| Error)?
     }
 
-    async fn exchange(&self, trigger: &Event) -> Result<Option<String>, Error> {
+    async fn exchange(&self, trigger: &Event) -> Result<Admission, Error> {
         let auth = buzz_sdk::nip_oa::parse_auth_tag(&self.auth).map_err(|_| Error)?;
         let request = Request::new(
             Op::Admit,
@@ -148,7 +157,7 @@ impl Client {
                     }
                     let response = reply.response.ok_or(Error)?;
                     if response["ok"] == true {
-                        return Ok(None);
+                        return Ok(Admission::Allowed(admitted_author(&response, trigger)?));
                     }
                     if response["code"] == "shared_task_retry" {
                         return Err(Error);
@@ -156,7 +165,7 @@ impl Client {
                     let reason = response["error"]
                         .as_str()
                         .unwrap_or("task permission was refused");
-                    return Ok(Some(reason.chars().take(500).collect()));
+                    return Ok(Admission::Refused(reason.chars().take(500).collect()));
                 }
                 RelayMessage::Closed { .. } | RelayMessage::Auth { .. } => return Err(Error),
                 _ => {}
@@ -266,6 +275,26 @@ impl Client {
             }
         }))
     }
+}
+
+// Called only after authenticating the manager's encrypted, request-bound reply.
+// Root tasks adopt the authorizing human; handoffs retain the sending agent.
+fn admitted_author(response: &serde_json::Value, trigger: &Event) -> Result<PublicKey, Error> {
+    if buzz_sdk::sharing::task::origin(trigger)
+        .map_err(|_| Error)?
+        .is_some()
+    {
+        return Ok(trigger.pubkey);
+    }
+    let Some(value) = response.get("human") else {
+        return Ok(trigger.pubkey);
+    };
+    let text = value.as_str().ok_or(Error)?;
+    let key = PublicKey::from_hex(text).map_err(|_| Error)?;
+    if key.to_hex() != text {
+        return Err(Error);
+    }
+    Ok(key)
 }
 
 pub(crate) struct NoticeWorker(tokio::task::JoinHandle<()>);

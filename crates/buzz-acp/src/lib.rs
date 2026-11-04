@@ -449,64 +449,9 @@ fn verified_workflow_owner(
     relay_self: Option<&str>,
     agent_pubkey_hex: &str,
 ) -> Option<String> {
-    if event.kind.as_u16() as u32 != KIND_STREAM_MESSAGE {
-        return None;
-    }
-
-    let relay_self = nostr::PublicKey::from_hex(relay_self?).ok()?;
-    if event.pubkey != relay_self || event.verify().is_err() {
-        return None;
-    }
-
-    let markers: Vec<&[String]> = event
-        .tags
-        .iter()
-        .map(|tag| tag.as_slice())
-        .filter(|values| values.first().map(String::as_str) == Some("buzz:workflow"))
-        .collect();
-    if markers.as_slice() != [["buzz:workflow", "true"]] {
-        return None;
-    }
-
-    let owners: Vec<&[String]> = event
-        .tags
-        .iter()
-        .map(|tag| tag.as_slice())
-        .filter(|values| values.first().map(String::as_str) == Some("buzz:workflow-owner"))
-        .collect();
-    let [owner_tag] = owners.as_slice() else {
-        return None;
-    };
-    let [_, owner_value] = owner_tag else {
-        return None;
-    };
-    let owner = nostr::PublicKey::from_hex(owner_value).ok()?.to_hex();
-    if owner_value.as_str() != owner {
-        return None;
-    }
-
-    let agent_pubkey = nostr::PublicKey::from_hex(agent_pubkey_hex).ok()?.to_hex();
-    let workflow_mentions: Vec<&[String]> = event
-        .tags
-        .iter()
-        .map(|tag| tag.as_slice())
-        .filter(|values| values.first().map(String::as_str) == Some("buzz:workflow-mention"))
-        .collect();
-    let mut mentioned_pubkeys = HashSet::with_capacity(workflow_mentions.len());
-    for mention_tag in workflow_mentions {
-        let [_, mention_value] = mention_tag else {
-            return None;
-        };
-        let mention = nostr::PublicKey::from_hex(mention_value).ok()?.to_hex();
-        if mention_value.as_str() != mention || !mentioned_pubkeys.insert(mention) {
-            return None;
-        }
-    }
-    if !mentioned_pubkeys.contains(&agent_pubkey) {
-        return None;
-    }
-
-    Some(owner)
+    let relay = nostr::PublicKey::from_hex(relay_self?).ok()?;
+    let agent = nostr::PublicKey::from_hex(agent_pubkey_hex).ok()?;
+    buzz_sdk::workflow::owner(event, relay, agent).map(|owner| owner.to_hex())
 }
 
 /// Resolve the author principal used by the inbound author gate.
@@ -779,13 +724,13 @@ mod inbound_author_gate {
                 if let Some(sharing) = &self.sharing {
                     if sharing.accepts(&buzz_event.event) {
                         let refusal = match sharing.authorize(&buzz_event.event).await {
-                            Ok(None) => {
+                            Ok(crate::sharing::Admission::Allowed(author)) => {
                                 return Ok(Some(AuthorizedListenerEvent {
                                     buzz_event,
-                                    effective_author: decision.effective_author,
+                                    effective_author: author.to_hex(),
                                 }))
                             }
-                            Ok(Some(reason)) => reason,
+                            Ok(crate::sharing::Admission::Refused(reason)) => reason,
                             Err(error) => error.to_string(),
                         };
                         // Persist a visible refusal before handling a transient

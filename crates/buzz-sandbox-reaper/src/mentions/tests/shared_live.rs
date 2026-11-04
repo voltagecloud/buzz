@@ -7,6 +7,9 @@ use buzz_ws_client::RelayMessage;
 use std::path::{Path, PathBuf};
 use tokio::process::{Child, Command};
 
+#[path = "workflow_live.rs"]
+mod workflow_live;
+
 #[tokio::test]
 #[ignore = "requires isolated local relay and built buzz-acp/buzz binaries"]
 async fn shared_mentions_wake_offline_owners_agents_and_handoff_in_the_original_thread() {
@@ -101,10 +104,14 @@ fn harness(
     )
     .unwrap();
     let log = std::fs::File::create(directory.join("harness.log")).unwrap();
-    let channel =
-        buzz_sdk::sharing::task::scope(root, keys("55").public_key(), Timestamp::now().as_secs())
-            .unwrap()
-            .channel;
+    let channel = root
+        .tags
+        .iter()
+        .find_map(|tag| tag.as_slice().strip_prefix(&["h".to_owned()]))
+        .and_then(|values| values.first())
+        .unwrap()
+        .parse::<uuid::Uuid>()
+        .unwrap();
     let mut command = Command::new(acp);
     for (name, _) in std::env::vars()
         .filter(|(name, _)| name.starts_with("BUZZ_") || name.starts_with("SHARED_FIXTURE_"))
