@@ -132,10 +132,6 @@ function ForumComposerVisit({
   submitModeRef.current = onSecondarySubmit ? submitMode : "primary";
 
   const isAutocompleteOpenRef = React.useRef(false);
-  const isChannelAutocompleteOpenRef = React.useRef(false);
-  React.useLayoutEffect(() => {
-    isChannelAutocompleteOpenRef.current = channelLinks.isChannelOpen;
-  }, [channelLinks.isChannelOpen]);
   isAutocompleteOpenRef.current =
     mentions.isMentionOpen || channelLinks.isChannelOpen;
 
@@ -162,7 +158,6 @@ function ForumComposerVisit({
     getMentionIdentities: mentions.getMentionIdentities,
     onSubmit: () => submitMessageRef.current(),
     isAutocompleteOpen: isAutocompleteOpenRef,
-    isChannelAutocompleteOpen: isChannelAutocompleteOpenRef,
     onEditLink: (info) => onEditLinkRef.current?.(info),
     onLinkSelectionChange: (info) => onLinkSelectionChangeRef.current?.(info),
     onLinkShortcut: () => onLinkShortcutRef.current?.() ?? false,
