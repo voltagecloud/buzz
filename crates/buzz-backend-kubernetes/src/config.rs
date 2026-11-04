@@ -482,12 +482,23 @@ pub fn config_schema() -> serde_json::Value {
                                 }
                             }
                         }
+                    },
+                    {
+                        "type": "object", "additionalProperties": false,
+                        "required": ["dm_channel_id"],
+                        "properties": {
+                            "dm_channel_id": {"type": "string", "format": "uuid",
+                                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
+                            "recovery": {"type": "object", "additionalProperties": false,
+                                "required": ["mode"],
+                                "properties": {"mode": {"type": "string", "enum": ["checkpoint", "fresh"]}}}
+                        }
                     }
                 ],
                 "x-buzz-ui-type": "boolean",
                 "default": false,
-                "title": "Workspace per thread",
-                "description": "Use Agent Sandbox. Mention the agent in a channel to create or reuse that thread's workspace. Requires an absolute Pod deadline and BUZZ_CHECKPOINT_BUCKET/BUZZ_CHECKPOINT_PREFIX (or BUZZ_SANDBOX_CHECKPOINT=disabled) in the agent environment. Desktop stores a boolean setting and binds the mentioned thread at launch; deploy accepts only {\"channel_id\": \"<UUID>\", \"thread_root\": \"<event ID>\"} and refuses true. false or absent disables Sandbox."
+                "title": "Remote workspace",
+                "description": "The desktop binds a channel thread or one entire direct-message conversation at launch. Send a message in the agent DM or mention the agent in a channel. deploy requires a thread scope or {\"dm_channel_id\": \"<UUID>\"}; bare true is not a launch scope."
             },
             "identity_policy": {
                 "type": "object",

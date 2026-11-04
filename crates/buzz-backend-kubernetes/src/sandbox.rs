@@ -71,21 +71,69 @@ pub struct Recovery {
     pub mode: RecoveryMode,
 }
 
+/// Immutable workspace scope plus an optional explicit recovery request.
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Options {
-    pub channel_id: String,
-    pub thread_root: String,
-    #[serde(default)]
-    pub recovery: Option<Recovery>,
+#[serde(untagged, deny_unknown_fields)]
+pub enum Options {
+    /// A published channel thread.
+    Thread {
+        /// Canonical channel UUID.
+        channel_id: String,
+        /// Canonical published root event ID.
+        thread_root: String,
+        /// Explicit recovery of an ended workspace.
+        #[serde(default)]
+        recovery: Option<Recovery>,
+    },
+    /// An entire direct-message conversation, independent of message IDs.
+    DirectMessage {
+        /// Canonical direct-message channel UUID.
+        dm_channel_id: String,
+        /// Explicit recovery of an ended workspace.
+        #[serde(default)]
+        recovery: Option<Recovery>,
+    },
 }
 
 impl Options {
+    fn channel_id(&self) -> &str {
+        match self {
+            Self::Thread { channel_id, .. } => channel_id,
+            Self::DirectMessage { dm_channel_id, .. } => dm_channel_id,
+        }
+    }
+
+    fn recovery(&self) -> Option<Recovery> {
+        match self {
+            Self::Thread { recovery, .. } | Self::DirectMessage { recovery, .. } => *recovery,
+        }
+    }
+
+    // Keep the existing checkpoint/reaper annotations as canonical 64-hex keys.
+    // DM identity is domain-separated from every published thread's identity.
+    fn scope_key(&self) -> std::borrow::Cow<'_, str> {
+        match self {
+            Self::Thread { thread_root, .. } => thread_root.into(),
+            Self::DirectMessage { dm_channel_id, .. } => {
+                hex::encode(Sha256::digest(format!("dm:{dm_channel_id}").as_bytes())).into()
+            }
+        }
+    }
+
     fn name(&self, identity: &naming::AgentIdentity) -> String {
-        let scope = Sha256::digest(format!("{}:{}", self.channel_id, self.thread_root).as_bytes());
+        let key = match self {
+            Self::Thread {
+                channel_id,
+                thread_root,
+                ..
+            } => format!("{channel_id}:{thread_root}"),
+            Self::DirectMessage { dm_channel_id, .. } => format!("dm:{dm_channel_id}"),
+        };
+        let scope = Sha256::digest(key.as_bytes());
         format!("{}-{}", identity.pod_name(), &hex::encode(scope)[..12])
     }
 
+    /// Parse a legacy thread scope or an explicit direct-message scope.
     pub fn parse(value: &serde_json::Value) -> Result<Option<Self>, String> {
         let Some(value) = value.get("sandbox") else {
             return Ok(None);
@@ -99,23 +147,26 @@ impl Options {
                     .to_string()
             })?;
         }
-        let options: Self = serde_json::from_value(value.clone())
-            .map_err(|_| "sandbox requires channel_id and canonical thread_root".to_string())?;
-        if uuid::Uuid::parse_str(&options.channel_id)
+        let options: Self = serde_json::from_value(value.clone()).map_err(|_| {
+            "sandbox requires channel_id and thread_root, or dm_channel_id for a direct message"
+                .to_string()
+        })?;
+        if uuid::Uuid::parse_str(options.channel_id())
             .map(|id| id.to_string())
             .ok()
             .as_deref()
-            != Some(&options.channel_id)
+            != Some(options.channel_id())
         {
             return Err("sandbox channel_id must be a canonical UUID".into());
         }
-        if options.thread_root.len() != 64
-            || !options
-                .thread_root
-                .bytes()
-                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-        {
-            return Err("sandbox thread_root must be a lowercase 64-character event ID".into());
+        if let Self::Thread { thread_root, .. } = &options {
+            if thread_root.len() != 64
+                || !thread_root
+                    .bytes()
+                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            {
+                return Err("sandbox thread_root must be a lowercase 64-character event ID".into());
+            }
         }
         Ok(Some(options))
     }
@@ -157,8 +208,8 @@ fn build(
     let annotations = child.metadata.annotations.get_or_insert_with(BTreeMap::new);
     annotations.extend([
         (OWNER.into(), owner.into()),
-        (CHANNEL.into(), scope.channel_id.clone()),
-        (THREAD.into(), scope.thread_root.clone()),
+        (CHANNEL.into(), scope.channel_id().to_owned()),
+        (THREAD.into(), scope.scope_key().into_owned()),
         (SESSION.into(), generation.into()),
         (GENERATION.into(), generation.into()),
         (
@@ -226,11 +277,12 @@ fn verify_identity(
             .get(naming::LABEL_BINDING_VERSION)
             .map(String::as_str)
             == Some(SANDBOX_BINDING_VERSION);
+    let scope_key = scope.scope_key();
     let matches = [
         (naming::ANNOTATION_PUBKEY_FULL, identity.pubkey_hex()),
         (OWNER, owner),
-        (CHANNEL, scope.channel_id.as_str()),
-        (THREAD, scope.thread_root.as_str()),
+        (CHANNEL, scope.channel_id()),
+        (THREAD, scope_key.as_ref()),
     ]
     .into_iter()
     .all(|(key, expected)| annotation(sandbox, key) == Some(expected));
@@ -379,7 +431,7 @@ pub async fn deploy(
         .map_err(|e| format!("read Sandbox: {e}"))?;
     if existing.is_none() {
         if let Some(tombstone) = recovery_journal::load(&session).await? {
-            if scope.recovery.is_none() {
+            if scope.recovery().is_none() {
                 return Err(ProviderError::refused(
                     ErrorCode::RecoveryInterrupted,
                     "Sandbox recovery was interrupted; explicit recovery is required",
@@ -388,7 +440,7 @@ pub async fn deploy(
             existing = Some(tombstone);
         }
     }
-    let sandbox = match (existing, scope.recovery) {
+    let sandbox = match (existing, scope.recovery()) {
         (Some(tombstone), Some(recovery)) => {
             recover(&session, cfg, tombstone, recovery, checkpointing).await?
         }
@@ -452,11 +504,26 @@ fn apply_session_env(scope: &Options, env: &mut BTreeMap<String, String>) -> Res
     env.insert("BUZZ_ACP_ALLOWED_RESPOND_TO".into(), "owner".into());
     env.insert(
         "BUZZ_ACP_BOUND_SESSION".into(),
-        json!({"channel_id":scope.channel_id,"thread_root":scope.thread_root}).to_string(),
+        match scope {
+            Options::Thread {
+                channel_id,
+                thread_root,
+                ..
+            } => json!({"channel_id": channel_id, "thread_root": thread_root}),
+            Options::DirectMessage { dm_channel_id, .. } => json!({"dm_channel_id": dm_channel_id}),
+        }
+        .to_string(),
     );
     env.insert("BUZZ_ACP_SESSION_POLICY".into(), "thread".into());
-    env.insert("BUZZ_ACP_SUBSCRIBE".into(), "mentions".into());
-    env.insert("BUZZ_ACP_CHANNELS".into(), scope.channel_id.clone());
+    env.insert(
+        "BUZZ_ACP_SUBSCRIBE".into(),
+        match scope {
+            Options::Thread { .. } => "mentions",
+            Options::DirectMessage { .. } => "all",
+        }
+        .into(),
+    );
+    env.insert("BUZZ_ACP_CHANNELS".into(), scope.channel_id().to_owned());
     env.insert("BUZZ_ACP_HEARTBEAT_INTERVAL".into(), "0".into());
     if checkpointing {
         env.insert("BUZZ_ACP_CHECKPOINT_ON_STOP".into(), "true".into());
@@ -1083,7 +1150,7 @@ pub async fn stop(
     scope: &Options,
     owner: &str,
 ) -> Result<(String, StopState), ProviderError> {
-    if scope.recovery.is_some() {
+    if scope.recovery().is_some() {
         return Err("stop does not accept a recovery mode".into());
     }
     let sandboxes = api(client, namespace);

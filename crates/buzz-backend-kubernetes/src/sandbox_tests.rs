@@ -16,7 +16,7 @@ fn custom_image_is_inside_a_real_sandbox_with_a_downward_uid() {
     .unwrap();
     let cfg = crate::config::parse(&json!({"namespace":"agents", "image":format!("example.com/agent@sha256:{}", "a".repeat(64)),
         "pod_options":{"active_deadline_seconds":3600,"workspace_size_limit":"50Gi"}})).unwrap();
-    let scope = Options {
+    let scope = Options::Thread {
         channel_id: uuid::Uuid::new_v4().to_string(),
         thread_root: "c".repeat(64),
         recovery: None,
@@ -70,7 +70,7 @@ fn options_parse_accepts_only_a_canonical_thread_scope() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        (scope.channel_id.as_str(), scope.thread_root.as_str()),
+        (scope.channel_id(), scope.scope_key().as_ref()),
         (channel, root.as_str())
     );
     for (sandbox, error) in [
@@ -108,7 +108,7 @@ fn options_parse_accepts_only_a_canonical_thread_scope() {
 
 #[test]
 fn session_env_requires_checkpoint_storage_unless_disabled() {
-    let scope = Options {
+    let scope = Options::Thread {
         channel_id: uuid::Uuid::new_v4().to_string(),
         thread_root: "c".repeat(64),
         recovery: None,
@@ -206,7 +206,7 @@ async fn live_controller_reuses_scopes_and_refuses_lost_workspaces() {
         &nostr::Keys::generate().secret_key().to_bech32().unwrap(),
     )
     .unwrap();
-    let scope = Options {
+    let scope = Options::Thread {
         channel_id: uuid::Uuid::new_v4().to_string(),
         thread_root: "a".repeat(64),
         recovery: None,
@@ -285,8 +285,8 @@ async fn live_controller_reuses_scopes_and_refuses_lost_workspaces() {
         .code,
         Some(ErrorCode::RelayDiffers)
     );
-    let second_scope = Options {
-        channel_id: scope.channel_id.clone(),
+    let second_scope = Options::Thread {
+        channel_id: scope.channel_id().to_owned(),
         thread_root: "b".repeat(64),
         recovery: None,
     };
@@ -347,15 +347,12 @@ async fn live_controller_reuses_scopes_and_refuses_lost_workspaces() {
     // Lifecycle: recovery is refused on a live session; stop suspends it; once
     // tombstoned (the reaper's job, simulated here) only explicit recovery
     // resumes it, under a new generation.
-    let fresh = Options {
+    let fresh = Options::Thread {
         recovery: Some(Recovery {
             mode: RecoveryMode::Fresh,
         }),
-        ..Options {
-            channel_id: second_scope.channel_id.clone(),
-            thread_root: second_scope.thread_root.clone(),
-            recovery: None,
-        }
+        channel_id: second_scope.channel_id().to_owned(),
+        thread_root: second_scope.scope_key().into_owned(),
     };
     let refused = deploy(
         client.clone(),
@@ -399,12 +396,12 @@ async fn live_controller_reuses_scopes_and_refuses_lost_workspaces() {
     .await
     .unwrap_err();
     assert_eq!(ended.code, Some(ErrorCode::SessionEnded), "{ended}");
-    let from_checkpoint = Options {
+    let from_checkpoint = Options::Thread {
         recovery: Some(Recovery {
             mode: RecoveryMode::Checkpoint,
         }),
-        channel_id: second_scope.channel_id.clone(),
-        thread_root: second_scope.thread_root.clone(),
+        channel_id: second_scope.channel_id().to_owned(),
+        thread_root: second_scope.scope_key().into_owned(),
     };
     let no_checkpoint = deploy(
         client.clone(),
@@ -468,7 +465,7 @@ fn fake_scope() -> Options {
 }
 
 fn fake_scope_with(recovery: Option<RecoveryMode>) -> Options {
-    Options {
+    Options::Thread {
         channel_id: "0b6c1f3e-5a7d-4c2b-9e8f-1a2b3c4d5e6f".into(),
         thread_root: "d".repeat(64),
         recovery: recovery.map(|mode| Recovery { mode }),
@@ -1364,4 +1361,60 @@ async fn stop_backs_off_between_conflicts_and_gives_up() {
     assert_eq!(state.lock().unwrap().patches.len(), STOP_ATTEMPTS as usize);
     let minimum: u64 = (1..u64::from(STOP_ATTEMPTS)).sum::<u64>() * STOP_BACKOFF_MS;
     assert!(started.elapsed() >= Duration::from_millis(minimum));
+}
+
+#[test]
+fn direct_messages_have_one_isolated_workspace_and_owner_gated_conversation_env() {
+    let channel = uuid::Uuid::new_v4().to_string();
+    let parse = |value| Options::parse(&json!({"sandbox": value}));
+    let dm = parse(json!({"dm_channel_id":channel})).unwrap().unwrap();
+    let identity = naming::AgentIdentity::from_nsec(
+        &nostr::Keys::generate().secret_key().to_bech32().unwrap(),
+    )
+    .unwrap();
+    let again = parse(json!({"dm_channel_id":channel,"recovery":{"mode":"fresh"}}))
+        .unwrap()
+        .unwrap();
+    assert_eq!(dm.name(&identity), again.name(&identity));
+    assert_eq!(dm.scope_key(), again.scope_key());
+    let thread = Options::Thread {
+        channel_id: channel.clone(),
+        thread_root: dm.scope_key().into_owned(),
+        recovery: None,
+    };
+    assert_ne!(dm.name(&identity), thread.name(&identity));
+    let other = Options::DirectMessage {
+        dm_channel_id: uuid::Uuid::new_v4().to_string(),
+        recovery: None,
+    };
+    assert_ne!(dm.name(&identity), other.name(&identity));
+    let mut env = fixture_env();
+    apply_session_env(&dm, &mut env).unwrap();
+    assert_eq!(env["BUZZ_ACP_SUBSCRIBE"], "all");
+    assert_eq!(env["BUZZ_ACP_RESPOND_TO"], "owner");
+    assert_eq!(env["BUZZ_ACP_CHANNELS"], channel);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&env["BUZZ_ACP_BOUND_SESSION"]).unwrap(),
+        json!({"dm_channel_id":channel})
+    );
+    let cfg = fake_cfg();
+    let fps = Fingerprints::new(&cfg, &env);
+    let new = NewSession {
+        generation: "dm",
+        checkpointing: true,
+        restore: None,
+        recovered_from: None,
+    };
+    let sandbox = build(&identity, &cfg, &dm, "owner", &new, &fps.current).unwrap();
+    verify_identity(&sandbox, &identity, &dm, "owner").unwrap();
+    assert!(verify_identity(&sandbox, &identity, &other, "owner").is_err());
+    assert_eq!(annotation(&sandbox, CHANNEL), Some(channel.as_str()));
+    assert_eq!(annotation(&sandbox, THREAD), Some(dm.scope_key().as_ref()));
+    for invalid in [
+        json!({"dm_channel_id":channel,"thread_root":"a".repeat(64)}),
+        json!({"dm_channel_id":channel,"channel_id":channel}),
+        json!({"dm_channel_id":channel.to_uppercase()}),
+    ] {
+        assert!(parse(invalid).is_err());
+    }
 }

@@ -8,6 +8,8 @@ async fn bound_setup_nudges_stay_in_the_canonical_owner_thread() {
         ("foreign-thread", false),
         ("foreign-channel", false),
         ("dm", false),
+        ("bound-dm", true),
+        ("bound-dm-foreign-channel", false),
         ("threaded-edit", true),
         ("top-level-edit", true),
         ("foreign-thread-edit", false),
@@ -24,7 +26,12 @@ async fn bound_setup_nudges_stay_in_the_canonical_owner_thread() {
             nostr::Tag::parse(["p", &agent]).unwrap(),
             nostr::Tag::parse(["h", &channel_id.to_string()]).unwrap(),
         ];
-        if !matches!(case, "top-level" | "top-level-edit" | "unresolved-edit") {
+        if case.starts_with("bound-dm") {
+            tags.retain(|tag| tag.as_slice()[0] != "p");
+        }
+        if !case.starts_with("bound-dm")
+            && !matches!(case, "top-level" | "top-level-edit" | "unresolved-edit")
+        {
             let thread = if case.starts_with("foreign-thread") {
                 &foreign_root
             } else {
@@ -54,17 +61,27 @@ async fn bound_setup_nudges_stay_in_the_canonical_owner_thread() {
         } else {
             original.clone()
         };
-        let binding = crate::config::BoundSession {
-            channel_id: if case == "foreign-channel" {
-                Uuid::new_v4()
-            } else {
-                channel_id
-            },
-            thread_root: if matches!(case, "top-level" | "top-level-edit" | "unresolved-edit") {
-                original.id.to_hex()
-            } else {
-                root
-            },
+        let binding = if case.starts_with("bound-dm") {
+            crate::config::BoundSession::DirectMessage {
+                dm_channel_id: if case.ends_with("foreign-channel") {
+                    Uuid::new_v4()
+                } else {
+                    channel_id
+                },
+            }
+        } else {
+            crate::config::BoundSession::Thread {
+                channel_id: if case == "foreign-channel" {
+                    Uuid::new_v4()
+                } else {
+                    channel_id
+                },
+                thread_root: if matches!(case, "top-level" | "top-level-edit" | "unresolved-edit") {
+                    original.id.to_hex()
+                } else {
+                    root
+                },
+            }
         };
         let (gate_rest, gate_server) =
             crate::author_gate_tests::nip11_server(serde_json::json!({})).await;
@@ -79,14 +96,19 @@ async fn bound_setup_nudges_stay_in_the_canonical_owner_thread() {
                 channel_id,
                 relay::ChannelInfo {
                     name: "bound setup".into(),
-                    channel_type: if case == "dm" { "dm" } else { "stream" }.into(),
+                    channel_type: if case == "dm" || case.starts_with("bound-dm") {
+                        "dm"
+                    } else {
+                        "stream"
+                    }
+                    .into(),
                     description: None,
                 },
             )]),
             gate_rest.clone(),
         );
         let mut gate = InboundAuthorGate::connect(&gate_rest, &agent, "bound setup test").await;
-        assert!(setup_listener_admits(&event, &agent));
+        assert!(bound_setup_listener_admits(&event, &agent, Some(&binding)));
         let event_id = event.id;
         let authorized = authorize_setup_listener_event(
             &mut gate,
@@ -110,9 +132,12 @@ async fn bound_setup_nudges_stay_in_the_canonical_owner_thread() {
             requirements: vec![],
         };
         let mut nudged = HashSet::new();
+        let mut config = crate::build_mcp_servers_tests::test_config();
+        config.bound_session = Some(binding.clone());
+        let rules = build_setup_subscription_rules(&config);
         let admitted = nudge_authorized_event(
             authorized,
-            &[mentions_rule(crate::config::default_mention_kinds())],
+            &rules,
             &agent,
             &mut nudged,
             &publisher,
@@ -133,7 +158,7 @@ async fn bound_setup_nudges_stay_in_the_canonical_owner_thread() {
             let scope = crate::scope::SessionScope::derive(
                 crate::scope::SessionPolicy::Thread,
                 channel_id,
-                false,
+                case.starts_with("bound-dm"),
                 &nudge,
             );
             assert!(binding.accepts(&scope), "{case}");
