@@ -44,7 +44,7 @@ def validate(metadata):
         raise ValueError("neteq must not reference ringbuf in its Rust source")
 
 
-# The extract APIs that RUSTSEC-2026-0367/0368/0369 affect.
+# The extract APIs that RUSTSEC-2026-0367/0368/0369/0429 affect.
 ZIP_EXTRACT = re.compile(r"\bZipStreamReader\b|\.extract(_unwrapped_root_dir)?\s*\(")
 MESH_LLM_SOURCE = "git+https://github.com/Mesh-LLM/mesh-llm.git"
 
