@@ -301,6 +301,11 @@ pub const KIND_TEAM: u32 = 30176;
 /// since these events are world-readable on the relay.
 pub const KIND_MANAGED_AGENT: u32 = 30177;
 
+/// Owner-signed, channel-scoped permission to invoke an agent (NIP-33).
+/// The coordinate is `<agent hex>:<channel UUID>`. Disabled heads revoke access;
+/// absent grants never authorize another member. Credentials are not included.
+pub const KIND_AGENT_CHANNEL_GRANT: u32 = 30180;
+
 /// NIP-AP: Team Catalog projection (parameterized replaceable, owner-authored).
 ///
 /// The shareable projection of a team, addressed by `(pubkey, kind, d_tag)`
@@ -679,6 +684,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_PERSONA,
     KIND_TEAM,
     KIND_MANAGED_AGENT,
+    KIND_AGENT_CHANNEL_GRANT,
     KIND_TEAM_CATALOG,
     KIND_PRIVATE_MANAGED_AGENT,
     KIND_REPORT,

@@ -498,6 +498,7 @@ fn map_push_accept_error(error: super::push_lease::AcceptError) -> IngestError {
 /// Returns `Err` for unknown kinds — the relay rejects them.
 fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static str> {
     match kind {
+        buzz_core::kind::KIND_AGENT_CHANNEL_GRANT => Ok(Scope::MessagesWrite),
         KIND_PROFILE => Ok(Scope::UsersWrite),
         KIND_TEXT_NOTE | KIND_LONG_FORM | buzz_core::kind::KIND_ARTIFACT => Ok(Scope::MessagesWrite),
         KIND_CONTACT_LIST | KIND_READ_STATE | KIND_USER_STATUS | KIND_AGENT_ENGRAM
@@ -769,7 +770,8 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
 pub(crate) fn requires_h_channel_scope(kind: u32) -> bool {
     matches!(
         kind,
-        KIND_STREAM_MESSAGE
+        buzz_core::kind::KIND_AGENT_CHANNEL_GRANT
+            | KIND_STREAM_MESSAGE
             | KIND_STREAM_MESSAGE_V2
             | KIND_STREAM_MESSAGE_EDIT
             | KIND_STREAM_MESSAGE_PINNED
@@ -2643,6 +2645,16 @@ async fn ingest_event_inner(
         ));
     }
 
+    // A verified owner must be able to revoke after removal or archive.
+    // Enabling still requires explicit membership in the grant validator.
+    let disabled_agent_grant = if kind_u32 == buzz_core::kind::KIND_AGENT_CHANNEL_GRANT {
+        !super::agent_grant::validate(tenant, state, &event)
+            .await?
+            .enabled
+    } else {
+        false
+    };
+
     if let Some(ch_id) = channel_id {
         check_token_channel_access(&auth, ch_id).map_err(IngestError::AuthFailed)?;
     } else if auth.channel_ids().is_some() {
@@ -2699,7 +2711,8 @@ async fn ingest_event_inner(
             || kind_u32 == KIND_STREAM_MESSAGE_EDIT
             || kind_u32 == KIND_NIP29_EDIT_METADATA
             || kind_u32 == KIND_NIP29_DELETE_EVENT
-            || kind_u32 == KIND_NIP29_DELETE_GROUP;
+            || kind_u32 == KIND_NIP29_DELETE_GROUP
+            || disabled_agent_grant;
         if !skip_membership {
             // Spec AuthCheck (line 794): emit the verdict at the actual
             // call site. claimed_community comes from the event's h tag
@@ -2878,7 +2891,7 @@ async fn ingest_event_inner(
                 parts.len() >= 2 && parts[0] == "archived" && parts[1] == "false"
             });
 
-        if !is_unarchive {
+        if !is_unarchive && !disabled_agent_grant {
             if let Some(channel) = &channel_row {
                 if channel.archived_at.is_some() {
                     return Err(IngestError::Rejected("invalid: channel is archived".into()));
