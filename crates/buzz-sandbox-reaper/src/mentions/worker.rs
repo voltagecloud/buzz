@@ -101,9 +101,18 @@ pub(super) async fn session(
 ) -> Result<(), Error> {
     drain(manager, identity, journal, permits).await?;
     let mut connection = connect(identity).await?;
-    let connected_at = Timestamp::now().as_secs();
+    let channels = super::channels::read(&mut connection, identity).await?;
+    if channels.is_empty() {
+        tokio::time::sleep(RECYCLE_AFTER).await;
+        return Ok(());
+    }
+    let mut connected_at = Timestamp::now().as_secs();
     let started = tokio::time::Instant::now();
-    let filter = json!({"kinds": [9, 40002], "authors": [identity.owner], "#p": [identity.keys.public_key()]});
+    let mut filter =
+        json!({"kinds": [9, 40002], "#h":channels, "#p": [identity.keys.public_key()]});
+    if !manager.sharing_enabled() {
+        filter["authors"] = json!([identity.owner]);
+    }
     let mut live = filter.clone();
     live["limit"] = json!(0);
     send(&mut connection, json!(["REQ", "mentions-live", live])).await?;
@@ -126,7 +135,10 @@ pub(super) async fn session(
             Err(WsClientError::Timeout) => {
                 continue;
             }
-            Err(_) => return Err(Error::Relay),
+            Err(_) => {
+                tracing::warn!("mention socket failed");
+                return Err(Error::Relay);
+            }
         };
         match message {
             RelayMessage::Event {
@@ -144,7 +156,9 @@ pub(super) async fn session(
                     }
                     oldest = oldest.min(event.created_at.as_secs());
                 }
-                if eligible(identity, journal, &event) {
+                let actionable = eligible(identity, journal, &event, manager.sharing_enabled());
+                tracing::debug!(event_id=%event.id, agent=%identity.keys.public_key(), actionable,"received mention");
+                if actionable {
                     let persisted = tokio::time::timeout(IO_TIMEOUT, journal.enqueue(*event))
                         .await
                         .map_err(|_| Error::Deadline)??;
@@ -160,6 +174,11 @@ pub(super) async fn session(
                 if subscription_id == "mentions-live" && !history_started =>
             {
                 history_started = true;
+                // Fence after live installation so discovery cannot open a
+                // delivery gap before the finite history query begins.
+                connected_at = Timestamp::now().as_secs();
+                oldest = connected_at;
+                until = connected_at;
                 history(&mut connection, filter.clone(), journal.state.since, until).await?;
                 progress = tokio::time::Instant::now();
             }
@@ -185,7 +204,19 @@ pub(super) async fn session(
                 }
                 progress = tokio::time::Instant::now();
             }
-            RelayMessage::Closed { .. } | RelayMessage::Auth { .. } => return Err(Error::Relay),
+            // Buzz acknowledges our explicit CLOSE. The live subscription
+            // must keep running after history has finished and checkpointed.
+            RelayMessage::Closed {
+                subscription_id, ..
+            } if subscription_id == "mention-channels"
+                || (subscription_id == "mentions-history" && history_done) => {}
+            RelayMessage::Closed {
+                subscription_id, ..
+            } => {
+                tracing::warn!(%subscription_id, "mention subscription closed");
+                return Err(Error::Relay);
+            }
+            RelayMessage::Auth { .. } => return Err(Error::Relay),
             _ => {}
         }
     }
@@ -203,14 +234,39 @@ async fn history(
     send(connection, json!(["REQ", "mentions-history", filter])).await
 }
 
-fn eligible(identity: &Identity, journal: &Journal, event: &Event) -> bool {
+fn eligible(identity: &Identity, journal: &Journal, event: &Event, shared: bool) -> bool {
     if event.created_at.as_secs() < journal.state.activated
         || serde_json::to_vec(event).map_or(true, |v| v.len() > MAX_EVENT_BYTES)
     {
         return false;
     }
-    Start::admit(json!({"agent_pubkey": identity.keys.public_key(), "relay_url": identity.relay, "trigger": event}),
-        identity.owner, Timestamp::now().as_secs()).is_ok()
+    if event.pubkey != identity.owner {
+        return shared
+            && buzz_sdk::sharing::task::scope(
+                event,
+                identity.keys.public_key(),
+                Timestamp::now().as_secs(),
+            )
+            .is_ok();
+    }
+    conversation(identity, event).is_ok()
+}
+
+fn conversation(identity: &Identity, event: &Event) -> Result<(String, String), Error> {
+    if event.pubkey == identity.owner {
+        let start = Start::admit(json!({"agent_pubkey":identity.keys.public_key(),"relay_url":identity.relay,"trigger":event}),
+            identity.owner,Timestamp::now().as_secs()).map_err(|_|Error::Registration)?;
+        let (channel, root) = start.conversation();
+        Ok((channel.into(), root.into()))
+    } else {
+        let scope = buzz_sdk::sharing::task::scope(
+            event,
+            identity.keys.public_key(),
+            Timestamp::now().as_secs(),
+        )
+        .map_err(|_| Error::Registration)?;
+        Ok((scope.channel.to_string(), scope.root.to_hex()))
+    }
 }
 
 /// The journal survives all cancellation points, including a successful deploy
@@ -223,7 +279,7 @@ async fn drain(
 ) -> Result<(), Error> {
     while journal.state.pending.is_some() {
         let pending = journal.state.pending.as_ref().ok_or(Error::Storage)?;
-        if !eligible(identity, journal, &pending.event) {
+        if !eligible(identity, journal, &pending.event, manager.sharing_enabled()) {
             return Err(Error::Registration);
         }
         if pending.notice.is_some() {
@@ -277,6 +333,7 @@ async fn drain(
             Ok(LaunchPermission::NoLongerRemote) => json!({"ok": true}),
             Err(_) => json!({"ok": false, "code": "delivery_unconfirmed"}),
         };
+        tracing::debug!(event_id=%event.id,ok=result["ok"].as_bool(),code=result["code"].as_str(),"mention launch result");
         if result["ok"] == true {
             tokio::time::timeout(IO_TIMEOUT, journal.complete())
                 .await
@@ -294,6 +351,7 @@ async fn drain(
                     | "unauthorized_owner"
                     | "invalid_start"
                     | "unsupported_conversation"
+                    | "shared_task_denied"
             ) || pending.attempts >= MAX_ATTEMPTS
             {
                 pending.notice = Some(failure_notice(identity, &event, code)?);
@@ -365,19 +423,19 @@ async fn flush_notices(identity: &Identity, journal: &mut Journal) -> Result<(),
 }
 
 fn failure_notice(identity: &Identity, event: &Event, code: &str) -> Result<Event, Error> {
-    let start = Start::admit(json!({"agent_pubkey": identity.keys.public_key(), "relay_url": identity.relay, "trigger": event}),
-        identity.owner, Timestamp::now().as_secs()).map_err(|_| Error::Registration)?;
+    let (channel, root) = conversation(identity, event)?;
     let text = match code {
         "session_ended" | "session_ending" | "recovery_interrupted" => "This thread's agent session ended. Recover it from desktop, or mention me in a new thread.",
         "config_differs" => "This thread has different agent settings. Continue its existing session or mention me in a new thread.",
         "launch_not_registered" => "Start this agent once from desktop to register its launch settings, then mention me again.",
         "unsupported_conversation" => "Automatic remote startup requires a channel thread. Mention me in a channel, or manage this conversation from desktop.",
+        "shared_task_denied" => "Shared task refused: current sharing permission, channel membership, or handoff budget does not permit this request. Ask the agent owner to check sharing.",
+        "shared_task_retry" => "Current sharing authorization is unavailable. Mention me again to retry; this request has not been allowed to run.",
         _ => "Agent startup could not be confirmed. Mention me again to retry.",
     };
-    let (channel, root) = start.conversation();
     let tags = [
-        vec!["h", channel],
-        vec!["e", root, "", "root"],
+        vec!["h", &channel],
+        vec!["e", &root, "", "root"],
         vec!["e", &event.id.to_hex(), "", "reply"],
     ]
     .into_iter()
@@ -398,9 +456,7 @@ async fn channel_launch_allowed(
     trigger: &Event,
 ) -> Result<LaunchPermission, Error> {
     tokio::time::timeout(IO_TIMEOUT, async {
-        let start = Start::admit(json!({"agent_pubkey":identity.keys.public_key(), "relay_url":identity.relay, "trigger":trigger}),
-            identity.owner, Timestamp::now().as_secs()).map_err(|_| Error::Registration)?;
-        let (channel, _) = start.conversation();
+        let (channel, _) = conversation(identity,trigger)?;
         let mut connection = connect(identity).await?;
         send(&mut connection, json!(["REQ", "mention-trigger", {"kinds":[9,40002],"ids":[trigger.id],"#h":[channel],"limit":1}])).await?;
         send(&mut connection, json!(["REQ", "mention-channel", {"kinds":[39000],"#d":[channel],"limit":1}])).await?;
@@ -416,7 +472,7 @@ async fn channel_launch_allowed(
                 }
                 RelayMessage::Event { subscription_id, event } if subscription_id == "mention-channel" => {
                     if event.kind.as_u16() != 39000 || event.verify().is_err()
-                        || !event.tags.iter().any(|tag| tag.as_slice() == ["d", channel]) { return Err(Error::Relay); }
+                        || !event.tags.iter().any(|tag| tag.as_slice() == ["d", channel.as_str()]) { return Err(Error::Relay); }
                     metadata = Some(!event.tags.iter().any(|tag| {
                         let tag = tag.as_slice();
                         tag.first().map(String::as_str) == Some("hidden") || tag == ["t", "dm"] || tag == ["archived", "true"]

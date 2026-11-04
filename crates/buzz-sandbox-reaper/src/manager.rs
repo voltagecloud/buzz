@@ -456,6 +456,12 @@ impl Manager {
         self.client.clone()
     }
 
+    /// Sharing expands task invocation only when the matching harness rollout
+    /// is enabled. Owner lifecycle operations retain their separate checks.
+    pub(crate) fn sharing_enabled(&self) -> bool {
+        self.config.shared_tasks
+    }
+
     /// Reuse mobile start validation without manufacturing an owner control event.
     pub(crate) async fn start_mention(
         &self,
@@ -467,11 +473,26 @@ impl Manager {
         let Some(developer) = self.config.developer(&owner) else {
             return refusal(ErrorCode::UnauthorizedOwner, "owner is not configured");
         };
-        let start = match Start::admit(
-            serde_json::json!({"agent_pubkey": agent, "relay_url": relay, "trigger": event}),
-            owner,
-            Timestamp::now().as_secs(),
-        ) {
+        let admitted = if event.pubkey == owner {
+            Start::admit(
+                serde_json::json!({"agent_pubkey": agent, "relay_url": relay, "trigger": event}),
+                owner,
+                Timestamp::now().as_secs(),
+            )
+        } else {
+            let request = crate::shared_tasks::Request {
+                relay_url: relay.into(),
+                trigger: event.clone(),
+            };
+            match self
+                .authorize_shared(owner, agent, &developer.namespace, &request)
+                .await
+            {
+                Ok(task) => Start::shared(task, relay, event),
+                Err(error) => Err(error),
+            }
+        };
+        let start = match admitted {
             Ok(start) => start,
             Err(error) => return error,
         };
@@ -819,29 +840,49 @@ impl Manager {
         namespace: &str,
         request: &crate::shared_tasks::Request,
     ) -> serde_json::Value {
+        match self
+            .authorize_shared(owner, agent, namespace, request)
+            .await
+        {
+            Ok(task) => {
+                serde_json::json!({"ok":true,"request":task.origin.request,"origin_agent":task.origin.agent,
+                "human":task.human,"channel":task.scope.channel,"thread_root":task.scope.root})
+            }
+            Err(error) => error,
+        }
+    }
+
+    async fn authorize_shared(
+        &self,
+        owner: PublicKey,
+        agent: PublicKey,
+        namespace: &str,
+        request: &crate::shared_tasks::Request,
+    ) -> Result<buzz_sdk::sharing::policy::Task, serde_json::Value> {
         use buzz_sdk::sharing::policy::Error as PolicyError;
         if !self.config.shared_tasks {
-            return serde_json::json!({"ok":false,"code":"shared_task_denied","error":"shared tasks are not enabled on this manager"});
+            return Err(
+                serde_json::json!({"ok":false,"code":"shared_task_denied","error":"shared tasks are not enabled on this manager"}),
+            );
         }
         let result=tokio::time::timeout(std::time::Duration::from_secs(40),async {
             let task=match crate::shared_tasks::verify(self.client.clone(),namespace,owner,agent,request).await {
                 Ok(task)=>task,
-                Err(PolicyError::Denied(reason))=>return serde_json::json!({"ok":false,"code":"shared_task_denied","error":reason}),
-                Err(PolicyError::Unavailable)=>return serde_json::json!({"ok":false,"code":"shared_task_retry","error":"current sharing authorization is unavailable; retry this task"}),
+                Err(PolicyError::Denied(reason))=>return Err(serde_json::json!({"ok":false,"code":"shared_task_denied","error":reason})),
+                Err(PolicyError::Unavailable)=>return Err(serde_json::json!({"ok":false,"code":"shared_task_retry","error":"current sharing authorization is unavailable; retry this task"})),
             };
             let Some(origin)=self.config.developer(&task.origin_owner) else {
-                return serde_json::json!({"ok":false,"code":"shared_task_denied","error":"the initial agent must use this session manager"});
+                return Err(serde_json::json!({"ok":false,"code":"shared_task_denied","error":"the initial agent must use this session manager"}));
             };
             match crate::shared_budget::admit(self.client.clone(),&origin.namespace,&request.relay_url,&task,Timestamp::now().as_secs()).await {
-                Ok(())=>serde_json::json!({"ok":true,"request":task.origin.request,"origin_agent":task.origin.agent,
-                    "human":task.human,"channel":task.scope.channel,"thread_root":task.scope.root}),
+                Ok(())=>Ok(task),
                 Err(error)=>{
                     let code=if matches!(error,crate::shared_budget::Error::Storage) {"shared_task_retry"} else {"shared_task_denied"};
-                    serde_json::json!({"ok":false,"code":code,"error":error.to_string()})
+                    Err(serde_json::json!({"ok":false,"code":code,"error":error.to_string()}))
                 }
             }
         }).await;
-        result.unwrap_or_else(|_|serde_json::json!({"ok":false,"code":"shared_task_retry","error":"task authorization timed out; retry this task"}))
+        result.unwrap_or_else(|_|Err(serde_json::json!({"ok":false,"code":"shared_task_retry","error":"task authorization timed out; retry this task"})))
     }
 
     /// Step 3: parse the provider request and bind its agent key to the

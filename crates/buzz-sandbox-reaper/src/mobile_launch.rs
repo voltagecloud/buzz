@@ -147,6 +147,27 @@ struct StartPayload {
 }
 
 impl Start {
+    /// Construct a confined launch only after fresh sharing verification and
+    /// atomic budget admission. This never manufactures an owner-signed event.
+    pub(crate) fn shared(
+        task: buzz_sdk::sharing::policy::Task,
+        relay: &str,
+        event: &Event,
+    ) -> Result<Self, Value> {
+        if task.trigger != event.id || task.requester != event.pubkey {
+            return Err(invalid());
+        }
+        let scope = json!({"channel_id":task.scope.channel,"thread_root":task.scope.root});
+        provider::check_sandbox_scope(&json!({"sandbox":scope})).map_err(|_| invalid())?;
+        Ok(Self {
+            owner: task.owner,
+            agent: task.agent,
+            relay: relay_endpoint(relay)?,
+            scope,
+            replay_floor: event.created_at.as_secs(),
+        })
+    }
+
     /// Verify the owner's signed mention and derive its immutable thread scope.
     pub fn admit(payload: Value, owner: PublicKey, request_time: u64) -> Result<Self, Value> {
         let payload: StartPayload = serde_json::from_value(payload).map_err(|_| invalid())?;
