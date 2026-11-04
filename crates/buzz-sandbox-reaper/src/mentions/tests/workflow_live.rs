@@ -42,6 +42,7 @@ async fn exercise(relay: &str, acp: &Path, cli: &Path) {
             Some(buzz_sdk::ChannelKind::Stream),
             None,
             None,
+            false,
         )
         .unwrap(),
         &owner,

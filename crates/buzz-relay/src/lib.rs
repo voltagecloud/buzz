@@ -2,6 +2,8 @@
 #![warn(missing_docs)]
 //! NIP-01 WebSocket relay for Buzz private team communication.
 
+/// Stdout access log: reads, auth attempts, and connection lifecycle.
+pub(crate) mod access;
 mod admission;
 mod build_info;
 mod rejection;
@@ -52,6 +54,7 @@ pub mod nip_fi_config;
 /// NIP-FI HTTP ingress enforcement: assertion extraction, verification,
 /// key-pairing check, and deny-map gate for every protected HTTP surface.
 pub(crate) mod nip_fi_http;
+pub mod nip_fi_resolver;
 /// Deployment-global operator-listener mention delivery worker.
 pub mod operator_listener;
 /// NIP-01 client/relay message parsing.
@@ -62,11 +65,15 @@ pub mod push_runtime;
 pub mod readiness;
 /// Axum router construction.
 pub mod router;
+/// Per-key gates that let concurrent cache misses share one database read.
+mod shared_reads;
 /// Timing for startup work between metrics bind and serving.
 pub mod startup_steps;
 /// Shared application state.
 pub mod state;
 pub mod storage_sweep;
+/// Push each new per-community storage snapshot to an operator endpoint.
+pub mod storage_usage_delivery;
 /// Subscription registry with (channel, kind) fan-out index.
 pub mod subscription;
 /// OpenTelemetry tracing initialisation (tracer provider + OTLP exporter).
@@ -85,3 +92,6 @@ pub mod workflow_sink;
 pub use config::Config;
 pub use error::{RelayError, Result};
 pub use state::AppState;
+
+/// Optional relay-signed verified profiles.
+pub mod verified_profiles;

@@ -1,10 +1,5 @@
 [advisories]
 ignore = [
-    # 0.26.11 contains no roots: it re-exports webpki-roots 1.x. Both lockfiles
-    # resolve that parent to 1.0.10, which removes the distrusted emSign root.
-    # The advisory also flags this compatibility wrapper. The bans below keep
-    # every other affected version forbidden while this false positive remains.
-    { id = "RUSTSEC-2026-0381", reason = "0.26.11 only re-exports the patched 1.0.10 roots; bans enforce patched versions for all other releases" },
     # instant 0.1.13 — unmaintained crate. Transitive dep: nostr → instant.
     # Will be resolved when nostr crate updates its dependencies.
     { id = "RUSTSEC-2024-0384", reason = "transitive dep via nostr; no upstream fix available" },
@@ -25,6 +20,24 @@ ignore = [
     # fork uses the same crate, so removing it means migrating YAML parsing in
     # buzz-agent, buzz-persona, buzz-relay, buzz-workflow and desktop.
     { id = "RUSTSEC-2024-0449", reason = "transitive via serde_yaml; unmaintained, not vulnerable; removal needs a YAML parser migration" },
+    # NetEQ =0.8.3 declares ringbuf but its published Rust sources never use it,
+    # so Consumer::skip/clear and their panic-unsafe Drop path are unreachable.
+    # NetEQ 0.9.1 still declares ringbuf 0.3; ringbuf itself is fixed in 0.5.2.
+    # Keep the exact NetEQ pin and the wrapper ban below together. Re-audit or
+    # remove this exception when NetEQ removes/updates the unused dependency.
+    { id = "RUSTSEC-2026-0293", reason = "unused dependency of audited, exactly pinned neteq 0.8.3; no Rust references to ringbuf; other consumers forbidden by bans.deny" },
+    # zip 8.6.0 < 9: extraction keeps setuid/setgid bits (0367), creates
+    # symlinks that escape the destination (0368), applies permissions through
+    # symlinks (0369), and aborts the process when sizing a symlink target from
+    # an attacker-declared length (0429). Only path: buzz-mesh-smoke → mesh-llm v0.76.2 →
+    # mesh-llm-host-runtime / mesh-llm-plugin-manager / mesh-llm-system → zip 8.
+    # mesh-llm's zip readers copy entries manually and never call
+    # ZipArchive::extract; recheck if that changes. Remove on the mesh-llm bump
+    # that ships Mesh-LLM/mesh-llm#2471.
+    { id = "RUSTSEC-2026-0367", reason = "zip 8.6.0 via buzz-mesh-smoke → mesh-llm v0.76.2; manual entry copy, never extracts; fix in unreleased mesh-llm#2471" },
+    { id = "RUSTSEC-2026-0368", reason = "zip 8.6.0 via buzz-mesh-smoke → mesh-llm v0.76.2; manual entry copy, never extracts; fix in unreleased mesh-llm#2471" },
+    { id = "RUSTSEC-2026-0369", reason = "zip 8.6.0 via buzz-mesh-smoke → mesh-llm v0.76.2; manual entry copy, never extracts; fix in unreleased mesh-llm#2471" },
+    { id = "RUSTSEC-2026-0429", reason = "zip 8.6.0 via buzz-mesh-smoke → mesh-llm v0.76.2; manual entry copy, never extracts; fix in unreleased mesh-llm#2471" },
     # zbus 5 D-Bus crates (zvariant, zbus_names, zvariant_derive) — unmaintained,
     # not vulnerable. Only path: buzz-mesh-smoke → mesh-llm → keyring 4 →
     # zbus-secret-service-keyring-store / secret-service 5 → zbus 5.
@@ -32,6 +45,11 @@ ignore = [
     { id = "RUSTSEC-2026-0370", reason = "zvariant via buzz-mesh-smoke → mesh-llm → keyring 4 → secret-service 5 → zbus 5; unmaintained, not vulnerable" },
     { id = "RUSTSEC-2026-0371", reason = "zbus_names via buzz-mesh-smoke → mesh-llm → keyring 4 → secret-service 5 → zbus 5; unmaintained, not vulnerable" },
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive via buzz-mesh-smoke → mesh-llm → keyring 4 → secret-service 5 → zbus 5; unmaintained, not vulnerable" },
+    # webpki-roots 0.26.11 bundles no certificates: it re-exports webpki-roots 1,
+    # which the lockfile pins at the patched 1.0.10. tokio-tungstenite 0.28/0.29
+    # (via axum and nostr-sdk) still require ^0.26, and no patched 0.26 release
+    # exists. Remove when those consumers move to webpki-roots 1.
+    { id = "RUSTSEC-2026-0381", reason = "only webpki-roots 0.26.11 remains: a shim re-exporting the patched 1.0.10; required by tokio-tungstenite 0.28/0.29" },
 ]
 
 [licenses]
@@ -105,10 +123,11 @@ license-files = []
 ignore = true
 
 [bans]
-# RUSTSEC-2026-0381: allow only the 0.26.11 re-export wrapper or patched roots.
-deny = [
-    { name = "webpki-roots", version = "<0.26.11" },
-    { name = "webpki-roots", version = ">0.26.11, <1.0.10" },
-]
 multiple-versions = "warn"
 wildcards = "allow"
+deny = [
+    # RUSTSEC-2026-0381: allow only the 0.26.11 re-export wrapper or patched roots.
+    { name = "webpki-roots", version = "<0.26.11" },
+    { name = "webpki-roots", version = ">0.26.11, <1.0.10" },
+    { name = "ringbuf", version = "<0.5.2", wrappers = ["neteq"], reason = "only audited NetEQ may declare this unused vulnerable dependency; all other consumers must use a patched release" },
+]

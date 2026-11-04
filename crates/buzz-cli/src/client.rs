@@ -252,7 +252,7 @@ fn is_safe_media_path_segment(sha256_ext: &str) -> bool {
     match segments.as_slice() {
         [hash] => is_lower_hex_sha256(hash),
         [hash, ext] => is_lower_hex_sha256(hash) && is_safe_media_ext(ext),
-        [hash, "thumb", "jpg"] => is_lower_hex_sha256(hash),
+        [hash, "thumb", "webp" | "jpg"] => is_lower_hex_sha256(hash),
         _ => false,
     }
 }
@@ -284,7 +284,7 @@ fn media_url_from_input(relay_url: &str, input: &str) -> Result<String, CliError
         };
         if !is_safe_media_path_segment(sha256_ext) {
             return Err(CliError::Usage(
-                "media path must be sha256, sha256.ext, or sha256.thumb.jpg".to_string(),
+                "media path must be sha256, sha256.ext, or sha256.thumb.{webp,jpg}".to_string(),
             ));
         }
         let relay = url::Url::parse(relay_url)
@@ -313,7 +313,7 @@ fn media_url_from_input(relay_url: &str, input: &str) -> Result<String, CliError
     }
     if !is_safe_media_path_segment(sha256_ext) {
         return Err(CliError::Usage(
-            "media input must be sha256, sha256.ext, or sha256.thumb.jpg".to_string(),
+            "media input must be sha256, sha256.ext, or sha256.thumb.{webp,jpg}".to_string(),
         ));
     }
     Ok(format!(
@@ -1174,7 +1174,8 @@ impl BuzzClient {
 
     /// Publish an ephemeral event via WebSocket with NIP-42 authentication.
     ///
-    /// The relay rejects ephemeral kinds (20000–29999) over HTTP. Delegates to
+    /// The relay accepts only typing (kind:20002) of the ephemeral kinds
+    /// (20000–29999) over HTTP. Delegates to
     /// `buzz_ws_client::publish_event` which handles connect, NIP-42 auth,
     /// EVENT send, OK wait, and graceful close.
     pub async fn publish_ephemeral_event(&self, event: nostr::Event) -> Result<String, CliError> {

@@ -35,6 +35,7 @@ async fn exercise(relay: &str) {
             Some(buzz_sdk::ChannelKind::Stream),
             None,
             None,
+            false,
         )
         .unwrap(),
         buzz_sdk::build_add_member(channel, &agent.public_key().to_hex(), None).unwrap(),

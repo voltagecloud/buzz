@@ -125,18 +125,12 @@ export function useChannelLinks() {
         debounceTimerRef.current = null;
       }
 
-      // Closing must not wait for the debounce: Enter on a cleared or
-      // replaced edit must submit it, not insert the previous suggestion.
-      if (
-        !detectPrefixQuery(
-          "#",
-          value,
-          cursorPosition,
-          knownNamesLowerRef.current,
-        )
-      ) {
+      // A cleared draft closes now: an Enter inside the debounce would
+      // otherwise pick a stale suggestion instead of submitting. Any other
+      // update keeps the debounce, so an edit made while selecting a
+      // suggestion cannot close the menu under the keydown handler.
+      if (value.length === 0) {
         setChannelQuery(null);
-        setChannelSelectedIndex(0);
         return;
       }
 
