@@ -12,7 +12,7 @@ use buzz_core::kind::{
 };
 use clap::Parser;
 use clap::ValueEnum;
-use nostr::Keys;
+use nostr::{Keys, PublicKey};
 use thiserror::Error;
 use url::Url;
 use uuid::Uuid;
@@ -594,6 +594,10 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_BOUND_SESSION", value_parser = parse_bound_session)]
     pub bound_session: Option<BoundSession>,
 
+    /// Session manager that authorizes shared channel turns. Requires a bound thread.
+    #[arg(long, env = "BUZZ_ACP_SHARING_MANAGER")]
+    pub sharing_manager: Option<PublicKey>,
+
     /// Save and verify a private workspace checkpoint after draining the agents.
     #[arg(long, env = "BUZZ_ACP_CHECKPOINT_ON_STOP", default_value_t = false)]
     pub checkpoint_on_stop: bool,
@@ -716,6 +720,8 @@ pub struct Config {
     /// Whether to emit bounded JSONL activity for platform collection.
     pub activity_log: bool,
     pub bound_session: Option<BoundSession>,
+    /// Manager for fresh shared-task admission; absent preserves owner-only input.
+    pub sharing_manager: Option<PublicKey>,
     /// Whether to run `buzz-agent-checkpoint save` after draining on stop and
     /// fail shutdown when it does not produce a verified receipt.
     pub checkpoint_on_stop: bool,
@@ -1042,6 +1048,16 @@ impl Config {
     /// `propagate_legacy_env_vars()` before the tokio runtime starts (in the
     /// sync `fn main()` wrapper) — see Rust 2024 edition safety.
     pub fn from_args(mut args: CliArgs) -> Result<Self, ConfigError> {
+        if args.sharing_manager.is_some()
+            && !matches!(
+                args.bound_session.as_ref(),
+                Some(BoundSession::Thread { .. })
+            )
+        {
+            return Err(ConfigError::ConfigFile(
+                "shared tasks require a bound channel thread".into(),
+            ));
+        }
         if let Some(binding) = &args.bound_session {
             let direct_message = matches!(binding, BoundSession::DirectMessage { .. });
             let subscription = if direct_message {
@@ -1333,7 +1349,9 @@ impl Config {
             max_turns_per_session: args.max_turns_per_session,
             presence_enabled: !args.no_presence,
             typing_enabled: !args.no_typing,
-            memory_enabled: args.memory && !args.no_memory,
+            // A later sharing grant must never expose personal core memory
+            // already injected into an owner-started channel session.
+            memory_enabled: args.memory && !args.no_memory && args.sharing_manager.is_none(),
             model,
             effort_level: args.effort_level,
             session_title: args
@@ -1349,6 +1367,7 @@ impl Config {
             relay_observer: args.relay_observer,
             activity_log: args.activity_log,
             bound_session: args.bound_session,
+            sharing_manager: args.sharing_manager,
             checkpoint_on_stop: args.checkpoint_on_stop,
             checkpoint_after_turn_secs: args.checkpoint_after_turn_secs,
             exit_after_inactivity_secs: args.exit_after_inactivity,
@@ -1801,6 +1820,13 @@ mod tests {
             .unwrap()
         };
         assert!(Config::from_args(args()).is_ok());
+        let mut private = args();
+        private.memory = true;
+        assert!(Config::from_args(private).unwrap().memory_enabled);
+        let mut shared = args();
+        shared.sharing_manager = Some(Keys::generate().public_key());
+        let error = Config::from_args(shared).err().unwrap().to_string();
+        assert!(error.contains("shared tasks require a bound channel thread"));
         let mut mentions = args();
         mentions.subscribe = SubscribeMode::Mentions;
         assert!(Config::from_args(mentions).is_err());
@@ -1899,6 +1925,18 @@ mod tests {
             "0",
         ];
         assert!(Config::from_args(CliArgs::try_parse_from(base).unwrap()).is_ok());
+        let mut shared = CliArgs::try_parse_from(base).unwrap();
+        shared.sharing_manager = Some(Keys::generate().public_key());
+        let configured = Config::from_args(shared).unwrap();
+        assert!(
+            !configured.memory_enabled,
+            "shared channels must not preload personal core memory"
+        );
+        assert_eq!(configured.respond_to, RespondTo::Owner);
+        let mut unbound = CliArgs::try_parse_from(base).unwrap();
+        unbound.sharing_manager = Some(Keys::generate().public_key());
+        unbound.bound_session = None;
+        assert!(Config::from_args(unbound).is_err());
         for (variation, flag) in [
             (0, "--respond-to owner"),
             (1, "--no-mention-filter"),
@@ -1969,6 +2007,7 @@ mod tests {
             relay_observer: false,
             activity_log: false,
             bound_session: None,
+            sharing_manager: None,
             checkpoint_on_stop: false,
             checkpoint_after_turn_secs: 0,
             exit_after_inactivity_secs: 0,

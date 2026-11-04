@@ -82,6 +82,8 @@ fn make_prompt_context(
 ) -> Result<PromptContext> {
     let base_prompt_content = config.base_prompt_content.as_ref();
     let cwd = current_working_directory()?;
+    let sharing =
+        crate::sharing::Client::from_config(config, &rest_client)?.map(std::sync::Arc::new);
     Ok(PromptContext {
         mcp_servers: build_mcp_servers(config),
         initial_message: config.initial_message.clone(),
@@ -91,7 +93,11 @@ fn make_prompt_context(
         dedup_mode: config.dedup_mode,
         system_prompt: config.system_prompt.clone(),
         session_title: config.session_title.clone(),
-        team_instructions: config.team_instructions.clone(),
+        team_instructions: if sharing.is_some() {
+            Some(format!("{}\n\nTo delegate to another shared agent, use `buzz agents handoff <agent-pubkey> --from <incoming-event-id> --message '<task>'`. Use the current incoming task's event ID. Delegate specific work or reviews; avoid acknowledgement loops. Sharing preserves the original requester and does not confer owner lifecycle rights.",config.team_instructions.as_deref().unwrap_or("")))
+        } else {
+            config.team_instructions.clone()
+        },
         base_prompt: if config.no_base_prompt {
             None
         } else {
@@ -119,6 +125,7 @@ fn make_prompt_context(
             .as_deref()
             .and_then(|hex| nostr::PublicKey::from_hex(hex).ok()),
         memory_enabled: config.memory_enabled,
+        sharing,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
     })

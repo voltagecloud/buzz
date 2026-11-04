@@ -19,6 +19,8 @@ path = "src/main.rs"
 # Internal
 buzz-core = { workspace = true }
 buzz-sdk = { workspace = true }
+buzz-session-control = { path = "../buzz-session-control" }
+buzz-ws-client = { workspace = true }
 buzz-persona = { path = "../buzz-persona" }
 
 # Git multicall helpers and ephemeral key ownership

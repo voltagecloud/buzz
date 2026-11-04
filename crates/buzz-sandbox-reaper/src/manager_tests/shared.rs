@@ -1,5 +1,11 @@
 use super::*;
 
+fn manager() -> Manager {
+    let mut manager = super::manager();
+    manager.config.shared_tasks = true;
+    manager
+}
+
 fn task_request() -> Sent {
     let trigger = EventBuilder::new(Kind::Custom(9), "teammate task")
         .tags([
@@ -13,6 +19,39 @@ fn task_request() -> Sent {
         payload: json!({"relay_url":"wss://relay.example.invalid","trigger":trigger}),
         ..Sent::deploy()
     }
+}
+
+#[tokio::test]
+async fn sharing_rollout_is_disabled_by_default_and_supplies_a_confined_manager_key() {
+    let disabled = super::manager();
+    assert_eq!(admit(&disabled, &task_request()), "shared_task_denied");
+    let enabled = manager();
+    let sent = Sent::deploy();
+    let Admission::Start { job, .. } = enabled.admit(&sent.event(), now()) else {
+        panic!("thread deploy refused")
+    };
+    let Work::Provider {
+        target: Target::Managed { env, .. },
+        ..
+    } = job.work
+    else {
+        panic!("not a managed thread")
+    };
+    assert_eq!(
+        env.get("BUZZ_ACP_SHARING_MANAGER"),
+        Some(&manager_keys().public_key().to_hex())
+    );
+    let Admission::Start { job, .. } = disabled.admit(&sent.event(), now()) else {
+        panic!("legacy deploy refused")
+    };
+    let Work::Provider {
+        target: Target::Managed { env, .. },
+        ..
+    } = job.work
+    else {
+        panic!("not a managed thread")
+    };
+    assert!(!env.contains_key("BUZZ_ACP_SHARING_MANAGER"));
 }
 
 #[tokio::test]

@@ -15,6 +15,49 @@ mod sharing_tests;
 
 pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), CliError> {
     match command {
+        AgentsCmd::Handoff {
+            agent,
+            from,
+            message,
+        } => {
+            if client.auth_tag_owner_hex().is_none() {
+                return Err(CliError::Auth("handoff requires an agent identity".into()));
+            }
+            validate_hex64(&agent)?;
+            let target = PublicKey::from_hex(&agent).map_err(|e| CliError::Usage(e.to_string()))?;
+            let from = crate::validate::parse_event_id(&from)?;
+            let raw = client
+                .query(&json!({"kinds":[9,40002],"ids":[from],"limit":1}))
+                .await?;
+            let mut events: Vec<nostr::Event> = serde_json::from_str(&raw)
+                .map_err(|_| CliError::Other("invalid incoming task response".into()))?;
+            if events.len() != 1 {
+                return Err(CliError::Usage(
+                    "incoming task is not visible to this agent".into(),
+                ));
+            }
+            let source = events
+                .pop()
+                .ok_or_else(|| CliError::Other("incoming task was not returned".into()))?;
+            if source.id != from {
+                return Err(CliError::Other(
+                    "relay returned a different incoming task".into(),
+                ));
+            }
+            let builder = buzz_sdk::sharing::task::handoff(
+                &source,
+                client.keys().public_key(),
+                target,
+                &read_or_stdin(&message)?,
+                nostr::Timestamp::now().as_secs(),
+            )
+            .map_err(|e| CliError::Usage(e.to_string()))?;
+            println!(
+                "{}",
+                client.submit_event(client.sign_event(builder)?).await?
+            );
+            Ok(())
+        }
         AgentsCmd::Share { agent, channel } => sharing(client, &agent, channel, true).await,
         AgentsCmd::Unshare { agent, channel } => sharing(client, &agent, channel, false).await,
         AgentsCmd::Sharing {

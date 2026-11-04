@@ -934,6 +934,8 @@ pub struct PromptContext {
     /// `<core-memory>` section. On by default; disabled via
     /// `--no-memory` / `BUZZ_ACP_NO_MEMORY`.
     pub memory_enabled: bool,
+    /// Fresh authorization for bound shared-channel tasks.
+    pub sharing: Option<Arc<crate::sharing::Client>>,
     /// Harness identity string for NIP-AM `harness` field. Derived from the
     /// configured `agent_command` at startup (e.g. `"goose"`, `"buzz-agent"`).
     pub harness_name: String,
@@ -2509,6 +2511,39 @@ pub async fn run_prompt_task(
         .map(|b| b.events.iter().map(|be| be.routing_event_id()).collect())
         .unwrap_or_default();
     let _reaction_guard = ReactionGuard::new(ctx.rest_client.clone(), reaction_ids.clone());
+
+    // Queueing may outlive a grant. Recheck before session creation, memory
+    // fetches, or any ACP prompt; the listener separately guards native steering.
+    if let (Some(sharing), Some(pending)) = (&ctx.sharing, &batch) {
+        let mut denied = None;
+        for item in &pending.events {
+            if Some(item.event.pubkey) == ctx.agent_owner_pubkey {
+                continue;
+            }
+            match sharing.authorize(&item.event).await {
+                Ok(None) => {}
+                Ok(Some(reason)) => {
+                    denied = Some(reason);
+                    break;
+                }
+                Err(error) => {
+                    denied = Some(error.to_string());
+                    break;
+                }
+            }
+        }
+        if let Some(reason) = denied {
+            send_prompt_result(
+                &result_tx,
+                &turn_id,
+                agent,
+                source,
+                PromptOutcome::Error(AcpError::TaskPermission(reason)),
+                requeue_batch_if_queue(&ctx, batch),
+            );
+            return;
+        }
+    }
 
     // Resolve project authority exactly once, before any ACP session creation or
     // initial-message delivery. An indeterminate result is a local relay-state
@@ -10490,6 +10525,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             agent_keys: agent_keys.clone(),
             agent_owner_pubkey: owner_pubkey,
             memory_enabled: false,
+            sharing: None,
             harness_name: "goose".to_string(),
             relay_url: "ws://127.0.0.1:3000".to_string(),
         }
