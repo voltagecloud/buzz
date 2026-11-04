@@ -17,6 +17,7 @@ mod account;
 mod actions;
 mod activity;
 mod admins;
+mod agent_sharing;
 mod canvas;
 mod channels;
 mod control;

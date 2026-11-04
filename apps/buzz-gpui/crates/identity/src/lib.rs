@@ -211,8 +211,8 @@ pub const PLUGIN_RELEASE: u16 = 1064;
 /// Kinds the app writes as ordinary content.
 const CONTENT_KINDS: &[u16] = &[
     0, 5, 7, 9, 1984, 9000, 9001, 9002, 9007, 9008, 9021, 9022, 9030, 9031, 9032, 9035, 9036,
-    28936, 30030, 30175, 30177, 30178, 30315, 30620, 40003, 40100, 41010, 41012, 42000, 45010,
-    46020,
+    28936, 30030, 30175, 30177, 30178, 30180, 30315, 30620, 40003, 40100, 41010, 41012, 42000,
+    45010, 46020,
 ];
 
 impl Identity {
@@ -266,6 +266,9 @@ impl Identity {
         content: String,
     ) -> Result<UnsignedEvent, IdentityError> {
         check_kind(purpose, kind)?;
+        if kind == 30180 {
+            check_channel_agent_grant(&self.pubkey_hex(), &tags, &content)?;
+        }
         if kind == AGENT_PRESENCE {
             check_agent_presence(&tags, &content)?;
         }
@@ -290,6 +293,14 @@ impl Identity {
     /// Signs an event built by [`Self::template`], keeping its ID.
     pub fn sign(&self, purpose: Purpose, unsigned: UnsignedEvent) -> Result<Event, IdentityError> {
         check_kind(purpose, unsigned.kind.as_u16())?;
+        if unsigned.kind.as_u16() == 30180 {
+            let tags = unsigned
+                .tags
+                .iter()
+                .map(|tag| tag.as_slice().to_vec())
+                .collect::<Vec<_>>();
+            check_channel_agent_grant(&self.pubkey_hex(), &tags, &unsigned.content)?;
+        }
         if unsigned.kind.as_u16() == AGENT_PRESENCE {
             let tags: Vec<Vec<String>> = unsigned
                 .tags
@@ -652,6 +663,44 @@ fn check_kind(purpose: Purpose, kind: u16) -> Result<(), IdentityError> {
     } else {
         Err(IdentityError::NotAllowed)
     }
+}
+
+/// Grant signing never accepts credentials, an ambiguous scope, or a self grant.
+fn check_channel_agent_grant(
+    viewer: &str,
+    tags: &[Vec<String>],
+    content: &str,
+) -> Result<(), IdentityError> {
+    let value: serde_json::Value =
+        serde_json::from_str(content).map_err(|_| IdentityError::NotAllowed)?;
+    let object = value.as_object().ok_or(IdentityError::NotAllowed)?;
+    let agent = value["agent"].as_str().ok_or(IdentityError::NotAllowed)?;
+    let channel = value["channel"]
+        .as_str()
+        .and_then(|id| uuid::Uuid::parse_str(id).ok())
+        .ok_or(IdentityError::NotAllowed)?;
+    if object.len() != 4
+        || value["version"] != 1
+        || value["enabled"].as_bool().is_none()
+        || !PublicKey::from_hex(agent).is_ok_and(|key| key.to_hex() == agent)
+        || agent == viewer
+    {
+        return Err(IdentityError::NotAllowed);
+    }
+    for (name, expected) in [
+        ("d", format!("{agent}:{channel}")),
+        ("h", channel.to_string()),
+        ("p", agent.to_owned()),
+    ] {
+        let matches = tags
+            .iter()
+            .filter(|tag| tag.first().map(String::as_str) == Some(name))
+            .collect::<Vec<_>>();
+        if matches.len() != 1 || matches[0].as_slice() != [name, &expected] {
+            return Err(IdentityError::NotAllowed);
+        }
+    }
+    Ok(())
 }
 
 /// Owner presence for the viewer's agents.

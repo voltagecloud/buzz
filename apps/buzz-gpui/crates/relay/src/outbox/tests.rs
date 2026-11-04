@@ -3,6 +3,8 @@
 //! Everything runs on paused tokio time.
 
 use super::*;
+#[path = "agent_sharing_tests.rs"]
+mod agent_sharing_tests;
 use crate::event::Verifier;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 

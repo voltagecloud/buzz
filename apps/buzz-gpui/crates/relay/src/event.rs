@@ -34,6 +34,8 @@ pub mod kinds {
     pub const CUSTOM_EMOJI: u16 = 30030;
     pub const APP_DATA: u16 = 30078;
     pub const MANAGED_AGENT: u16 = 30177;
+    /// Owner-signed permission to invoke one agent in one channel.
+    pub const AGENT_CHANNEL_GRANT: u16 = 30180;
     pub const REMINDERS: u16 = 30300;
     pub const USER_STATUS: u16 = 30315;
     pub const HIDDEN_DMS: u16 = 30622;

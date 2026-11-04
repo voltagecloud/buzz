@@ -177,7 +177,8 @@ impl Operation {
 
     /// Confirmed, without caller recovery: moves to retained history.
     fn complete(&self) -> bool {
-        (self.kind() == kinds::PUT_USER && self.acknowledged) || self.delivery == Delivery::Seen
+        (matches!(self.kind(), kinds::PUT_USER | kinds::AGENT_CHANNEL_GRANT) && self.acknowledged)
+            || self.delivery == Delivery::Seen
     }
 }
 
@@ -776,6 +777,25 @@ impl Outbox {
     /// Dates and identifies the draft, shows it as `sending`, and queues
     /// its delivery. Returns the final event ID.
     pub fn send(&self, draft: Draft, options: SendOptions) -> Result<EventId, OutboxError> {
+        self.send_with_time(draft, options, 0)
+    }
+
+    /// Keeps a replaceable permission newer than its confirmed head.
+    pub(crate) fn send_after(
+        &self,
+        draft: Draft,
+        options: SendOptions,
+        head: u64,
+    ) -> Result<EventId, OutboxError> {
+        self.send_with_time(draft, options, head.saturating_add(1))
+    }
+
+    fn send_with_time(
+        &self,
+        draft: Draft,
+        options: SendOptions,
+        minimum_time: u64,
+    ) -> Result<EventId, OutboxError> {
         if options.gate.as_ref().is_some_and(|gate| !gate()) {
             return Err(OutboxError::Cancelled);
         }
@@ -831,7 +851,13 @@ impl Outbox {
             Some(channel) => inner.options.message_clock.next(channel, now_ms),
             None => now_ms,
         };
-        let mut created_at = ms / 1000;
+        let mut created_at = (ms / 1000).max(minimum_time);
+        if created_at > ms / 1000 + MAX_EDIT_LEAD_SECS {
+            return Err(OutboxError::Refused(
+                "Changes are arriving too quickly or your clock changed. Wait a moment and retry."
+                    .into(),
+            ));
+        }
         if draft.kind == kinds::EDIT {
             // Edits have second precision on every client. Keep this
             // device's successive edits of one target strictly increasing
@@ -936,7 +962,8 @@ impl Outbox {
             return Ok(());
         };
         if state.closed
-            || (op.kind() == kinds::PUT_USER && op.acknowledged)
+            || (matches!(op.kind(), kinds::PUT_USER | kinds::AGENT_CHANNEL_GRANT)
+                && op.acknowledged)
             || is_workflow_operation(&op.event)
             || state.attempts.contains_key(id)
             || state.dismissing.contains_key(id)
@@ -1022,6 +1049,30 @@ impl Outbox {
                     "Confirm delivery before completing this message".into(),
                 ));
             }
+        }
+        self.inner.persist(Action::Acknowledge(*id)).await
+    }
+
+    /// A newer signed head makes a pending grant permanently obsolete, even
+    /// when its HTTP acknowledgement was lost. Do not claim the old ID was seen.
+    pub(crate) async fn supersede_agent_grant(
+        &self,
+        id: &EventId,
+        head: &Verified,
+    ) -> Result<(), OutboxError> {
+        let Some(op) = self.get(id) else {
+            return Ok(());
+        };
+        if op.kind() != kinds::AGENT_CHANNEL_GRANT
+            || head.kind_u16() != op.kind()
+            || head.pubkey != op.event.pubkey
+            || head.tag("d") != op.tag("d")
+            || !(head.created_at_secs() > op.created_at()
+                || (head.created_at_secs() == op.created_at() && head.id < op.id()))
+        {
+            return Err(OutboxError::Refused(
+                "Sharing has not been superseded".into(),
+            ));
         }
         self.inner.persist(Action::Acknowledge(*id)).await
     }
@@ -1212,7 +1263,8 @@ impl Inner {
                     let mut cleared = (*current).clone();
                     cleared.recovery = None;
                     cleared.acknowledged = true;
-                    if (cleared.delivery == Delivery::Seen || cleared.kind() == kinds::PUT_USER)
+                    if (cleared.delivery == Delivery::Seen
+                        || matches!(cleared.kind(), kinds::PUT_USER | kinds::AGENT_CHANNEL_GRANT))
                         && !state.attempts.contains_key(&id)
                     {
                         state.remove_pending(&id);
