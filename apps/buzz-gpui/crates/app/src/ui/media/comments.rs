@@ -167,6 +167,7 @@ impl Comments {
                 find.upgrade()
                     .and_then(|comments| comments.read(cx).row(id))
             }),
+            copy_thread: None,
             thread: Some(root),
             composer: composer.downgrade(),
         };

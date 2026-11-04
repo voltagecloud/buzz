@@ -562,7 +562,7 @@ impl ThreadPanel {
         cx: &mut Context<Self>,
     ) -> Entity<MessageActions> {
         let panel = cx.entity().downgrade();
-        let (reply, root, find) = (panel.clone(), panel.clone(), panel);
+        let (reply, root, find, copy) = (panel.clone(), panel.clone(), panel.clone(), panel);
         let (edit_composer, focus_composer) = (composer.downgrade(), composer.downgrade());
         let hooks = Hooks {
             reply: Rc::new(move |row, window, cx| {
@@ -595,11 +595,96 @@ impl ThreadPanel {
                         .cloned()
                 })
             }),
+            copy_thread: Some(Rc::new(move |cx| {
+                copy.upgrade()
+                    .and_then(|panel| panel.read(cx).copy_text(cx))
+            })),
             thread: Some(root_id),
             composer: composer.downgrade(),
         };
         let (community, channel) = (community.clone(), channel.to_string());
         cx.new(|cx| MessageActions::new(community, channel, hooks, window, cx))
+    }
+
+    /// "Copy thread": what this viewer sees here as Markdown, `None`
+    /// before anything has loaded.
+    fn copy_text(&self, cx: &App) -> Option<String> {
+        let snapshot = &self.snapshot;
+        if snapshot.root.is_none() && snapshot.replies.is_empty() {
+            return None;
+        }
+        let community = self.community.read(cx);
+        let summary = community
+            .snapshot
+            .channels
+            .iter()
+            .find(|channel| channel.id == self.channel);
+        let place = summary.map(|channel| match channel.channel_type {
+            Some(ChannelType::Dm) => "a direct message".to_string(),
+            _ => format!("#{}", channel.name),
+        });
+        let directory = Directory::of(
+            community,
+            summary.map(|channel| channel.members.as_slice()),
+            cx,
+        );
+        let mut notes = Vec::new();
+        if snapshot.can_load_more {
+            notes.push(match snapshot.direction {
+                Some(Direction::Forward) => "Later replies were not loaded.",
+                _ => "Older replies were not loaded.",
+            });
+        } else if snapshot.limited {
+            notes.push("Thread history limit reached: some replies were not loaded.");
+        }
+        let mut notes: Vec<String> = notes.into_iter().map(String::from).collect();
+        let thread = super::thread_banners::BannerThread {
+            relay: community.origin.websocket().to_owned(),
+            channel: self.channel.clone(),
+            root: self.root_id.to_hex(),
+        };
+        notes.extend(
+            super::thread_banners::for_thread(&thread, cx)
+                .into_iter()
+                .map(|banner| banner.text.to_string()),
+        );
+        let observed = crate::agent_activity::observer::snapshot(&self.community, cx);
+        let activity = snapshot
+            .root
+            .iter()
+            .chain(snapshot.replies.iter())
+            .filter_map(|row| {
+                let works = crate::agent_activity::request::message_activity(
+                    &observed,
+                    &self.channel,
+                    &row.id.to_hex(),
+                );
+                (!works.is_empty()).then(|| {
+                    let statuses = works
+                        .iter()
+                        .map(|work| {
+                            (
+                                work.agent.clone(),
+                                super::agent_activity::bubble::status(work),
+                            )
+                        })
+                        .collect();
+                    (row.id, statuses)
+                })
+            })
+            .collect();
+        Some(super::message_copy::thread(
+            &super::message_copy::LoadedThread {
+                channel: &self.channel,
+                place,
+                root_id: self.root_id,
+                root: snapshot.root.as_deref(),
+                replies: &snapshot.replies,
+                notes,
+                activity,
+            },
+            &directory.names,
+        ))
     }
 
     /// Up in an empty composer edits the viewer's newest editable reply.
