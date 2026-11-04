@@ -477,3 +477,25 @@ CAUTION: An agent runs with full tool access in its Sandbox, and it reads untrus
 - Infrastructure: voltage-terraform `v2/environments/staging-agent`
 - Deployment: voltagecloud/cd `charts/buzz-sandbox-manager` and `staging/values/infra-utils`
 - Tracking: Linear DEV-2884 (remote agents), DEV-2948 (one ChatGPT login for all of a developer's agents), DEV-2949 (staging Argo CD config in Git)
+
+## Direct messages and launch recovery
+
+A remote agent uses one workspace for an entire direct-message conversation.
+In a one-on-one owner/agent DM, plain owner messages start the agent without
+an explicit mention. Starting an agent in a group DM requires a mention.
+Channel work stays isolated to the mentioned thread. Only the verified owner can start
+these workspaces or send their harness work; this does not enable channel sharing.
+If a DM workspace has ended, use the recovery buttons above its composer.
+Both recovery modes replay the message that failed to start it.
+
+Deploy the matching agent image and Sandbox manager before installing a client
+that sends the new DM scope. Older binaries reject that scope. Existing channel
+thread names and checkpoints keep their current format. The old workspaces
+created for individual DM messages are separate sessions; end them through the
+normal checkpoint lifecycle after confirming they contain no active work.
+
+To validate the rollout, send a plain message to your agent in its DM and wait
+for a reply. Send a second message and confirm that the same Sandbox is reused.
+End that session, send another message, then recover it from the banner. The
+agent must answer that pending message without another mention. A different DM,
+channel thread, or person's identity must not join that workspace.

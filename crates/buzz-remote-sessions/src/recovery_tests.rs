@@ -79,7 +79,7 @@ fn checkpoint_is_hidden_when_there_is_nothing_to_restore() {
 }
 
 fn session(root: char) -> SessionScope {
-    SessionScope {
+    SessionScope::Thread {
         channel_id: uuid::Uuid::from_u128(7),
         thread_root: root.to_string().repeat(64),
     }
@@ -118,7 +118,9 @@ fn the_key_separates_tenants_agents_and_threads() {
     let mut other_signer = base.clone();
     other_signer.expected_signer_pubkey = "bb22".to_string();
     let mut other_channel = base.clone();
-    other_channel.session.channel_id = uuid::Uuid::from_u128(8);
+    if let SessionScope::Thread { channel_id, .. } = &mut other_channel.session {
+        *channel_id = uuid::Uuid::from_u128(8);
+    }
     let distinct = [
         other_relay,
         other_signer,

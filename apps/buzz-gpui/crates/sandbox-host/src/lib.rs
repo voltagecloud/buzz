@@ -196,11 +196,24 @@ impl Context {
         if tenant.relay.trim().is_empty() || tenant.signer.trim().is_empty() {
             return Err("A remote workspace needs the community and person it is for".into());
         }
-        let channel = scope
-            .channel_id
-            .parse()
-            .map_err(|_| "A remote workspace needs a channel's UUID")?;
-        let scope = SessionScope::new(channel, scope.thread_root)?;
+        let scope = match scope {
+            buzz_host::api::SandboxScope::Thread {
+                channel_id,
+                thread_root,
+            } => SessionScope::new(
+                channel_id
+                    .parse()
+                    .map_err(|_| "A remote workspace needs a channel's UUID")?,
+                thread_root,
+            )?,
+            buzz_host::api::SandboxScope::DirectMessage { dm_channel_id } => {
+                SessionScope::DirectMessage {
+                    dm_channel_id: dm_channel_id
+                        .parse()
+                        .map_err(|_| "A remote workspace needs a DM channel's UUID")?,
+                }
+            }
+        };
         self.custody.launch_identity(&pubkey).await?;
         let thread = Thread {
             pubkey,

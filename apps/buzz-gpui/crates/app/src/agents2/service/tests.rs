@@ -85,7 +85,13 @@ fn mentions_wake_and_addressed_events_skip_watches() {
     let none = |_: &str| false;
     let mention = event("m", |e| e.tags.push(vec!["p".into(), agent.clone()]));
     assert_eq!(
-        kinds(&heard(&agent, &owner(), &mention, &none, &watches)),
+        kinds(&heard_in_thread(
+            &agent,
+            &owner(),
+            &mention,
+            &none,
+            &watches
+        )),
         ["mention"]
     );
     // A reaction to its message is addressed: no watch, and no run.
@@ -94,7 +100,7 @@ fn mentions_wake_and_addressed_events_skip_watches() {
         e.kind = 7;
         e.tags = vec![vec!["e".into(), "mine".into()]];
     });
-    assert!(heard(&agent, &owner(), &reaction, &mine, &watches).is_empty());
+    assert!(heard_in_thread(&agent, &owner(), &reaction, &mine, &watches).is_empty());
     // A reply in a thread it started wakes it only by a watch, or by naming
     // it.
     let reply = |e: &mut EventData| {
@@ -106,7 +112,7 @@ fn mentions_wake_and_addressed_events_skip_watches() {
         ])
     };
     assert_eq!(
-        kinds(&heard(
+        kinds(&heard_in_thread(
             &agent,
             &owner(),
             &event("q", reply),
@@ -120,12 +126,12 @@ fn mentions_wake_and_addressed_events_skip_watches() {
         e.tags.push(vec!["p".into(), agent.clone()]);
     });
     assert_eq!(
-        kinds(&heard(&agent, &owner(), &named, &mine, &watches)),
+        kinds(&heard_in_thread(&agent, &owner(), &named, &mine, &watches)),
         ["mention"]
     );
     // Anything else reaches the watches, one run per match.
     let plain = event("p", |_| {});
-    let triggers = heard(&agent, &owner(), &plain, &none, &watches);
+    let triggers = heard_in_thread(&agent, &owner(), &plain, &none, &watches);
     assert_eq!(kinds(&triggers), ["watch"]);
     let Trigger::Watch { slug, interest, .. } = &triggers[0] else {
         panic!("watch");
@@ -158,7 +164,7 @@ fn wakes_on_another_of_the_owners_agents_only_when_it_names_the_agent() {
         reply(e);
         e.tags.push(auth.clone());
     });
-    assert!(heard(&agent, &owner(), &unnamed, &mine, &watches).is_empty());
+    assert!(heard_in_thread(&agent, &owner(), &unnamed, &mine, &watches).is_empty());
     // Naming it wakes it, even in reply to its own message.
     let callback = event("c", |e| {
         reply(e);
@@ -166,7 +172,13 @@ fn wakes_on_another_of_the_owners_agents_only_when_it_names_the_agent() {
         e.tags.push(auth.clone());
     });
     assert_eq!(
-        kinds(&heard(&agent, &owner(), &callback, &mine, &watches)),
+        kinds(&heard_in_thread(
+            &agent,
+            &owner(),
+            &callback,
+            &mine,
+            &watches
+        )),
         ["mention"]
     );
 }
@@ -181,10 +193,10 @@ fn disabled_watches_and_bad_filters_never_match() {
     })));
     assert_eq!(watches.len(), 1);
     let none = |_: &str| false;
-    assert!(heard(&bot(), &owner(), &event("x", |_| {}), &none, &watches).is_empty());
+    assert!(heard_in_thread(&bot(), &owner(), &event("x", |_| {}), &none, &watches).is_empty());
     let go = event("g", |e| e.content = "go".into());
     assert_eq!(
-        kinds(&heard(&bot(), &owner(), &go, &none, &watches)),
+        kinds(&heard_in_thread(&bot(), &owner(), &go, &none, &watches)),
         ["watch"]
     );
 }
@@ -300,7 +312,7 @@ fn agent_with(objects: &BTreeMap<String, AttentionObject>, on: bool) -> Agent {
 /// The job a watch match queues, as `dispatch` does.
 fn queued(agent: &Agent, event: &Arc<EventData>, epoch: u64) -> Job {
     let watches = compile(&agent.attention);
-    let trigger = heard(&agent.pubkey, &agent.owner, event, &|_| false, &watches)
+    let trigger = heard_in_thread(&agent.pubkey, &agent.owner, event, &|_| false, &watches)
         .pop()
         .expect("a watch matches");
     let Trigger::Watch { slug, .. } = &trigger else {
@@ -754,4 +766,99 @@ fn a_run_counts_as_working_until_its_handed_off_work_settles() {
         std::thread::sleep(Duration::from_millis(10));
     }
     assert_eq!(count.load(Ordering::SeqCst), 0);
+}
+
+fn heard_in_thread(
+    agent: &str,
+    owner: &str,
+    event: &Arc<EventData>,
+    wrote: &dyn Fn(&str) -> bool,
+    watches: &[CompiledWatch],
+) -> Vec<Trigger> {
+    super::heard(agent, owner, event, wrote, watches, false)
+}
+
+#[test]
+fn an_owners_plain_dm_wakes_only_its_member_agent_without_a_mention() {
+    let plain = event("dm", |message| message.pubkey = owner());
+    let none = |_: &str| false;
+    assert_eq!(
+        kinds(&super::heard(&bot(), &owner(), &plain, &none, &[], true)),
+        ["mention"]
+    );
+    assert!(super::heard(&bot(), &owner(), &plain, &none, &[], false).is_empty());
+    let stranger = event("stranger", |_| {});
+    assert!(super::heard(&bot(), &owner(), &stranger, &none, &[], true).is_empty());
+}
+
+#[test]
+fn plain_dm_wakeups_require_exactly_the_owner_and_the_agent() {
+    let (owner, agent, other) = (owner(), bot(), "d".repeat(64));
+    let plain = event("plain-owner-dm", |event| event.pubkey = owner.clone());
+    for (kind, members, wakes) in [
+        (
+            Some(ChannelType::Dm),
+            vec![owner.clone(), agent.clone()],
+            true,
+        ),
+        (
+            Some(ChannelType::Dm),
+            vec![owner.clone(), agent.clone(), other.clone()],
+            false,
+        ),
+        (
+            Some(ChannelType::Dm),
+            vec![other.clone(), agent.clone()],
+            false,
+        ),
+        (
+            Some(ChannelType::Dm),
+            vec![owner.clone(), other.clone()],
+            false,
+        ),
+        (
+            Some(ChannelType::Stream),
+            vec![owner.clone(), agent.clone()],
+            false,
+        ),
+        (None, vec![owner.clone(), agent.clone()], false),
+    ] {
+        let channel = ChannelSummary {
+            channel_type: kind,
+            members,
+            ..Default::default()
+        };
+        let triggers = super::heard(
+            &agent,
+            &owner,
+            &plain,
+            &|_| false,
+            &[],
+            owner_dm(&channel, &owner, &agent),
+        );
+        assert_eq!(
+            kinds(&triggers),
+            if wakes { vec!["mention"] } else { vec![] }
+        );
+    }
+    let group = ChannelSummary {
+        channel_type: Some(ChannelType::Dm),
+        members: vec![owner.clone(), agent.clone(), other],
+        ..Default::default()
+    };
+    let explicit = event("targeted-group-dm", |event| {
+        event.pubkey = owner.clone();
+        event.tags.push(vec!["p".into(), agent.clone()]);
+    });
+    assert_eq!(
+        kinds(&super::heard(
+            &agent,
+            &owner,
+            &explicit,
+            &|_| false,
+            &[],
+            owner_dm(&group, &owner, &agent)
+        )),
+        ["mention"]
+    );
 }

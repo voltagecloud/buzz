@@ -6,6 +6,7 @@
 // The slice API: banners compiled in elsewhere use what the app does not.
 #![allow(dead_code)]
 
+use buzz_ui::{ActiveTheme, Button, ButtonSize, TypeStyled};
 use gpui_kit::*;
 use std::rc::Rc;
 
@@ -15,7 +16,7 @@ pub struct BannerThread {
     /// The community's `wss://` origin.
     pub relay: String,
     pub channel: String,
-    /// The thread's root event id, as hex.
+    /// The thread's root event id, as hex; empty for a DM conversation.
     pub root: String,
 }
 
@@ -105,6 +106,42 @@ pub fn for_thread(thread: &BannerThread, cx: &App) -> Vec<Banner> {
     cx.try_global::<Registry>()
         .map(|registry| registry.for_thread(thread, cx))
         .unwrap_or_default()
+}
+
+/// Renders the shared status note and named action buttons.
+pub fn render(thread: &BannerThread, cx: &App) -> Vec<AnyElement> {
+    let c = cx.colors();
+    for_thread(thread, cx)
+        .into_iter()
+        .enumerate()
+        .map(|(index, banner)| {
+            div()
+                .px(px(16.))
+                .pb(px(12.))
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .child(
+                    div()
+                        .text_body_sm()
+                        .text_color(c.text_subtle)
+                        .child(banner.text),
+                )
+                .child(div().flex().flex_wrap().gap(px(8.)).children(
+                    banner.buttons.into_iter().enumerate().map(|(at, button)| {
+                        let action = button.action;
+                        Button::new(
+                            ElementId::Name(format!("session-banner-{index}-{at}").into()),
+                            button.label,
+                        )
+                        .size(ButtonSize::Sm)
+                        .loading(button.loading)
+                        .on_click(move |_, window, cx| action(window, cx))
+                    }),
+                ))
+                .into_any_element()
+        })
+        .collect()
 }
 
 #[cfg(test)]
