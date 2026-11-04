@@ -9,6 +9,8 @@
 #    uses, encodes a voice note and plays it and the test clips (WebM and
 #    MP3 over HTTP, QuickTime from a file, whose index is at the end), while
 #    dyld reports loading nothing from outside the bundle and the system.
+#    A Developer ID build passes the self-check as signed, under the
+#    hardened runtime, before the trace.
 #
 # For CI: it moves /Library/Frameworks/GStreamer.framework (with sudo) and
 # puts it back when done.
@@ -91,22 +93,36 @@ for _ in $(seq 50); do
   sleep 0.2
 done
 
-# A clean environment, except for variables that would pull in the
-# GStreamer moved aside if the app honoured them.
 log="$work/check.log"
-status=0
 mkdir "$work/home"
 elsewhere="$hidden/Versions/1.0/lib"
-env -i HOME="$work/home" TMPDIR="$work" PATH=/usr/bin:/bin \
-  GST_PLUGIN_PATH="$elsewhere/gstreamer-1.0" \
-  GST_PLUGIN_SYSTEM_PATH="$elsewhere/gstreamer-1.0" \
-  GST_PLUGIN_PATH_1_0="$elsewhere/gstreamer-1.0" \
-  GIO_EXTRA_MODULES="$elsewhere/gio/modules" \
-  DYLD_PRINT_LIBRARIES=1 \
-  "$app/Contents/MacOS/buzz-gpui" --gst-check \
-  "http://127.0.0.1:$port/clip.webm" \
-  "http://127.0.0.1:$port/ping.mp3" \
-  "file://$media/clip.mov" >"$log" 2>&1 || status=$?
+# The self-check, in a clean environment except for variables that would
+# pull in the GStreamer moved aside if the app honoured them, plus any given.
+gst_check() {
+  env -i HOME="$work/home" TMPDIR="$work" PATH=/usr/bin:/bin \
+    GST_PLUGIN_PATH="$elsewhere/gstreamer-1.0" \
+    GST_PLUGIN_SYSTEM_PATH="$elsewhere/gstreamer-1.0" \
+    GST_PLUGIN_PATH_1_0="$elsewhere/gstreamer-1.0" \
+    GIO_EXTRA_MODULES="$elsewhere/gio/modules" \
+    "$@" "$app/Contents/MacOS/buzz-gpui" --gst-check \
+    "http://127.0.0.1:$port/clip.webm" \
+    "http://127.0.0.1:$port/ping.mp3" \
+    "file://$media/clip.mov"
+}
+
+# A Developer ID build runs under the hardened runtime, where dyld ignores
+# DYLD_ variables. It must play media as signed; the images it loads are then
+# traced in this copy signed ad hoc, which loads the same ones.
+if codesign --display --verbose=1 "$app" 2>&1 | grep -q '^CodeDirectory.*flags=.*runtime'; then
+  echo "== The signed app, under the hardened runtime"
+  gst_check || { echo "the self-check exited with $?"; exit 1; }
+  for file in "$app"/Contents/MacOS/*; do
+    codesign --force --sign - "$file" 2>/dev/null
+  done
+  echo "== The same app, signed ad hoc so that dyld reports what it loads"
+fi
+status=0
+gst_check DYLD_PRINT_LIBRARIES=1 >"$log" 2>&1 || status=$?
 grep -v '^dyld\[' "$log"
 [ "$status" = 0 ] || { echo "the self-check exited with $status"; exit 1; }
 

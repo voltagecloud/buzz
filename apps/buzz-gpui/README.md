@@ -37,15 +37,16 @@ keyring, and they stop when the app quits.
 
 ## Laptop: install the app (macOS)
 
-The macOS build is not signed or notarized. It carries the GStreamer
-libraries and plugins it plays audio and video with, so nothing else has
-to be installed.
+The macOS build carries the GStreamer libraries and plugins it plays audio
+and video with, so nothing else has to be installed.
 
 1. Open `Buzz-<version>-macos-arm64.dmg` (Apple silicon) or
    `Buzz-<version>-macos-x86_64.dmg` (Intel).
 2. Drag Buzz to Applications.
-3. The first time, right-click Buzz in Applications and choose Open. If
-   macOS still refuses, run `xattr -dr com.apple.quarantine /Applications/Buzz.app`.
+3. A build signed with a Developer ID and notarized opens like any other
+   app. A build signed ad hoc does not: the first time, right-click Buzz in
+   Applications and choose Open. If macOS still refuses, run
+   `xattr -dr com.apple.quarantine /Applications/Buzz.app`.
 
 Build the image on a Mac with `scripts/package-macos.sh`. It writes
 `dist/Buzz-<version>-macos-<arch>.dmg` for the Mac's own architecture. It
@@ -57,6 +58,13 @@ The script copies the libraries and plugins the app uses into `Buzz.app`.
 `scripts/check-macos-dmg.sh <dmg>` then checks that the app loads nothing
 from outside itself and the system, and plays media with the framework
 moved aside (it uses `sudo`).
+
+The script signs ad hoc unless `MACOS_SIGN_IDENTITY` names a Developer ID
+Application identity in the keychain. With one, it signs for notarization:
+hardened runtime, secure timestamps, and the entitlements in
+`packaging/macos`. `scripts/notarize-macos.sh <dmg>` then notarizes the
+image with an App Store Connect API key, staples the ticket, and checks
+that Gatekeeper accepts the app as notarized.
 
 ## Laptop: install the app (Windows)
 
@@ -100,6 +108,17 @@ On Windows, build first with `bash scripts/build-package.sh -p buzzd`.
 The Build workflow makes all of these packages. It runs by hand, for pull
 requests that change it, and for `v*` tags, which also attach the packages
 to a GitHub release.
+
+Voltage's release workflow signs and notarizes the macOS images when the
+repository has these secrets, and warns on a release without them:
+
+| Secret | Value |
+|--------|-------|
+| `MACOS_DEVELOPER_ID_P12` | The Developer ID Application certificate and its private key, as a base64 `.p12` |
+| `MACOS_DEVELOPER_ID_P12_PASSWORD` | The `.p12` password |
+| `APPLE_API_KEY_P8` | An App Store Connect API key (`.p8` contents) with the Developer role |
+| `APPLE_API_KEY_ID` | That key's ID |
+| `APPLE_API_ISSUER` | The issuer ID of the team's API keys |
 
 ## Dev server: run `buzzd` (NixOS)
 

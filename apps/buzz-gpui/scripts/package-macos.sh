@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds an ad-hoc signed Buzz.app and wraps it in a .dmg. Runs on macOS,
+# Builds a signed Buzz.app and wraps it in a .dmg. Runs on macOS,
 # for the architecture of the machine it runs on. The app carries the
 # GStreamer it plays media with, copied from the official GStreamer
 # framework (the runtime and development .pkg installers from
@@ -10,6 +10,12 @@
 #
 # Usage: scripts/package-macos.sh   -> dist/Buzz-<version>-macos-<arch>.dmg
 # GSTREAMER_PREFIX overrides where the framework is.
+#
+# MACOS_SIGN_IDENTITY, when set, is a Developer ID Application identity in
+# the keychain (its name or SHA-1). The app and image are then signed with it
+# for notarization (scripts/notarize-macos.sh): hardened runtime, a secure
+# timestamp, and the entitlements in packaging/macos. Otherwise the
+# signature is ad hoc.
 set -euo pipefail
 node_version=22.23.3
 node_sha256_arm64=23b25245dcfb9af7262f8ff142e9e2e0af025368117329e7a7458a51e5922f53
@@ -107,22 +113,32 @@ for manifest in "$work"/plugins/*/buzz-plugin.json; do
 done
 rm -rf "$work/node" "$work/plugins" "$node_tarball"
 
-# Ad-hoc signature: Apple Silicon refuses to run unsigned code at all, and
-# install_name_tool broke the signatures the copies came with. Each
-# library, plugin and helper first, then the app around them (signing the
-# main executable signs the app).
+# Apple Silicon refuses to run unsigned code at all, and install_name_tool
+# broke the signatures the copies came with. Each library, plugin and helper
+# first, then the app around them (signing the bundle signs the main
+# executable).
+identity="${MACOS_SIGN_IDENTITY:--}"
+sign() {
+  local options=(--force --sign "$identity")
+  if [ "$identity" != - ]; then
+    options+=(--options runtime --timestamp)
+  fi
+  # Quiet about the signatures it replaces, loud about failures.
+  if ! out="$(codesign "${options[@]}" "$@" 2>&1)"; then
+    echo "$out" >&2
+    exit 1
+  fi
+}
 find "$app/Contents" -type f ! -path "$app/Contents/MacOS/buzz-gpui" \
   \( -name '*.dylib' -o -name '*.so' -o -perm -u+x \) -print0 \
   | while IFS= read -r -d '' file; do
-      if file -b "$file" | grep -q Mach-O; then
-        # Quiet about the signatures it replaces, loud about failures.
-        if ! out="$(codesign --force --sign - "$file" 2>&1)"; then
-          echo "$out" >&2
-          exit 1
-        fi
+      if [ "$file" = "$app/Contents/Resources/node/bin/node" ]; then
+        sign --entitlements packaging/macos/node.entitlements "$file"
+      elif file -b "$file" | grep -q Mach-O; then
+        sign "$file"
       fi
     done
-codesign --force --deep --sign - "$app"
+sign --entitlements packaging/macos/buzz-gpui.entitlements "$app"
 codesign --verify --deep --strict "$app"
 
 dmg="dist/Buzz-$version-macos-$arch.dmg"
@@ -134,5 +150,8 @@ rm -rf "$iconset"
 size_mb="$(du -sm "$work" | cut -f1)"
 hdiutil create -volname Buzz -srcfolder "$work" -size "$((size_mb * 5 / 4 + 20))m" \
   -ov -format UDZO "$dmg"
+if [ "$identity" != - ]; then
+  codesign --sign "$identity" --timestamp "$dmg"
+fi
 rm -rf "$work"
 ls -la "$dmg"
