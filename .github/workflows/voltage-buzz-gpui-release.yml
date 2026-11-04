@@ -17,6 +17,10 @@ on:
       - .github/workflows/voltage-buzz-gpui-release.yml
       - apps/buzz-gpui/.github/actions/**
       - apps/buzz-gpui/scripts/package-*
+      - apps/buzz-gpui/scripts/build-package.sh
+      - apps/buzz-gpui/scripts/check-remote-provider.mjs
+      - apps/buzz-gpui/scripts/check-remote-provider.test.mjs
+      - apps/buzz-gpui/scripts/test-package-build.py
       - apps/buzz-gpui/scripts/bundle-macos-*
       - apps/buzz-gpui/scripts/check-macos-*
 
@@ -27,7 +31,22 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # Ship the Remote workspace UI and its provider on every desktop platform.
+  BUZZ_GPUI_VOLTAGE: "1"
+
 jobs:
+  package-contract:
+    name: Desktop package contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - run: python3 apps/buzz-gpui/scripts/test-package-build.py
+      - run: node --test apps/buzz-gpui/scripts/check-remote-provider.test.mjs
+
   version:
     name: GPUI release version
     runs-on: ubuntu-latest
@@ -61,7 +80,7 @@ jobs:
 
   linux:
     name: GPUI Linux x86_64 (.deb)
-    needs: version
+    needs: [version, package-contract]
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
@@ -81,7 +100,7 @@ jobs:
 
   macos:
     name: GPUI macOS ${{ matrix.arch }} (.dmg)
-    needs: version
+    needs: [version, package-contract]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     strategy:
@@ -128,7 +147,7 @@ jobs:
 
   windows:
     name: GPUI Windows x86_64 (.zip)
-    needs: version
+    needs: [version, package-contract]
     runs-on: windows-latest
     timeout-minutes: 120
     env:
@@ -148,7 +167,7 @@ jobs:
         with:
           workspaces: apps/buzz-gpui
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo build --locked --release -p buzz-gpui -p buzzd
+      - run: bash scripts/build-package.sh -p buzzd
         working-directory: apps/buzz-gpui
       - run: |
           python -m pip install pefile
@@ -156,6 +175,8 @@ jobs:
         working-directory: apps/buzz-gpui
       # The bundled Node runs every bundled plugin.
       - run: dist/Buzz/lib/buzz-gpui/node/bin/node.exe scripts/check-plugins.mjs dist/Buzz/share/buzz-gpui/plugins
+        working-directory: apps/buzz-gpui
+      - run: dist/Buzz/lib/buzz-gpui/node/bin/node.exe scripts/check-remote-provider.mjs dist/Buzz/bin/buzz-backend-relay.exe
         working-directory: apps/buzz-gpui
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:

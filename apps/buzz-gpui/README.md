@@ -91,6 +91,12 @@ The ones you may notice:
 
 ### Builds
 
+Voltage's release workflow sets `BUZZ_GPUI_VOLTAGE=1`. These packages enable
+Remote workspaces and place `buzz-backend-relay` beside the app executable.
+The package checks run the bundled provider's credential-free `info` operation.
+For a local Voltage package, set this variable before running its package script.
+On Windows, build first with `bash scripts/build-package.sh -p buzzd`.
+
 The Build workflow makes all of these packages. It runs by hand, for pull
 requests that change it, and for `v*` tags, which also attach the packages
 to a GitHub release.
