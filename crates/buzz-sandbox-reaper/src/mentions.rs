@@ -4,6 +4,7 @@
 
 mod journal;
 mod registry;
+pub(crate) use registry::Identity;
 mod worker;
 
 use std::collections::BTreeMap;

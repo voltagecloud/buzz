@@ -11,7 +11,7 @@ use crate::manager::Manager;
 use crate::mobile_launch::{relay_endpoint, Registration, DATA_KEY, LABEL};
 
 /// No Debug: this holds the agent's credentials, never the owner's key.
-pub(super) struct Identity {
+pub(crate) struct Identity {
     pub name: String,
     pub namespace: String,
     pub revision: String,

@@ -259,6 +259,13 @@ pub struct Job {
 
 /// What a job runs.
 pub enum Work {
+    /// Reserve one shared task. This operation cannot start or stop a provider.
+    Admit {
+        owner: PublicKey,
+        agent: PublicKey,
+        namespace: String,
+        request: crate::shared_tasks::Request,
+    },
     /// A provider protocol request, against the owner's namespace.
     Provider {
         request: Request,
@@ -282,6 +289,16 @@ impl Work {
     /// Run to the `done` response.
     pub async fn run(self, manager: &Manager) -> serde_json::Value {
         match self {
+            Work::Admit {
+                owner,
+                agent,
+                namespace,
+                request,
+            } => {
+                manager
+                    .admit_shared(owner, agent, &namespace, &request)
+                    .await
+            }
             Work::Provider {
                 request,
                 target,
@@ -553,6 +570,21 @@ impl Manager {
             Work::Profile {
                 developer: developer.clone(),
             }
+        } else if op == Op::Admit {
+            let request = match serde_json::from_value(opened.request.payload.clone()) {
+                Ok(request) => request,
+                Err(_) => {
+                    return answer(
+                        serde_json::json!({"ok":false,"code":"shared_task_denied","error":"admit requires relay_url and the original signed trigger"}),
+                    )
+                }
+            };
+            Work::Admit {
+                owner,
+                agent: opened.signer,
+                namespace: developer.namespace.clone(),
+                request,
+            }
         } else if op == Op::Start {
             let start = match Start::admit(
                 opened.request.payload.clone(),
@@ -744,6 +776,35 @@ impl Manager {
                 "the owner attestation does not verify for the signer",
             )
         })
+    }
+
+    pub(crate) async fn admit_shared(
+        &self,
+        owner: PublicKey,
+        agent: PublicKey,
+        namespace: &str,
+        request: &crate::shared_tasks::Request,
+    ) -> serde_json::Value {
+        use buzz_sdk::sharing::policy::Error as PolicyError;
+        let result=tokio::time::timeout(std::time::Duration::from_secs(40),async {
+            let task=match crate::shared_tasks::verify(self.client.clone(),namespace,owner,agent,request).await {
+                Ok(task)=>task,
+                Err(PolicyError::Denied(reason))=>return serde_json::json!({"ok":false,"code":"shared_task_denied","error":reason}),
+                Err(PolicyError::Unavailable)=>return serde_json::json!({"ok":false,"code":"shared_task_retry","error":"current sharing authorization is unavailable; retry this task"}),
+            };
+            let Some(origin)=self.config.developer(&task.origin_owner) else {
+                return serde_json::json!({"ok":false,"code":"shared_task_denied","error":"the initial agent must use this session manager"});
+            };
+            match crate::shared_budget::admit(self.client.clone(),&origin.namespace,&request.relay_url,&task,Timestamp::now().as_secs()).await {
+                Ok(())=>serde_json::json!({"ok":true,"request":task.origin.request,"origin_agent":task.origin.agent,
+                    "human":task.human,"channel":task.scope.channel,"thread_root":task.scope.root}),
+                Err(error)=>{
+                    let code=if matches!(error,crate::shared_budget::Error::Storage) {"shared_task_retry"} else {"shared_task_denied"};
+                    serde_json::json!({"ok":false,"code":code,"error":error.to_string()})
+                }
+            }
+        }).await;
+        result.unwrap_or_else(|_|serde_json::json!({"ok":false,"code":"shared_task_retry","error":"task authorization timed out; retry this task"}))
     }
 
     /// Step 3: parse the provider request and bind its agent key to the

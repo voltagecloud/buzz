@@ -43,6 +43,8 @@ pub struct Task {
     pub trigger: EventId,
     /// Whether the requester is a verified agent.
     pub handoff: bool,
+    /// Signed creation time of the original human task. Expiry cannot reset.
+    pub requested_at: u64,
 }
 
 /// Load current grants, identities, metadata and membership, then verify task
@@ -183,6 +185,7 @@ where
         origin_owner,
         trigger: event.id,
         handoff: automated,
+        requested_at: root.created_at.as_secs(),
     })
 }
 

@@ -5,6 +5,9 @@ use nostr::nips::nip44;
 use nostr::{EventBuilder, Kind, Tag};
 use serde_json::{json, Value};
 
+#[path = "manager_tests/shared.rs"]
+mod shared;
+
 const NAMESPACE: &str = "buzz-agent-staging-dev";
 
 fn keys(byte: &str) -> Keys {
