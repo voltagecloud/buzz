@@ -152,25 +152,50 @@ The developer's Buzz identity must be a member of the `buzz.voltage.cloud` commu
 
 ### 1. Install the Buzz app (Voltage build)
 
-Remote workspace agents need the `buzz-gpui-voltage` package. The flake builds it on Linux and macOS. You need only Nix: the flake supplies every other prerequisite.
+Remote workspace agents need the Voltage build of the Buzz app.
+Download it from the [latest release](https://github.com/voltagecloud/buzz/releases/latest). Every package in a release is a Voltage build.
 
-To run it once:
+| System | Download | Install |
+|--------|----------|---------|
+| macOS, Apple silicon | `Buzz-<version>-macos-arm64.dmg` | Open the image and drag Buzz to Applications. |
+| macOS, Intel | `Buzz-<version>-macos-x86_64.dmg` | Open the image and drag Buzz to Applications. |
+| Ubuntu 24.04 or Debian 13 and later, x86_64 | `buzz-gpui_<version>_amd64.deb` | `sudo apt install ./buzz-gpui_<version>_amd64.deb` |
+| Ubuntu 24.04 or Debian 13 and later, ARM64 | `buzz-gpui_<version>_arm64.deb` | `sudo apt install ./buzz-gpui_<version>_arm64.deb` |
+| Other Linux (glibc 2.39 or later) | `Buzz-<version>-linux-x86_64.AppImage` (ARM: `-aarch64`) | `chmod +x` the file, then run it. |
+| NixOS, or Nix on any Linux | The flake's `buzz-gpui-voltage-bin` | See [Nix and NixOS](#nix-and-nixos). |
+
+The macOS build is not yet signed with a Developer ID. The first time, right-click Buzz in Applications and choose **Open**. If macOS still refuses, run `xattr -dr com.apple.quarantine /Applications/Buzz.app`.
+
+The app checks this repository's releases and offers each new version: the `.deb` installs it in place, and the other packages download it.
+
+#### Nix and NixOS
+
+On Linux (x86_64 or aarch64), the flake's `buzz-gpui-voltage-bin` package is the latest release, prebuilt: it runs the release AppImage in nixpkgs' `appimageTools` environment, so nothing compiles and NixOS needs no `nix-ld`.
+After each release, the release workflow opens a pull request that pins the new AppImages. Once that is merged, `main` installs the new release.
+
+```sh
+nix run 'github:voltagecloud/buzz?dir=apps/buzz-gpui#buzz-gpui-voltage-bin'
+```
+
+The `buzz-gpui-voltage` package builds the same app from source, on Linux and macOS. It needs only Nix, but it compiles the app and its dependencies.
 
 ```sh
 nix run 'github:voltagecloud/buzz/<commit on main>?dir=apps/buzz-gpui#buzz-gpui-voltage'
 ```
 
-To install it on NixOS or nix-darwin, add the flake input and install the package:
+To install it on NixOS, add the flake input and install the package. On nix-darwin, install `buzz-gpui-voltage` instead.
 
 ```nix
 # flake.nix inputs
-buzz-gpui.url = "github:voltagecloud/buzz/<commit on main>?dir=apps/buzz-gpui";
+buzz-gpui.url = "github:voltagecloud/buzz?dir=apps/buzz-gpui";
 
 # configuration.nix or darwin-configuration.nix
-environment.systemPackages = [ buzz-gpui.packages.${system}.buzz-gpui-voltage ];
+environment.systemPackages = [ buzz-gpui.packages.${system}.buzz-gpui-voltage-bin ];
 ```
 
-On macOS, the Nix build runs from the terminal, not from an app bundle, so the app does not show system notifications.
+A Nix install updates when you update the flake input (`nix flake update buzz-gpui`), not through the app's update notice.
+
+On macOS, the Nix build runs from the terminal, not from an app bundle, so the app does not show system notifications. Install the `.dmg` to get them.
 
 Sign in with your Buzz identity and join the `buzz.voltage.cloud` community.
 Install the GitHub CLI (`gh`) and sign in with `gh auth login`, so the app can add your signing key to GitHub.

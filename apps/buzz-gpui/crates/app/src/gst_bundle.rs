@@ -133,6 +133,9 @@ const ELEMENTS: &[&str] = &[
     "mpg123audiodec",
     "vp8dec",
     "vp9dec",
+    // Ubuntu 24.04, which the Linux packages build on, packages no GStreamer
+    // AV1 decoder; AV1 plays on Linux only where the system adds one.
+    #[cfg(not(target_os = "linux"))]
     "dav1ddec",
     "opusdec",
     "vorbisdec",

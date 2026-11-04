@@ -107,12 +107,9 @@ pub fn register_scheme() {
 /// Packaged installs register through their desktop file.
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn register_desktop_file() {
-    let Ok(exe) = std::env::current_exe() else {
+    let Some(exe) = handler_target(crate::appimage::path(), std::env::current_exe().ok()) else {
         return;
     };
-    if exe.starts_with("/usr") || exe.starts_with("/opt") || exe.starts_with("/nix/store") {
-        return;
-    }
     let Some(applications) = dirs::data_dir().map(|dir| dir.join("applications")) else {
         return;
     };
@@ -142,6 +139,25 @@ fn register_desktop_file() {
     if let Err(error) = spawned {
         tracing::warn!(%error, "could not register buzz://");
     }
+}
+
+/// What `buzz://` links should start: the AppImage file when this copy runs
+/// from one, as its binary is in a mount that goes away when it exits;
+/// otherwise this binary, unless a package installed it with a desktop file
+/// of its own.
+#[cfg(any(target_os = "linux", target_os = "freebsd", test))]
+fn handler_target(
+    appimage: Option<std::path::PathBuf>,
+    exe: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    if appimage.is_some() {
+        return appimage;
+    }
+    let exe = exe?;
+    let packaged = ["/usr", "/opt", "/nix/store"]
+        .iter()
+        .any(|dir| exe.starts_with(dir));
+    (!packaged).then_some(exe)
 }
 
 /// The user desktop file that hands `buzz://` links to this binary.
@@ -250,6 +266,32 @@ mod tests {
         assert!(entry.contains("Exec=\"/home/me/My Apps/buzz-gpui\" %u\n"));
         assert!(entry.contains("MimeType=x-scheme-handler/buzz\n"));
         assert!(handler_entry("/a/100%$x").contains("Exec=\"/a/100%%\\$x\" %u"));
+    }
+
+    #[test]
+    fn links_start_the_appimage_rather_than_its_mount() {
+        use std::path::PathBuf;
+        let path = |p: &str| Some(PathBuf::from(p));
+        let mount = path("/tmp/.mount_BuzzAb12/usr/bin/buzz-gpui");
+        assert_eq!(
+            handler_target(path("/home/me/Buzz.AppImage"), mount.clone()),
+            path("/home/me/Buzz.AppImage")
+        );
+        // A package's desktop file handles links, but not for an AppImage.
+        assert_eq!(
+            handler_target(path("/opt/Buzz.AppImage"), mount),
+            path("/opt/Buzz.AppImage")
+        );
+        assert_eq!(handler_target(None, path("/usr/bin/buzz-gpui")), None);
+        assert_eq!(
+            handler_target(None, path("/nix/store/x/bin/buzz-gpui")),
+            None
+        );
+        assert_eq!(
+            handler_target(None, path("/home/me/bin/buzz-gpui")),
+            path("/home/me/bin/buzz-gpui")
+        );
+        assert_eq!(handler_target(None, None), None);
     }
 
     #[test]

@@ -75,6 +75,8 @@ pub enum Platform {
     MacOs { arch: &'static str },
     /// `Buzz-<version>-windows-<arch>.zip`.
     Windows { arch: &'static str },
+    /// `Buzz-<version>-linux-<x86_64|aarch64>.AppImage`.
+    AppImage { arch: &'static str },
     /// No package is published for it.
     Other,
 }
@@ -82,7 +84,21 @@ pub enum Platform {
 impl Platform {
     /// The running platform.
     pub fn current() -> Self {
-        Self::of(std::env::consts::OS, std::env::consts::ARCH)
+        Self::detect(
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            crate::appimage::path().is_some(),
+        )
+    }
+
+    /// The platform of a copy on `os` and `arch`, as `std::env::consts`
+    /// names them. A copy running from an AppImage updates to the next one.
+    pub fn detect(os: &str, arch: &str, from_appimage: bool) -> Self {
+        match (os, arch, from_appimage) {
+            ("linux", "x86_64", true) => Self::AppImage { arch: "x86_64" },
+            ("linux", "aarch64", true) => Self::AppImage { arch: "aarch64" },
+            _ => Self::of(os, arch),
+        }
     }
 
     pub fn of(os: &str, arch: &str) -> Self {
@@ -107,6 +123,9 @@ impl Platform {
             }
             Self::Windows { arch } => {
                 name.starts_with("Buzz-") && name.ends_with(&format!("-windows-{arch}.zip"))
+            }
+            Self::AppImage { arch } => {
+                name.starts_with("Buzz-") && name.ends_with(&format!("-linux-{arch}.AppImage"))
             }
             Self::Other => false,
         }
@@ -191,7 +210,7 @@ mod tests {
         assert_eq!(release.version(), Some(v("0.1.1")));
         assert!(!release.draft && !release.prerelease);
         assert!(release.body.as_deref().unwrap().contains("What's Changed"));
-        assert_eq!(release.assets.len(), 6);
+        assert_eq!(release.assets.len(), 7);
         assert_eq!(
             release.asset(CHECKSUMS).unwrap().browser_download_url,
             "https://github.com/benthecarman/buzz-gpui/releases/download/v0.1.1/SHA256SUMS"
@@ -270,6 +289,33 @@ mod tests {
             Some("Buzz-0.1.1-windows-x86_64.zip")
         );
         assert_eq!(name("freebsd", "x86_64"), None);
+    }
+
+    #[test]
+    fn an_appimage_picks_the_appimage() {
+        let release = release();
+        let name = |os, arch, from_appimage| {
+            release
+                .asset_for(Platform::detect(os, arch, from_appimage))
+                .map(|asset| asset.name.as_str())
+        };
+        assert_eq!(
+            name("linux", "x86_64", true),
+            Some("Buzz-0.1.1-linux-x86_64.AppImage")
+        );
+        assert_eq!(
+            name("linux", "x86_64", false),
+            Some("buzz-gpui_0.1.1-1_amd64.deb")
+        );
+        assert_eq!(
+            Platform::detect("linux", "aarch64", true),
+            Platform::AppImage { arch: "aarch64" }
+        );
+        assert_eq!(Platform::detect("linux", "riscv64", true), Platform::Other);
+        assert_eq!(
+            name("macos", "aarch64", true),
+            Some("Buzz-0.1.1-macos-arm64.dmg")
+        );
     }
 
     #[test]

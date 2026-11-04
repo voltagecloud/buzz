@@ -5,6 +5,7 @@ mod agent_activity;
 mod agent_plugins;
 mod agents2;
 mod appearance;
+mod appimage;
 mod atomic_file;
 mod buzz_mcp;
 mod channel_templates;
