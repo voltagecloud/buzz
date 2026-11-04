@@ -74,6 +74,26 @@ fn label(work: &RequestWork) -> String {
     local_work_label(state, work.reason.as_deref(), work.step.as_ref())
 }
 
+/// One agent's status as text, for "Copy thread": what its bubble and
+/// popover show, "Could not finish" with the reason when one is known.
+pub fn status(work: &RequestWork) -> String {
+    if !work.lifecycle {
+        return if work.working {
+            "Working"
+        } else {
+            "Status unknown"
+        }
+        .into();
+    }
+    if work.state == WorkState::Error {
+        return match work.reason.as_deref().filter(|r| !r.is_empty()) {
+            Some(reason) => format!("Could not finish: {reason}"),
+            None => "Could not finish".into(),
+        };
+    }
+    label(work)
+}
+
 /// Names for the bubble's agents: the directory's, with the key's suffix
 /// when two read alike.
 fn names(works: &[RequestWork], names: &Names) -> Vec<SharedString> {

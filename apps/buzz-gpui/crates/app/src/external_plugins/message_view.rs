@@ -116,6 +116,7 @@ impl MessageView {
                     .and_then(|view| view.read(cx).row.clone())
                     .filter(|row| row.id == id)
             }),
+            copy_thread: None,
             thread: None,
             composer: WeakEntity::new_invalid(),
         };

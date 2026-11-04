@@ -175,6 +175,8 @@ pub enum Command {
     ReviewReport,
     CopyLink,
     CopyMessage,
+    /// The whole loaded thread as Markdown, from its root.
+    CopyThread,
     MarkRead,
     MarkUnread,
     SendToChannel,
@@ -276,6 +278,8 @@ pub struct Actions {
     /// A reader's conversation offers no Reply (`ChannelPreview` has no
     /// `onReply`).
     pub no_reply: bool,
+    /// The page can copy its whole thread: the root offers "Copy thread".
+    pub copy_thread: bool,
 }
 
 /// A page's loaded row by id.
@@ -1627,8 +1631,9 @@ struct Entry {
 }
 
 /// `MessageActionBar`'s menu, in its order: read state, Copy message,
-/// Send to channel, Edit, Delete, Follow, registered actions, View
-/// activity, then Report under a separator.
+/// Copy thread (a thread panel's root), Send to channel, Edit, Delete,
+/// Follow, registered actions, View activity, then Report under a
+/// separator.
 fn menu_entries(row: &MessageRow, rows: &Rows) -> Vec<Entry> {
     let mut entries = Vec::new();
     let managed = rows.managed(row) && rows.actions.on_command.is_some();
@@ -1662,6 +1667,17 @@ fn menu_entries(row: &MessageRow, rows: &Rows) -> Vec<Entry> {
         disabled: false,
         separated: false,
     });
+    if rows.actions.copy_thread && row.thread_root_id.is_none() {
+        entries.push(Entry {
+            name: "copy-thread".into(),
+            label: "Copy thread".into(),
+            icon: IconName::Copy,
+            icon_size: 16.,
+            command: Command::CopyThread,
+            disabled: false,
+            separated: false,
+        });
+    }
     let writable = rows.listed() && !rows.archived() && !rows.read_only();
     if writable
         && row.thread_root_id.is_some()
@@ -2625,6 +2641,24 @@ mod tests {
     use super::*;
     use buzz_relay_client::fold::{LocalDelivery, Reaction};
     use core::prelude::v1::test;
+
+    #[test]
+    fn only_a_copyable_threads_root_offers_copy_thread() {
+        let offers = |copy_thread: bool, reply: bool| {
+            let mut rows = Rows::new("", super::super::markdown::tests::directory());
+            rows.actions.copy_thread = copy_thread;
+            let mut row = super::super::markdown::tests::row("x");
+            if reply {
+                row.thread_root_id = Some(EventId::from_byte_array([7; 32]));
+            }
+            menu_entries(&row, &rows)
+                .iter()
+                .any(|entry| entry.command == Command::CopyThread)
+        };
+        assert!(offers(true, false));
+        assert!(!offers(true, true));
+        assert!(!offers(false, false));
+    }
 
     /// The quiet line's label for `content` from Morgarita, which names
     /// Rivet in a `p` tag.

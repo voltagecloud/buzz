@@ -2546,7 +2546,7 @@ pub(super) mod tests {
         )
     }
 
-    fn directory() -> Directory {
+    pub(in crate::ui) fn directory() -> Directory {
         Directory::new(Profiles::default(), Arc::from([]), media())
     }
 

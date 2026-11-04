@@ -27,6 +27,8 @@ pub type RowHook = Rc<dyn Fn(Arc<MessageRow>, &mut Window, &mut App)>;
 pub type FocusHook = Rc<dyn Fn(&mut Window, &mut App)>;
 pub type RootHook = Rc<dyn Fn(&App) -> Option<Arc<MessageRow>>>;
 pub type FindHook = Rc<dyn Fn(EventId, &App) -> Option<Arc<MessageRow>>>;
+/// The page's whole thread as Markdown, `None` before it has loaded.
+pub type CopyThreadHook = Rc<dyn Fn(&App) -> Option<String>>;
 
 /// What only the page knows how to do.
 pub struct Hooks {
@@ -41,6 +43,8 @@ pub struct Hooks {
     pub thread_root: Option<RootHook>,
     /// A loaded row by id, for the picker's target.
     pub find: FindHook,
+    /// "Copy thread" on a thread panel's root.
+    pub copy_thread: Option<CopyThreadHook>,
     /// Typing in this view: the channel, or a thread root.
     pub thread: Option<EventId>,
     /// The page's composer, where edits happen.
@@ -563,6 +567,7 @@ impl MessageActions {
             on_open_thread: self.open_thread.clone(),
             find_row: Some(self.hooks.find.clone()),
             no_reply: self.no_reply,
+            copy_thread: self.hooks.copy_thread.is_some(),
             on_retry: Some(Rc::new(move |row, _, cx| {
                 let _ = retry.update(cx, |this, cx| {
                     let (session, id) = (this.session(cx), row.id);
@@ -709,6 +714,12 @@ impl MessageActions {
                 let text = message_copy::text(&row, &directory.profiles, &directory.names);
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
                 notice::success("Message copied", cx);
+            }
+            Command::CopyThread => {
+                if let Some(text) = self.hooks.copy_thread.as_ref().and_then(|copy| copy(cx)) {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                    notice::success("Thread copied", cx);
+                }
             }
             Command::MarkRead | Command::MarkUnread => {
                 self.error = None;

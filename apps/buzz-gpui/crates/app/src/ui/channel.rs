@@ -936,6 +936,7 @@ impl ChannelPage {
                         .map(|item| item.row.clone())
                 })
             }),
+            copy_thread: None,
             thread: None,
             composer: composer.downgrade(),
         };
