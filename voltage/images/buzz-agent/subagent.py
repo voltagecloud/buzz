@@ -7,6 +7,7 @@
     buzz-subagent wait TASK [--timeout SECONDS]
     buzz-subagent result TASK
     buzz-subagent cancel TASK
+    buzz-subagent review --role quality|security|independent --base REF [--repo PATH] [--runtime codex|claude]
 
 Each worker runs in its own Pod, so a worker that is busy or fails does not
 stop the others. `spawn` creates a SandboxClaim against the developer's
@@ -129,8 +130,12 @@ def result(task):
 
 
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ['review']:
+        os.execv('/usr/local/bin/buzz-agent-review', ['buzz-agent-review', *argv[1:]])
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     actions = parser.add_subparsers(dest='action', required=True)
+    actions.add_parser('review', help='Review a committed local change without publishing it')
     spawn_parser = actions.add_parser('spawn', help='Start a worker for one focused task')
     spawn_parser.add_argument('--focus', required=True, help='What the worker should do, and how to verify it')
     spawn_parser.add_argument('--repo', required=True, help='https://github.com/<owner>/<repo>')

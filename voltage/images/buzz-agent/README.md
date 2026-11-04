@@ -44,6 +44,7 @@ python3 -O test-profile.py buzz-agent:local
 python3 test-cluster.py buzz-agent:local
 ```
 
+`test-image.sh` also runs `test-review.py`; run the Python script directly for focused review checks.
 These checks use synthetic tasks and accounts. Live GitHub, signing, `via`, cache, and staging behavior require end-to-end validation.
 Run the bundled Rust suites with `docker build --platform linux/amd64 --target package-checks -f voltage/images/buzz-agent/Dockerfile .`.
 Build and test `linux/arm64` on an arm64 host, or through `.github/workflows/voltage-agent-images.yml`, which builds each platform on a native runner.
@@ -84,7 +85,16 @@ The restore moves repositories into `/home/agent` without overwriting existing p
 A container restart with that marker skips the restore and keeps newer edits.
 After a successful save, the harness writes `{"version":1,"checkpoint":"<key>"}` to `/dev/termination-log` for the reaper.
 
-Sub-agents run as short-lived worker Sandboxes, each in its own Pod, so one busy or failing worker does not stop the others.
+`buzz-subagent review` runs an independent static review of committed local work without publishing it.
+Quality, security, and independent roles use fresh Codex or Claude sessions in separate checkouts.
+Codex uses bounded MCP file reads, disables shell tools, and retains read-only sandbox enforcement.
+Claude exposes only `Read`, `Grep`, and `Glob`, with external MCP servers disabled.
+The supervisor bounds runtime and captured output, and reaps detached descendants on every exit path.
+Reviews reject changed source revisions, dirty worktrees, malformed results, and contradictory verdicts.
+A per-session lock permits one review at a time; reviews need no Kubernetes token or additional Pod.
+See [the agent guide](subagents.md) for commands and exit statuses.
+
+Implementation sub-agents run as short-lived worker Sandboxes, each in its own Pod, so one busy or failing worker does not stop the others.
 An orchestrating session with the Buzz `subagent_token` Pod option gets `buzz-subagent` credentials at `/var/run/secrets/buzz-subagents`; `buzz-agent-profile run` then appends `/etc/buzz-agent/subagents.md` to the Claude Code and Codex global instructions.
 `buzz-subagent spawn` creates a SandboxClaim against the developer's `agent-worker` pool with `BUZZ_WORKER_*` variables; `list`, `status`, `wait`, `result`, and `cancel` follow it.
 A worker runs `buzz-agent-profile work`: the same profile bootstrap, then `buzz-agent-worker`, which clones the repository, works on `worker/<task>` from the base branch with Claude Code or Codex non-interactively, commits any remaining edits, pushes the branch, writes `<developer>/workers/<task>/result.json`, and exits with the runtime's status.
