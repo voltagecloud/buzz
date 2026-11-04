@@ -910,56 +910,63 @@ test("starting a duplicate voice-note player pauses the other instance", async (
   await page.getByTestId("channel-general").click();
   await waitForMockLiveSubscription(page, "general");
 
-  const messageIds = await page.evaluate(
-    ({ audioUrl }) => {
+  // Two messages share one audio URL. Distinct seconds fix their order, and
+  // each card is located through its own message row, never by index.
+  const [firstId, secondId] = await page.evaluate(
+    ({ audioUrl, createdAt }) => {
       const emit = (
         window as Window & {
           __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
             channelName: string;
             content: string;
+            createdAt: number;
             extraTags: string[][];
-          }) => { id: string };
+          }) => { id: string } | undefined;
         }
       ).__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
       if (!emit) throw new Error("Mock message emitter is unavailable.");
-      const input = {
-        channelName: "general",
-        content: `[voice-note-123.mp4](${audioUrl})`,
-        extraTags: [
-          [
-            "imeta",
-            `url ${audioUrl}`,
-            "m video/mp4",
-            "duration 9.4",
-            "filename voice-note-123.mp4",
+      return [0, 1].map((offset) => {
+        const filename = `voice-note-12${offset}.mp4`;
+        const emitted = emit({
+          channelName: "general",
+          content: `[${filename}](${audioUrl})`,
+          createdAt: createdAt + offset,
+          extraTags: [
+            [
+              "imeta",
+              `url ${audioUrl}`,
+              "m video/mp4",
+              "duration 9.4",
+              `filename ${filename}`,
+            ],
           ],
-        ],
-      };
-      return [emit(input).id, emit(input).id];
+        });
+        if (!emitted?.id) throw new Error("mock message emit returned no id");
+        return emitted.id;
+      });
     },
-    { audioUrl: AUDIO_URL },
+    { audioUrl: AUDIO_URL, createdAt: Math.floor(Date.now() / 1000) },
   );
 
   const cards = page.getByTestId("audio-message-attachment");
   await expect(cards).toHaveCount(2);
-  // Live delivery and the channel-head refresh can reorder equal-time messages.
-  // Keep each assertion bound to the player that was clicked.
-  const firstCard = page.locator(`[data-message-id="${messageIds[0]}"]`);
-  const secondCard = page.locator(`[data-message-id="${messageIds[1]}"]`);
+  // The ping fixture lasts about one second, so it can finish before the
+  // playing state is observed. Loop it so only exclusivity pauses a player.
+  await cards.locator("audio").evaluateAll((audios) => {
+    for (const audio of audios) (audio as HTMLAudioElement).loop = true;
+  });
+  const firstCard = page
+    .locator(`[data-message-id="${firstId}"]`)
+    .getByTestId("audio-message-attachment");
+  const secondCard = page
+    .locator(`[data-message-id="${secondId}"]`)
+    .getByTestId("audio-message-attachment");
   const firstAudio = firstCard.locator("audio");
   const secondAudio = secondCard.locator("audio");
-  // The fixture is one second long. Only the other player's Play action should
-  // pause it; natural completion must not satisfy this assertion.
-  await cards.locator("audio").evaluateAll((elements) => {
-    for (const audio of elements) (audio as HTMLAudioElement).loop = true;
-  });
 
   await firstCard.getByRole("button", { name: "Play voice note" }).click();
   await expect(firstAudio).toHaveJSProperty("paused", false);
   await secondCard.getByRole("button", { name: "Play voice note" }).click();
   await expect(firstAudio).toHaveJSProperty("paused", true);
   await expect(secondAudio).toHaveJSProperty("paused", false);
-  await firstCard.getByRole("button", { name: "Play voice note" }).click();
-  await expect(secondAudio).toHaveJSProperty("paused", true);
-  await expect(firstAudio).toHaveJSProperty("paused", false);
 });

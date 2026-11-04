@@ -195,7 +195,7 @@ impl RailMarks {
 /// whether any unread needs attention (a mention, direct message, followed
 /// thread or broadcast), which shows even from a muted channel. Only rows
 /// the sidebar lists count.
-fn unread_marks(snapshot: &SessionSnapshot) -> (bool, bool) {
+pub(crate) fn unread_marks(snapshot: &SessionSnapshot) -> (bool, bool) {
     let muted: &[String] = snapshot
         .sidebar
         .data

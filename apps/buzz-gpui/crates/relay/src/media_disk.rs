@@ -46,6 +46,20 @@ pub(crate) fn disk() -> Option<&'static Disk> {
     DISK.get()
 }
 
+/// A body the app kept under a key of its own, such as a link preview's,
+/// and how long ago; the folder's budget and trimming cover it too.
+/// Blocking. `None` without a disk cache.
+pub fn read_kept(key: &str) -> Option<(Vec<u8>, Duration)> {
+    disk()?.read(key).map(|cached| (cached.bytes, cached.age))
+}
+
+/// Keeps `bytes` under `key` for [`read_kept`]. Blocking.
+pub fn keep(key: &str, bytes: &[u8]) {
+    if let Some(disk) = disk() {
+        disk.write(key, bytes);
+    }
+}
+
 pub(crate) struct Disk {
     dir: PathBuf,
     writes: AtomicU64,

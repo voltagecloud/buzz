@@ -109,8 +109,6 @@ export type RichTextEditorOptions = {
   onEditLastOwnMessage?: () => boolean;
   /** When true, plain Enter is passed through (e.g. to select an autocomplete item). */
   isAutocompleteOpen?: React.RefObject<boolean>;
-  /** Prevent paragraph splitting from dismissing a pending channel selection. */
-  isChannelAutocompleteOpen?: React.RefObject<boolean>;
   /**
    * Called when the user clicks an existing link in the editor. The link
    * extension runs with `openOnClick: false` (a chat composer must not
@@ -157,7 +155,6 @@ export function useRichTextEditor({
   onSubmit,
   onEditLastOwnMessage,
   isAutocompleteOpen,
-  isChannelAutocompleteOpen,
   onEditLink,
   onLinkSelectionChange,
   onLinkShortcut,
@@ -318,9 +315,6 @@ export function useRichTextEditor({
           addKeyboardShortcuts() {
             return {
               Enter: ({ editor: ed }) => {
-                // Channel queries close immediately when invalidated. Let the
-                // React wrapper select before splitBlock changes that query.
-                if (isChannelAutocompleteOpen?.current) return true;
                 if (isAutocompleteOpen?.current) return false;
                 if (!onSubmitRef.current) return false;
 

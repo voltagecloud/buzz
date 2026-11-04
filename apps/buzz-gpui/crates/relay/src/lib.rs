@@ -66,7 +66,7 @@ pub use live::{
     Replay, RouteKey, RouteStatus,
 };
 pub use media::{Media, MediaError};
-pub use media_disk::set_disk_cache;
+pub use media_disk::{keep, read_kept, set_disk_cache};
 pub use messages::{Attachment, CustomEmoji, Draft, EventTemplate, Mentions, MessageError};
 pub use nostr::prelude::{EventId, PublicKey};
 pub use origin::RelayOrigin;

@@ -48,7 +48,10 @@ impl MemoryReads {
     /// tokio.
     pub fn read(&self, relay: &Arc<dyn OwnerRelay>, agent: &str) -> Read {
         let key = (community(relay), agent.to_string());
-        if let Some((_, read)) = self.reads().get(&key) {
+        // Held from the lookup to the insert, so two callers at once share
+        // one read rather than both starting their own.
+        let mut reads = self.reads();
+        if let Some((_, read)) = reads.get(&key) {
             return read.clone();
         }
         let id = self.next.fetch_add(1, Ordering::Relaxed);
@@ -60,7 +63,8 @@ impl MemoryReads {
         }
         .boxed()
         .shared();
-        self.reads().insert(key.clone(), (id, read.clone()));
+        reads.insert(key.clone(), (id, read.clone()));
+        drop(reads);
         let (this, done) = (self.clone(), read.clone());
         tokio::spawn(async move {
             let _ = done.await;

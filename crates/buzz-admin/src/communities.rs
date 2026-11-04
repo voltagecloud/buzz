@@ -1,15 +1,13 @@
 //! Reversible whole-community lifecycle commands.
 
 use anyhow::{Context, Result};
-use buzz_core::tenant::{normalize_host, relay_url_authority, TenantContext};
+use buzz_core::tenant::{normalize_host, relay_url_authority, TenantContext, MAX_HOST_LEN};
 use buzz_db::{ArchivedCommunityRecord, UnarchivedCommunityRecord};
 use buzz_pubsub::conn_control::ConnControl;
 use buzz_pubsub::PubSubManager;
 use clap::Subcommand;
 use serde_json::{json, Value};
 use url::{Host, Url};
-
-const MAX_HOST_LEN: usize = 255;
 
 /// Reversible community lifecycle actions.
 #[derive(Debug, Subcommand)]
@@ -264,7 +262,7 @@ fn ensure_not_deployment_host(host: &str, deployment_host: &str) -> Result<()> {
     Ok(())
 }
 
-fn normalize_host_authority(host: &str) -> Result<String, String> {
+pub(crate) fn normalize_host_authority(host: &str) -> Result<String, String> {
     if host.is_empty() {
         return Err("host is empty".to_string());
     }

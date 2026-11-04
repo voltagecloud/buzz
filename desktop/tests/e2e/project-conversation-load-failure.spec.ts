@@ -1,7 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
-import { waitForMockChannelHeadReady } from "../helpers/channelHeadReady";
 
 /**
  * End-to-end guard for the false-empty thread-load bug on the SECOND producer
@@ -70,36 +69,6 @@ async function setThreadRepliesFailing(page: Page, failing: boolean) {
   }, failing);
 }
 
-async function seedProjectMessage(
-  page: Page,
-  content: string,
-  parentEventId?: string,
-) {
-  return page.evaluate(
-    ({ author, content, parentEventId }) => {
-      const emit = (
-        window as typeof window & {
-          __BUZZ_E2E_EMIT_MOCK_MESSAGE__: (input: {
-            channelName: string;
-            content: string;
-            parentEventId?: string;
-            pubkey: string;
-            emitLive: boolean;
-          }) => { id: string };
-        }
-      ).__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
-      return emit({
-        channelName: "general",
-        content,
-        parentEventId,
-        pubkey: author,
-        emitLive: false,
-      }).id;
-    },
-    { author: TEST_IDENTITIES.alice.pubkey, content, parentEventId },
-  );
-}
-
 test.describe("project conversation load failure", () => {
   test("terminal fetch failure shows error card, never false-empty; Retry recovers", async ({
     page,
@@ -108,19 +77,68 @@ test.describe("project conversation load failure", () => {
     await installMockBridge(page);
     await page.goto("/", { waitUntil: "domcontentloaded" });
 
-    // Arrange an active subscription before seeding. Persist the fixture without
-    // live delivery so a startup race cannot populate the thread-replies cache
-    // and hide the error card. Retry must obtain the reply through its real query.
-    await page.getByTestId("channel-general").click();
-    await waitForMockChannelHeadReady(
-      page,
-      "general",
-      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
+    // Seed the conversation into the mock store (searchable, and returnable by
+    // a successful get_thread_replies) without it ever being live-pushed into
+    // the thread-replies cache: a live reply would make the panel render the
+    // list branch and mask the error card. Seeding before any subscription
+    // exists is not enough on its own — the panel's live REQ uses
+    // `since = floor(now)` and the mock replays stored events with
+    // `created_at >= since`, so a reply dated in the current or next second
+    // still arrives live. Date both events a minute in the past so neither can
+    // fall inside that window. The root carries the repository discovery
+    // token so it surfaces as the channel's latest discussion hit (what the
+    // Channels-tab row opens); its reply omits the token so it never competes
+    // to be the opened hit.
+    //
+    // Wait for the emitter first: emitting before the app boots is a silent
+    // no-op (the helper is undefined), which would leave the store empty.
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            typeof (
+              window as typeof window & {
+                __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: unknown;
+              }
+            ).__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
+        ),
+      )
+      .toBe(true);
+    const rootId = await page.evaluate(
+      ({ author, rootContent, replyContent }) => {
+        const now = Math.floor(Date.now() / 1000);
+        const emit = (
+          window as typeof window & {
+            __BUZZ_E2E_EMIT_MOCK_MESSAGE__: (input: {
+              channelName: string;
+              content: string;
+              parentEventId?: string;
+              pubkey?: string;
+              createdAt?: number;
+            }) => { id: string };
+          }
+        ).__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+        const root = emit({
+          channelName: "general",
+          content: rootContent,
+          pubkey: author,
+          createdAt: now - 60,
+        });
+        emit({
+          channelName: "general",
+          content: replyContent,
+          parentEventId: root.id,
+          pubkey: author,
+          createdAt: now - 59,
+        });
+        return root.id;
+      },
+      {
+        author: TEST_IDENTITIES.alice.pubkey,
+        rootContent: ROOT_CONTENT,
+        replyContent: REPLY_CONTENT,
+      },
     );
-    // Install the failure before any project navigation can prefetch replies.
-    await installThreadFailureSwitch(page);
-    await setThreadRepliesFailing(page, true);
-    const rootId = await seedProjectMessage(page, ROOT_CONTENT);
     expect(rootId).toBeTruthy();
 
     // Navigate to the project's Channels tab and open the general conversation.
@@ -141,7 +159,11 @@ test.describe("project conversation load failure", () => {
       .first();
     await expect(channelRow).toBeVisible({ timeout: 10_000 });
 
-    // The panel's query and its automatic retry must reach a terminal error.
+    // Fail every thread-replies fetch, THEN open the conversation: the panel's
+    // query and its retry both fail, driving the terminal error state with an
+    // empty reply cache and nothing to fall back to.
+    await installThreadFailureSwitch(page);
+    await setThreadRepliesFailing(page, true);
     await channelRow.click();
 
     const panel = page.getByTestId("project-conversation-panel");
@@ -159,10 +181,8 @@ test.describe("project conversation load failure", () => {
       0,
     );
 
-    // Add the reply only after the cold-query error is visible, so background
-    // channel history cannot seed it into the reply cache before the failure.
-    // Silent persistence makes Retry obtain it through the real query path.
-    await seedProjectMessage(page, REPLY_CONTENT, rootId);
+    // Retry with fetches succeeding: the reply loads and renders — the error
+    // card is gone and no false-empty appears.
     await setThreadRepliesFailing(page, false);
     await page.getByTestId("message-thread-replies-retry").click();
     await expect(page.getByTestId("message-thread-replies-error")).toHaveCount(

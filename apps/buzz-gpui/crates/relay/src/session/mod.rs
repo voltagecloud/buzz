@@ -2031,12 +2031,15 @@ impl Actor {
                 })
             });
             // Names and emoji seen only in a lost channel must not stay.
-            self.profiles.clear();
+            // People still shown elsewhere keep theirs, so their avatars
+            // do not drop to initials while the same profiles load again.
+            let mut people = self.channel_people();
+            people.extend(self.timelines.values().flat_map(Timeline::people));
+            people.push(self.identity.pubkey_hex());
+            self.profiles.retain(&people.iter().cloned().collect());
             self.emoji_clear();
             self.statuses_clear();
             self.members_clear();
-            self.ensure_profiles(self.channel_people());
-            let people: Vec<String> = self.timelines.values().flat_map(Timeline::people).collect();
             self.ensure_profiles(people);
         }
         for channel in self.open_channels() {

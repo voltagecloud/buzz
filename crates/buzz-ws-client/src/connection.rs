@@ -1,11 +1,15 @@
 use std::collections::VecDeque;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use nostr::{Event, Keys, Tag};
 use serde_json::{json, Value};
 use tokio::time::timeout;
-use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::HeaderMap;
+use tokio_tungstenite::{
+    client_async, connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream,
+};
 use tracing::debug;
 
 use crate::error::WsClientError;
@@ -25,7 +29,9 @@ pub const PUBLISH_OK_TIMEOUT_SECS: u64 = 30;
 /// A NIP-42-capable WebSocket connection to a Nostr relay.
 pub struct NostrWsConnection {
     ws: WsStream,
-    buffer: VecDeque<RelayMessage>,
+    /// Messages read while waiting for something else, each with when it
+    /// was read.
+    buffer: VecDeque<(Instant, RelayMessage)>,
     pending_challenge: Option<String>,
     relay_url: String,
 }
@@ -39,29 +45,84 @@ impl NostrWsConnection {
         keys: &Keys,
         auth_tag: Option<&Tag>,
     ) -> Result<Self, WsClientError> {
-        let mut conn = Self::connect(url).await?;
+        Self::connect_authenticated_with_headers(url, keys, auth_tag, HeaderMap::new()).await
+    }
+
+    /// [`Self::connect_authenticated`], sending `headers` on the WebSocket upgrade request.
+    ///
+    /// Use this for credentials the relay checks at upgrade time, such as a NIP-FI
+    /// `Nostr-Federated-Identity` assertion that must pair with the NIP-42 AUTH key.
+    pub async fn connect_authenticated_with_headers(
+        url: &str,
+        keys: &Keys,
+        auth_tag: Option<&Tag>,
+        headers: HeaderMap,
+    ) -> Result<Self, WsClientError> {
+        let mut conn = Self::connect_with_headers(url, headers).await?;
         conn.authenticate(keys, auth_tag).await?;
         Ok(conn)
     }
 
     /// Connects to the relay at `url` without performing authentication.
     pub async fn connect(url: &str) -> Result<Self, WsClientError> {
+        Self::connect_with_headers(url, HeaderMap::new()).await
+    }
+
+    /// [`Self::connect`], sending `headers` on the WebSocket upgrade request.
+    ///
+    /// The headers are added after the handshake headers, so supplying a handshake
+    /// header such as `Sec-WebSocket-Key` replaces it and breaks the upgrade.
+    pub async fn connect_with_headers(
+        url: &str,
+        headers: HeaderMap,
+    ) -> Result<Self, WsClientError> {
         let parsed = url
             .parse::<url::Url>()
             .map_err(|e| WsClientError::Url(e.to_string()))?;
 
-        let (ws, _response) = connect_async(parsed.as_str())
+        let mut request = parsed.as_str().into_client_request()?;
+        request.headers_mut().extend(headers);
+
+        let (ws, _response) = connect_async(request)
             .await
             .map_err(WsClientError::WebSocket)?;
 
         debug!("connected to relay at {url}");
 
-        Ok(Self {
+        Ok(Self::from_stream(ws, url))
+    }
+
+    /// [`Self::connect`], but opens a plaintext TCP connection to `addr`
+    /// (`host:port`) instead of resolving the URL's host.
+    ///
+    /// The URL still supplies the `Host` header and NIP-42 relay tag, even when
+    /// it is `wss://`, so a client inside the relay's cluster can reach a
+    /// community through the relay's plaintext service address and still
+    /// authenticate for the community's public URL.
+    pub async fn connect_to_addr(url: &str, addr: &str) -> Result<Self, WsClientError> {
+        let parsed = url
+            .parse::<url::Url>()
+            .map_err(|e| WsClientError::Url(e.to_string()))?;
+        let request = parsed.as_str().into_client_request()?;
+        let tcp = tokio::net::TcpStream::connect(addr)
+            .await
+            .map_err(|e| WsClientError::WebSocket(e.into()))?;
+        let (ws, _response) = client_async(request, MaybeTlsStream::Plain(tcp))
+            .await
+            .map_err(WsClientError::WebSocket)?;
+
+        debug!("connected to relay at {url} via {addr}");
+
+        Ok(Self::from_stream(ws, url))
+    }
+
+    fn from_stream(ws: WsStream, url: &str) -> Self {
+        Self {
             ws,
             buffer: VecDeque::new(),
             pending_challenge: None,
             relay_url: url.to_string(),
-        })
+        }
     }
 
     /// Performs NIP-42 authentication using `keys` against the connected relay.
@@ -105,10 +166,23 @@ impl NostrWsConnection {
         &mut self,
         timeout_dur: Duration,
     ) -> Result<RelayMessage, WsClientError> {
-        if let Some(msg) = self.buffer.pop_front() {
-            return Ok(msg);
+        Ok(self.next_event_received(timeout_dur).await?.1)
+    }
+
+    /// [`Self::next_event`], with when the message was read off the socket.
+    ///
+    /// A message that arrived while another call, such as
+    /// [`Self::send_event`], waited for something else is returned later,
+    /// with the instant it arrived rather than the instant it is returned.
+    pub async fn next_event_received(
+        &mut self,
+        timeout_dur: Duration,
+    ) -> Result<(Instant, RelayMessage), WsClientError> {
+        if let Some(entry) = self.buffer.pop_front() {
+            return Ok(entry);
         }
-        self.recv_one(timeout_dur).await
+        let msg = self.recv_one(timeout_dur).await?;
+        Ok((Instant::now(), msg))
     }
 
     /// Closes the WebSocket connection gracefully.
@@ -126,10 +200,6 @@ impl NostrWsConnection {
     }
 
     async fn recv_one(&mut self, timeout_dur: Duration) -> Result<RelayMessage, WsClientError> {
-        if let Some(msg) = self.buffer.pop_front() {
-            return Ok(msg);
-        }
-
         loop {
             let raw = timeout(timeout_dur, self.ws.next())
                 .await
@@ -165,9 +235,9 @@ impl NostrWsConnection {
         if let Some(idx) = self
             .buffer
             .iter()
-            .position(|m| matches!(m, RelayMessage::Auth { .. }))
+            .position(|(_, m)| matches!(m, RelayMessage::Auth { .. }))
         {
-            match self.buffer.remove(idx).unwrap() {
+            match self.buffer.remove(idx).unwrap().1 {
                 RelayMessage::Auth { challenge } => return Ok(challenge),
                 _ => unreachable!(),
             }
@@ -202,7 +272,7 @@ impl NostrWsConnection {
                             }
                             return Ok(challenge);
                         }
-                        other => self.buffer.push_back(other),
+                        other => self.buffer.push_back((Instant::now(), other)),
                     }
                 }
                 Message::Ping(data) => {
@@ -224,9 +294,9 @@ impl NostrWsConnection {
         if let Some(idx) = self
             .buffer
             .iter()
-            .position(|m| matches!(m, RelayMessage::Ok(ok) if ok.event_id == event_id))
+            .position(|(_, m)| matches!(m, RelayMessage::Ok(ok) if ok.event_id == event_id))
         {
-            match self.buffer.remove(idx).unwrap() {
+            match self.buffer.remove(idx).unwrap().1 {
                 RelayMessage::Ok(ok) => return Ok(ok),
                 _ => unreachable!(),
             }
@@ -254,9 +324,9 @@ impl NostrWsConnection {
                         RelayMessage::Ok(ok) if ok.event_id == event_id => return Ok(ok),
                         RelayMessage::Auth { ref challenge } => {
                             self.pending_challenge = Some(challenge.clone());
-                            self.buffer.push_back(msg);
+                            self.buffer.push_back((Instant::now(), msg));
                         }
-                        other => self.buffer.push_back(other),
+                        other => self.buffer.push_back((Instant::now(), other)),
                     }
                 }
                 Message::Ping(data) => {
@@ -310,5 +380,44 @@ mod tests {
     #[test]
     fn publish_ok_timeout_meets_floor() {
         const { assert!(PUBLISH_OK_TIMEOUT_SECS >= 30) };
+    }
+
+    // The handshake callback's `Result<Response, ErrorResponse>` is fixed by tungstenite.
+    #[allow(clippy::result_large_err)]
+    #[tokio::test]
+    async fn connect_with_headers_sends_headers_on_upgrade() {
+        use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+        use tokio_tungstenite::tungstenite::http::HeaderValue;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut received = None;
+            let _ws = tokio_tungstenite::accept_hdr_async(
+                stream,
+                |request: &Request, response: Response| {
+                    received = request.headers().get("nostr-federated-identity").cloned();
+                    Ok(response)
+                },
+            )
+            .await
+            .unwrap();
+            received
+        });
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "Nostr-Federated-Identity",
+            HeaderValue::from_static("Bearer header.payload.signature"),
+        );
+        let _conn = NostrWsConnection::connect_with_headers(&url, headers)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            server.await.unwrap(),
+            Some(HeaderValue::from_static("Bearer header.payload.signature"))
+        );
     }
 }

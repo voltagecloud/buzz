@@ -93,6 +93,10 @@ impl Asset for RemoteImage {
 /// An image inline in a `data:image/<format>[;base64],…` URL, for the
 /// formats the app draws.
 pub fn inline_image(url: &str) -> Option<ImageSource> {
+    inline(url).map(ImageSource::Image)
+}
+
+fn inline(url: &str) -> Option<Arc<Image>> {
     let format = match url.strip_prefix("data:image/")?.split([';', ',']).next()? {
         "svg+xml" => ImageFormat::Svg,
         "png" => ImageFormat::Png,
@@ -102,9 +106,7 @@ pub fn inline_image(url: &str) -> Option<ImageSource> {
         _ => return None,
     };
     let bytes = buzz_relay_client::community_icon::inline_bytes(url)?;
-    Some(ImageSource::Image(Arc::new(Image::from_bytes(
-        format, bytes,
-    ))))
+    Some(Arc::new(Image::from_bytes(format, bytes)))
 }
 
 /// An image at `url`, at full size.
@@ -117,9 +119,38 @@ pub fn image(url: &str, media: &Media) -> ImageSource {
 }
 
 /// A profile picture: the relay's small thumbnail when it is relay media
-/// (`mediaUrl(url, "small")`), falling back to the original.
+/// (`mediaUrl(url, "small")`), falling back to the original, or the image
+/// inline in a `data:` URL.
 pub fn avatar(url: &str, media: &Media) -> ImageSource {
+    if url.starts_with("data:") {
+        return inline_avatar(url);
+    }
     source(avatar_remote(url, media))
+}
+
+/// Decoded inline pictures kept at most; past it the cache starts over.
+const INLINE_AVATARS: usize = 256;
+
+/// Inline pictures by a hash of their URL. Profiles carry them whole and
+/// avatars are asked for on every frame, so each is decoded only once.
+static INLINE: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<u64, Option<Arc<Image>>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// A picture inline in a `data:` URL; one that does not decode shows the
+/// avatar's initial.
+fn inline_avatar(url: &str) -> ImageSource {
+    let key = gpui_kit::hash(&url);
+    let mut cache = INLINE.lock().expect("inline avatars");
+    if !cache.contains_key(&key) && cache.len() >= INLINE_AVATARS {
+        cache.clear();
+    }
+    let image = cache.entry(key).or_insert_with(|| inline(url)).clone();
+    image.map(ImageSource::Image).unwrap_or_else(|| {
+        ImageSource::Custom(Arc::new(|_, _| {
+            Some(Err(ImageCacheError::Asset("Not a supported image".into())))
+        }))
+    })
 }
 
 fn avatar_remote(url: &str, media: &Media) -> Remote {
@@ -141,6 +172,9 @@ fn avatar_remote(url: &str, media: &Media) -> Remote {
 /// through the community whose media it is, which signs for it, else the
 /// current one's (other hosts' images need no signature).
 pub fn any_avatar(url: &str) -> ImageSource {
+    if url.starts_with("data:") {
+        return inline_avatar(url);
+    }
     let url = url.to_string();
     ImageSource::Custom(Arc::new(move |window, cx| {
         let Some(media) = media_for(&url, cx) else {
@@ -372,7 +406,7 @@ fn tabular() -> FontFeatures {
 
 /// Sniffs the formats GPUI decodes from their magic bytes. Senders' MIME
 /// claims are not trusted.
-fn image_format(bytes: &[u8]) -> Option<ImageFormat> {
+pub(crate) fn image_format(bytes: &[u8]) -> Option<ImageFormat> {
     let starts = |magic: &[u8]| bytes.starts_with(magic);
     if starts(b"\x89PNG\r\n\x1a\n") {
         Some(ImageFormat::Png)
@@ -447,6 +481,23 @@ pub(super) async fn save(
 mod tests {
     use super::*;
     use core::prelude::v1::test;
+
+    #[test]
+    fn inline_avatars_decode_once() {
+        // A 1×1 PNG.
+        let url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+        let (ImageSource::Image(first), ImageSource::Image(again)) =
+            (inline_avatar(url), inline_avatar(url))
+        else {
+            panic!("an inline PNG is an image");
+        };
+        assert!(Arc::ptr_eq(&first, &again));
+        assert_eq!(first.format, ImageFormat::Png);
+        assert!(matches!(
+            inline_avatar("data:image/bmp;base64,AAAA"),
+            ImageSource::Custom(_)
+        ));
+    }
 
     #[test]
     fn sniffs_formats() {

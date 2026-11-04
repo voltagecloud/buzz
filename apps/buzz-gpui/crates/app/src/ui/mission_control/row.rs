@@ -5,6 +5,7 @@
 
 use crate::community::AppState;
 use crate::mission_control::model::{Entry, Link, Need, Status, status_label};
+use crate::ui::agents2::AgentDelete;
 use crate::ui::navigation::{self, Target};
 use crate::ui::overlay::{self, Align, Dismiss};
 use buzz_ui::{
@@ -22,16 +23,26 @@ pub const HEIGHT: Rems = rems(4.25);
 pub struct AgentRow {
     pub entry: Entry,
     menu: bool,
+    /// "Delete agent"'s confirmation. Here as well as on the Agents page,
+    /// which lists only the selected community's agents once it connects:
+    /// an agent whose community never connects can be deleted only here.
+    delete: Entity<AgentDelete>,
 }
 
 impl AgentRow {
-    pub fn new(entry: Entry) -> Self {
-        Self { entry, menu: false }
+    pub fn new(entry: Entry, cx: &mut Context<Self>) -> Self {
+        let delete = cx.new(|cx| AgentDelete::dialog_only(entry.pubkey.clone(), cx));
+        cx.observe(&delete, |_, _, cx| cx.notify()).detach();
+        Self {
+            entry,
+            menu: false,
+            delete,
+        }
     }
 
-    /// An open menu draws every frame, as overlays expect.
-    pub fn overlay_open(&self) -> bool {
-        self.menu
+    /// An open menu or dialog draws every frame, as overlays expect.
+    pub fn overlay_open(&self, cx: &App) -> bool {
+        self.menu || self.delete.read(cx).open()
     }
 
     fn close_menu(&mut self, cx: &mut Context<Self>) {
@@ -46,6 +57,7 @@ impl AgentRow {
             .items_center()
             .gap(rems(0.25))
             .child(self.menu(window, cx))
+            .child(self.delete.clone())
     }
 
     fn menu(&self, window: &Window, cx: &mut Context<Self>) -> Div {
@@ -108,6 +120,16 @@ impl AgentRow {
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.close_menu(cx);
                     open_agent(&agent, cx);
+                })),
+        );
+        let delete = self.delete.clone();
+        menu = menu.child(
+            item("mc-delete", "Delete agent…", IconName::Trash)
+                .danger()
+                .disabled(pubkey.is_empty())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.close_menu(cx);
+                    delete.update(cx, |delete, cx| delete.ask(cx));
                 })),
         );
         let weak = cx.entity().downgrade();

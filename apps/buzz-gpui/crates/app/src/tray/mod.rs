@@ -1,5 +1,5 @@
-//! The tray icon, with Open Buzz and Quit Buzz, which asks for attention
-//! while mentions or direct messages are unread: a StatusNotifierItem on
+//! The tray icon, with Open Buzz and Quit Buzz, which carries a dot while
+//! messages are unread: a StatusNotifierItem on
 //! Linux ([`linux`]), a menu-bar item on macOS and a notification-area
 //! icon on Windows ([`native`]).
 
@@ -21,8 +21,24 @@ pub enum TrayEvent {
     Quit,
 }
 
-fn tool_tip(attention: u32) -> String {
-    match attention {
+/// What is unread, as the icon shows it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Unread {
+    /// Messages the rail marks as unread: the dot.
+    pub any: bool,
+    /// Unread mentions and direct messages, which the tooltip counts.
+    pub attention: u32,
+}
+
+impl Unread {
+    fn dot(self) -> bool {
+        self.any || self.attention > 0
+    }
+}
+
+fn tool_tip(unread: Unread) -> String {
+    match unread.attention {
+        0 if unread.any => "Unread messages".into(),
         0 => String::new(),
         1 => "1 unread mention or direct message".into(),
         n => format!("{n} unread mentions and direct messages"),
@@ -70,8 +86,13 @@ mod tests {
 
     #[test]
     fn tool_tips_count_what_is_unread() {
-        assert_eq!(tool_tip(0), "");
-        assert_eq!(tool_tip(2), "2 unread mentions and direct messages");
+        let unread = |any, attention| Unread { any, attention };
+        assert_eq!(tool_tip(unread(false, 0)), "");
+        assert_eq!(tool_tip(unread(true, 0)), "Unread messages");
+        assert_eq!(
+            tool_tip(unread(true, 2)),
+            "2 unread mentions and direct messages"
+        );
     }
 
     #[test]

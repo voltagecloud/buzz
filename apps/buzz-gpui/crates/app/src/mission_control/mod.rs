@@ -191,7 +191,7 @@ impl Fleet {
                         (
                             agent.clone(),
                             service.host_of(&agent.pubkey),
-                            service.run_state(&agent.pubkey),
+                            service.run_state(&agent.pubkey, cx),
                         )
                     })
                     .collect()
@@ -235,6 +235,7 @@ impl Fleet {
                     status,
                     since: run.working_since.or(Some(seen.1)),
                     failed: run.failed.clone(),
+                    unreachable: run.unreachable.clone(),
                 };
                 let live = lives.get(&agent.pubkey);
                 let model = crate::agents2::type_of(&agent.agent_type, cx)

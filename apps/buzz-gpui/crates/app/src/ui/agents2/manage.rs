@@ -13,6 +13,9 @@ pub struct Removed;
 /// "Delete agent", after a confirmation that says what it does.
 pub struct AgentDelete {
     pubkey: String,
+    /// Draws its own "Delete agent" button; without it, another view opens
+    /// the confirmation with [`Self::ask`].
+    button: bool,
     confirming: bool,
     removing: bool,
     error: Option<SharedString>,
@@ -24,10 +27,31 @@ impl AgentDelete {
     pub fn new(pubkey: String, _: &mut Context<Self>) -> Self {
         Self {
             pubkey,
+            button: true,
             confirming: false,
             removing: false,
             error: None,
         }
+    }
+
+    /// Only the confirmation, for a view that offers "Delete agent" in its
+    /// own menu.
+    pub fn dialog_only(pubkey: String, cx: &mut Context<Self>) -> Self {
+        Self {
+            button: false,
+            ..Self::new(pubkey, cx)
+        }
+    }
+
+    /// Asks to confirm the deletion.
+    pub fn ask(&mut self, cx: &mut Context<Self>) {
+        self.confirming = true;
+        cx.notify();
+    }
+
+    /// Its confirmation shows.
+    pub fn open(&self) -> bool {
+        self.confirming
     }
 
     fn remove(&mut self, cx: &mut Context<Self>) {
@@ -70,17 +94,25 @@ impl AgentDelete {
 impl Render for AgentDelete {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = *cx.colors();
+        // Any running agent, not only the selected community's: Mission
+        // control deletes agents whose community never connects.
         let name = Agents2::global(cx)
-            .and_then(|service| service.read(cx).find(&self.pubkey).map(|a| a.name.clone()))
+            .and_then(|service| {
+                let service = service.read(cx);
+                service
+                    .running()
+                    .iter()
+                    .find(|agent| agent.pubkey == self.pubkey)
+                    .map(|agent| agent.name.clone())
+            })
             .unwrap_or_else(|| "this agent".into());
-        let button = Button::new("agent-delete", "Delete agent")
-            .size(ButtonSize::Sm)
-            .ghost()
-            .icon(IconName::Trash)
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.confirming = true;
-                cx.notify();
-            }));
+        let button = self.button.then(|| {
+            Button::new("agent-delete", "Delete agent")
+                .size(ButtonSize::Sm)
+                .ghost()
+                .icon(IconName::Trash)
+                .on_click(cx.listener(|this, _, _, cx| this.ask(cx)))
+        });
         let dialog = self.confirming.then(|| {
             let weak = cx.entity().downgrade();
             let dismiss: Dismiss = Rc::new(move |_, cx| {
@@ -111,6 +143,6 @@ impl Render for AgentDelete {
                 );
             overlay::modal(window, dialog, (!self.removing).then_some(dismiss))
         });
-        div().child(button).children(dialog)
+        div().children(button).children(dialog)
     }
 }

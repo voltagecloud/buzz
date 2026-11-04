@@ -259,7 +259,7 @@ impl RemoteMigration {
                         let snapshot = migration::snapshot(service, cx)?;
                         migration::checked_step(&mut plan, &snapshot, &journal, |item, operation| {
                             if operation == migration::Change::FinishConfig {
-                                let state = service.run_state(&item.before.pubkey);
+                                let state = service.run_state(&item.before.pubkey, cx);
                                 if state.working_since.is_some() || !state.held {
                                     return Task::ready(Err("Wait until this app holds the idle agent before resuming its configuration.".into()));
                                 }

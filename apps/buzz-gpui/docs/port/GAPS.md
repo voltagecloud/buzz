@@ -253,8 +253,8 @@ file that holds its rows.
   - pairing and remote agent setup;
   - the Pi installer;
   - Databricks browser sign-in.
-- **Native extras:** a terminal (PTY) panel per channel, and the in-app
-  browser.
+- **Native extras:** a terminal (PTY) panel per channel, the in-app
+  browser, and web link embeds under messages (the page's OpenGraph tags).
 
 ## Not applicable
 
