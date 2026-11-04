@@ -4,6 +4,7 @@
 mod live_relay;
 mod relay;
 mod revoked;
+mod shared_live;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -151,6 +152,43 @@ fn inbox(cluster: &sandbox_fake::Shared) -> Value {
 
 fn completed(cluster: &sandbox_fake::Shared, event: &Event) -> bool {
     inbox(cluster)["completed"].get(event.id.to_hex()).is_some()
+}
+
+#[tokio::test]
+async fn requested_history_close_ack_keeps_the_live_listener_running() {
+    let relay = relay::Relay::start().await;
+    let cluster = sandbox_fake::Shared::default();
+    let identity = register(&cluster, &relay.url).await;
+    let mut journal = Journal::acquire(
+        sandbox_fake::client(&cluster),
+        &identity,
+        "close-ack",
+        Timestamp::now().as_secs(),
+    )
+    .await
+    .unwrap();
+    let manager = manager(&cluster);
+    let mut listener = tokio::spawn(async move {
+        worker::session(&manager, &identity, &mut journal, &Semaphore::new(1)).await
+    });
+    relay.wait_subscription("closed:mentions-history").await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut listener)
+            .await
+            .is_err(),
+        "an acknowledgement of our CLOSE must not terminate live delivery"
+    );
+    let mut phone = NostrWsConnection::connect_authenticated(&relay.url, &keys("33"), None)
+        .await
+        .unwrap();
+    let event = message("@agent after history closed", None);
+    assert!(phone.send_event(event.clone()).await.unwrap().accepted);
+    wait_for(|| completed(&cluster, &event)).await;
+    assert_eq!(cluster.lock().unwrap().sandboxes.len(), 1);
+    assert_eq!(relay.count("mentions-live"), 1);
+    listener.abort();
+    let _ = listener.await;
+    relay.stop().await;
 }
 
 #[tokio::test]

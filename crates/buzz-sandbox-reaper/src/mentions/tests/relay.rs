@@ -39,7 +39,14 @@ impl Relay {
             ])
             .sign_with_keys(&keys("33"))
             .unwrap();
-        let events = Arc::new(Mutex::new(vec![metadata, listing]));
+        let members = EventBuilder::new(Kind::Custom(39002), "")
+            .tags([
+                Tag::parse(["d", CHANNEL]).unwrap(),
+                Tag::public_key(keys("22").public_key()),
+            ])
+            .sign_with_keys(&keys("11"))
+            .unwrap();
+        let events = Arc::new(Mutex::new(vec![metadata, listing, members]));
         let cancel = CancellationToken::new();
         let lose_next_ack = Arc::new(AtomicBool::new(false));
         let (subscriptions, receiver) = watch::channel(BTreeMap::new());
@@ -177,7 +184,11 @@ async fn connection(
                         ws.send(frame(json!(["EOSE", id]))).await?;
                         subscriptions.send_modify(|counts| { *counts.entry(id).or_default() += 1; });
                     }
-                    "CLOSE" => { filters.remove(input[1].as_str().unwrap()); }
+                    "CLOSE" => {
+                        filters.remove(input[1].as_str().unwrap());
+                        ws.send(frame(json!(["CLOSED",input[1],""]))).await?;
+                        subscriptions.send_modify(|counts| { *counts.entry(format!("closed:{}",input[1].as_str().unwrap())).or_default() += 1; });
+                    }
                     "EVENT" => {
                         let event: Event = serde_json::from_value(input[1].clone())?;
                         let accepted = Some(event.pubkey) == author && event.verify().is_ok()
@@ -197,6 +208,7 @@ async fn connection(
                 let event = event?;
                 if event.kind.as_u16() != 24210 && !event.tags.iter().any(|t| t.as_slice() == ["h", CHANNEL]) { continue; }
                 for (id, filter) in &filters {
+                    if event.kind.as_u16()!=24210 && filter.get("#h").is_none() {continue;}
                     if matches(filter, &event) { ws.send(frame(json!(["EVENT",id,event]))).await?; }
                 }
             }

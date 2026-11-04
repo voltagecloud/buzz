@@ -159,12 +159,21 @@ impl State {
         let path = path.split('?').next().unwrap_or_default();
         let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
         match segments.as_slice() {
-            ["apis", "agents.x-k8s.io", "v1beta1", "namespaces", _, "sandboxes", rest @ ..] => {
-                self.sandbox(method, rest.first().copied(), body)
+            ["apis", "agents.x-k8s.io", "v1beta1", "namespaces", namespace, "sandboxes", rest @ ..] => {
+                self.sandbox(method, namespace, rest.first().copied(), body)
             }
-            ["api", "v1", "namespaces", _, "pods"] => {
+            ["api", "v1", "namespaces", namespace, "pods"] => {
                 let names: Vec<String> = self.pods.keys().cloned().collect();
-                let items: Vec<Value> = names.iter().filter_map(|n| self.pod(n)).collect();
+                let items: Vec<Value> = names
+                    .iter()
+                    .filter(|name| {
+                        self.sandboxes
+                            .get(*name)
+                            .and_then(|s| s["metadata"]["namespace"].as_str())
+                            .is_none_or(|stored| stored == *namespace)
+                    })
+                    .filter_map(|n| self.pod(n))
+                    .collect();
                 ok(&json!({"apiVersion":"v1","kind":"PodList","metadata":{},"items":items}))
             }
             ["api", "v1", "namespaces", _, "pods", name] => {
@@ -277,7 +286,13 @@ impl State {
         }
     }
 
-    fn sandbox(&mut self, method: &Method, name: Option<&str>, body: &[u8]) -> Response<Body> {
+    fn sandbox(
+        &mut self,
+        method: &Method,
+        namespace: &str,
+        name: Option<&str>,
+        body: &[u8],
+    ) -> Response<Body> {
         match (method.clone(), name) {
             (Method::GET, Some(name)) => match self.sandboxes.get(name) {
                 Some(sandbox) => ok(sandbox),
@@ -289,6 +304,7 @@ impl State {
                     return status(500, "InternalError");
                 }
                 let mut sandbox: Value = serde_json::from_slice(body).unwrap();
+                sandbox["metadata"]["namespace"] = namespace.into();
                 let name = sandbox["metadata"]["name"].as_str().unwrap().to_string();
                 if self.sandboxes.contains_key(&name) {
                     return status(409, "AlreadyExists");

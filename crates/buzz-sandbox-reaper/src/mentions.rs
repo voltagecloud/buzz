@@ -2,6 +2,7 @@
 //! Clients need no control protocol. Agent-authenticated subscriptions retain
 //! the relay's channel access checks; credentials never leave the manager.
 
+mod channels;
 mod journal;
 mod registry;
 pub(crate) use registry::Identity;
