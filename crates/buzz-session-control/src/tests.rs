@@ -177,6 +177,7 @@ fn envelopes_round_trip_for_every_op_and_status() {
         Op::Enroll,
         Op::Profile,
         Op::Start,
+        Op::Admit,
     ] {
         let request = Request::new(op, "r-1", json!({"op": op.as_str()}));
         let owner_signed = matches!(op, Op::Enroll | Op::Profile | Op::Start);

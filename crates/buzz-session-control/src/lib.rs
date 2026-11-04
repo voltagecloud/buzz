@@ -56,6 +56,9 @@ pub enum Op {
     Profile,
     /// Start an already registered agent for an owner-signed channel mention.
     Start,
+    /// Admit one shared task. Signed by the addressed agent; never authorizes
+    /// provider lifecycle operations or exposes registered launch credentials.
+    Admit,
 }
 
 impl Op {
@@ -68,6 +71,7 @@ impl Op {
             Op::Enroll => "enroll",
             Op::Profile => "profile",
             Op::Start => "start",
+            Op::Admit => "admit",
         }
     }
 
@@ -79,6 +83,7 @@ impl Op {
             Op::Enroll,
             Op::Profile,
             Op::Start,
+            Op::Admit,
         ]
         .into_iter()
         .find(|op| op.as_str() == value)
