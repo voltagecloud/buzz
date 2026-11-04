@@ -67,8 +67,9 @@ plugins it needs, so nothing else has to be installed.
 2. Run `Buzz\bin\buzz-gpui.exe`. If SmartScreen stops it, choose More info,
    then Run anyway.
 
-Keep the `bin` and `lib` folders together: GStreamer finds its plugins in
-`lib` next to `bin`. The zip also holds `buzzd.exe`.
+Keep the `bin`, `lib` and `share` folders together: GStreamer finds its
+plugins in `lib` next to `bin`, and Buzz finds its Node and its own plugins
+in `lib` and `share`. The zip also holds `buzzd.exe`.
 
 Build it on Windows with GStreamer's MSVC runtime and development
 installers, `cargo build --release -p buzz-gpui -p buzzd`, then

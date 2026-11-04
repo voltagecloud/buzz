@@ -331,6 +331,8 @@ pub struct RunState {
     pub held: bool,
     /// Its community is ready to run it in.
     pub ready: bool,
+    /// Why its community could not be reached, while it is not ready.
+    pub unreachable: Option<String>,
     /// The last run's failure, until a run succeeds: when it ended, Unix
     /// ms, and why.
     pub failed: Option<(u64, String)>,
@@ -962,17 +964,27 @@ impl Agents2 {
     }
 
     /// What a running agent's runner is doing, for Mission control.
-    pub fn run_state(&self, pubkey: &str) -> RunState {
+    pub fn run_state(&self, pubkey: &str, cx: &App) -> RunState {
         let ready = self.ready(pubkey).is_some();
+        let unreachable = (!ready)
+            .then(|| self.agent(pubkey))
+            .flatten()
+            .and_then(|agent| self.bound.get(&http_origin(&agent.relay)?))
+            .and_then(|bound| match &bound.community.read(cx).snapshot.status {
+                SessionStatus::Failed(error) => Some(error.clone()),
+                _ => None,
+            });
         match self.runners.get(pubkey) {
             Some(runner) => RunState {
                 working_since: runner.working_since,
                 held: runner.may_hold,
                 ready,
+                unreachable,
                 failed: runner.failed.clone(),
             },
             None => RunState {
                 ready,
+                unreachable,
                 ..RunState::default()
             },
         }

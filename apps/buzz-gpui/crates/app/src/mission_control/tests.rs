@@ -82,6 +82,7 @@ fn running(since: u64) -> Run {
         status: Status::Ready,
         since: Some(since),
         failed: None,
+        unreachable: None,
     }
 }
 
@@ -237,6 +238,7 @@ fn runner_states_map_to_needs() {
         status,
         since,
         failed: failed.map(|(at, error)| (at, error.to_string())),
+        unreachable: None,
     };
     let now = 60 * 60_000;
     let need = |run: &Run, link| attention(run, None, link, now);
@@ -272,6 +274,19 @@ fn runner_states_map_to_needs() {
         )
         .map(|a| a.reason),
         Some("Connecting for 10m 0s".into())
+    );
+    let unreachable = Run {
+        unreachable: Some("HTTP 530\nbody".into()),
+        ..run(Status::Connecting, Some(now - 10 * 60_000), None)
+    };
+    assert_eq!(
+        need(&unreachable, Link::Connected).map(|a| a.reason),
+        Some("Can't reach its community: HTTP 530".into()),
+        "a community that fails says why"
+    );
+    assert_eq!(
+        doing(&unreachable, None, Link::Connected, now).text,
+        "Retrying its community…"
     );
     assert_eq!(
         need(

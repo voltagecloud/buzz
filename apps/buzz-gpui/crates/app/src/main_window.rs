@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::tray::{Tray, TrayEvent};
+use crate::tray::{Tray, TrayEvent, Unread};
 
 /// View-state key for the tray choices (a device preference).
 const PREFERENCES: &str = "tray";
@@ -116,9 +116,9 @@ struct MainWindow {
     /// On the main thread, where macOS and Windows keep it.
     #[cfg(any(target_os = "macos", windows))]
     tray: Option<Tray>,
-    /// Mentions and direct messages unread, last told to the tray.
+    /// What is unread, last told to the tray.
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    attention: u32,
+    unread: Option<Unread>,
     _communities: Vec<Subscription>,
 }
 
@@ -152,7 +152,7 @@ pub fn init(cx: &mut App) {
         shown: false,
         tray: None,
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        attention: 0,
+        unread: None,
         _communities: Vec::new(),
     });
     cx.observe_global::<AppState>(watch_communities).detach();
@@ -643,13 +643,13 @@ fn start_tray(cx: &mut App) {
                 return false;
             }
             main.tray = Some(tray.clone());
-            main.attention = u32::MAX;
+            main.unread = None;
             true
         });
         if !kept {
             return;
         }
-        cx.update(update_attention);
+        cx.update(update_unread);
         let weak = Arc::downgrade(&tray);
         drop(tray);
         while let Some(event) = received.next().await {
@@ -691,7 +691,7 @@ fn start_tray(cx: &mut App) {
         }
     };
     cx.global_mut::<MainWindow>().tray = Some(tray);
-    update_attention(cx);
+    update_unread(cx);
     // Ends when the icon is taken down, which drops its senders.
     cx.spawn(async move |cx| {
         while let Some(event) = received.next().await {
@@ -712,17 +712,30 @@ fn watch_communities(cx: &mut App) {
     let communities = cx.global::<AppState>().communities.clone();
     let subscriptions = communities
         .iter()
-        .map(|community| cx.observe(community, |_, cx| update_attention(cx)))
+        .map(|community| cx.observe(community, |_, cx| update_unread(cx)))
         .collect();
     cx.global_mut::<MainWindow>()._communities = subscriptions;
-    update_attention(cx);
+    update_unread(cx);
 }
 
-fn attention(communities: &[Entity<Community>], cx: &App) -> u32 {
+fn unread(communities: &[Entity<Community>], cx: &App) -> Unread {
     communities
         .iter()
-        .map(|community| snapshot_attention(&community.read(cx).snapshot))
-        .sum()
+        .map(|community| snapshot_unread(&community.read(cx).snapshot))
+        .fold(Unread::default(), |all, unread| Unread {
+            any: all.any || unread.any,
+            attention: all.attention + unread.attention,
+        })
+}
+
+/// What the tray shows of a community: the dot wherever the rail marks
+/// it, and its mentions and direct messages counted.
+fn snapshot_unread(snapshot: &SessionSnapshot) -> Unread {
+    let (any, priority) = crate::ui::rail_menu::unread_marks(snapshot);
+    Unread {
+        any: any || priority,
+        attention: snapshot_attention(snapshot),
+    }
 }
 
 /// Unread mentions and direct messages in the rows the sidebar lists.
@@ -737,28 +750,28 @@ fn snapshot_attention(snapshot: &SessionSnapshot) -> u32 {
 }
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-fn update_attention(cx: &mut App) {
-    let count = attention(&cx.global::<AppState>().communities.clone(), cx);
+fn update_unread(cx: &mut App) {
+    let unread = unread(&cx.global::<AppState>().communities.clone(), cx);
     let main = cx.global_mut::<MainWindow>();
     let Some(tray) = main.tray.clone() else {
         return;
     };
-    if main.attention == count {
+    if main.unread == Some(unread) {
         return;
     }
-    main.attention = count;
+    main.unread = Some(unread);
     Runtime::handle(cx).spawn(async move {
-        if let Err(error) = tray.set_attention(count).await {
+        if let Err(error) = tray.set_unread(unread).await {
             tracing::debug!(%error, "could not update the tray icon");
         }
     });
 }
 
 #[cfg(any(target_os = "macos", windows))]
-fn update_attention(cx: &mut App) {
-    let count = attention(&cx.global::<AppState>().communities.clone(), cx);
+fn update_unread(cx: &mut App) {
+    let unread = unread(&cx.global::<AppState>().communities.clone(), cx);
     if let Some(tray) = cx.global_mut::<MainWindow>().tray.as_mut()
-        && let Err(error) = tray.set_attention(count)
+        && let Err(error) = tray.set_unread(unread)
     {
         tracing::debug!(%error, "could not update the tray icon");
     }
@@ -800,6 +813,34 @@ mod tests {
         };
         let snapshot = crate::ui::sidebar::unread_snapshot(channels, &rows, sidebar);
         assert_eq!(snapshot_attention(&snapshot), 3);
+    }
+
+    #[test]
+    fn the_tray_dot_shows_for_any_unread_message() {
+        use buzz_relay_client::ChannelSummary;
+        use buzz_relay_client::ChannelUnread;
+        let channels = vec![ChannelSummary {
+            id: "general".into(),
+            channel_type: Some(ChannelType::Stream),
+            ..Default::default()
+        }];
+        let ordinary = ChannelUnread {
+            unread: true,
+            bold: true,
+            count: 4,
+            ..Default::default()
+        };
+        let read = crate::ui::sidebar::unread_snapshot(channels.clone(), &[], Default::default());
+        assert_eq!(snapshot_unread(&read), Unread::default());
+        let rows = [("general", ordinary)];
+        let snapshot = crate::ui::sidebar::unread_snapshot(channels, &rows, Default::default());
+        assert_eq!(
+            snapshot_unread(&snapshot),
+            Unread {
+                any: true,
+                attention: 0
+            }
+        );
     }
 
     #[test]

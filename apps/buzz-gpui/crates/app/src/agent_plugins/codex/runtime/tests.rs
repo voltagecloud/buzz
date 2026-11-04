@@ -2042,9 +2042,9 @@ async fn a_failed_idle_terminal_clean_neither_ends_the_shared_server_nor_blocks_
     let thread = f.thread_of(1);
     f.complete_turn(1, "SERVER RUNNING").await;
     until(|| locked(&other.published).len() == 1).await;
-    // The turn publishes before it ends. Removed before then, the agent
-    // aborts the turn instead, and that turn's failed clean closes the
-    // server, so wait for the turn to end.
+    // The reply is sent before the turn ends; stopping the agent before
+    // then interrupts a running turn, whose failed clean does end the
+    // server.
     until(|| {
         f.runtime
             .sessions(&"9".repeat(64))

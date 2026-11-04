@@ -63,6 +63,54 @@ pub struct Inputs<'a> {
     pub can_invite: bool,
 }
 
+/// Directory searches remembered per community (`useMentionDirectory`).
+pub const PAGES: usize = 100;
+
+/// Successful non-empty first pages by query, newest last. Empty answers
+/// are not kept: a fresh search for the same query reads again.
+#[derive(Default)]
+pub struct Pages(VecDeque<(String, Vec<String>, bool)>);
+
+impl Pages {
+    pub fn get(&self, query: &str) -> Option<(Vec<String>, bool)> {
+        self.0
+            .iter()
+            .find(|(q, _, _)| q == query)
+            .map(|(_, people, more)| (people.clone(), *more))
+    }
+
+    pub fn remember(&mut self, query: &str, people: &[String], more: bool) {
+        self.forget(query);
+        if people.is_empty() {
+            return;
+        }
+        self.0.push_back((query.to_string(), people.to_vec(), more));
+        if self.0.len() > PAGES {
+            self.0.pop_front();
+        }
+    }
+
+    pub fn forget(&mut self, query: &str) {
+        self.0.retain(|(q, _, _)| q != query);
+    }
+}
+
+/// People already known whose name matches `query`, best match first,
+/// to show while the directory search runs.
+pub fn known_matches(profiles: &Profiles, query: &str, viewer: &str) -> Vec<String> {
+    let mut found: Vec<(u8, &str, &String)> = profiles
+        .iter()
+        .filter(|(key, profile)| *key != viewer && !profile.name_is_fallback)
+        .filter_map(|(key, profile)| {
+            buzz_relay_client::members::match_tier(&profile.name, query)
+                .map(|tier| (tier, profile.name.as_str(), key))
+        })
+        .collect();
+    found.sort();
+    found.truncate(LIMIT);
+    found.into_iter().map(|(_, _, key)| key.clone()).collect()
+}
+
 /// Whether people outside the channel can be found: not in sessions.
 pub fn searches_directory(channel: Option<&ChannelSummary>) -> bool {
     channel.is_none_or(|c| c.channel_type != Some(ChannelType::Session))
@@ -422,6 +470,39 @@ mod tests {
                 })
                 .collect(),
         )
+    }
+
+    #[test]
+    fn pages_keep_the_newest_non_empty_answers() {
+        let mut pages = Pages::default();
+        pages.remember("al", &[key(1)], true);
+        assert_eq!(pages.get("al"), Some((vec![key(1)], true)));
+        // An empty answer is not kept and drops the older one.
+        pages.remember("al", &[], false);
+        assert_eq!(pages.get("al"), None);
+        for n in 0..=PAGES {
+            pages.remember(&n.to_string(), &[key(1)], false);
+        }
+        assert_eq!(pages.get("0"), None);
+        assert!(pages.get(&PAGES.to_string()).is_some());
+        pages.forget(&PAGES.to_string());
+        assert_eq!(pages.get(&PAGES.to_string()), None);
+    }
+
+    #[test]
+    fn known_matches_rank_names_and_skip_the_viewer() {
+        let (viewer, alicia, alice, bob) = (key(1), key(2), key(3), key(4));
+        let profiles = profiles(&[
+            (viewer.clone(), "Alex"),
+            (alicia.clone(), "Alicia"),
+            (alice.clone(), "Alice"),
+            (bob.clone(), "Bob"),
+        ]);
+        assert_eq!(
+            known_matches(&profiles, "alice", &viewer),
+            std::slice::from_ref(&alice)
+        );
+        assert_eq!(known_matches(&profiles, "al", &viewer), [alice, alicia]);
     }
 
     #[test]

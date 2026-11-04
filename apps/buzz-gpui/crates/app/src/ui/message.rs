@@ -651,9 +651,12 @@ fn full(
     // The body, after a time chip for timecoded video replies.
     // A link in a thread pane adds a panel; one in the timeline replaces.
     let thread = layout != Layout::Timeline;
-    let text = markdown::in_place(thread, || match quiet {
-        Some(shown) => markdown::subtle(|| media::text(shown, rows, cx)),
-        None => media::text(row, rows, cx),
+    let (text, embeds) = markdown::in_place(thread, || match quiet {
+        Some(shown) => (markdown::subtle(|| media::text(shown, rows, cx)), None),
+        None => (
+            media::text(row, rows, cx),
+            markdown::embeds(row, &rows.directory),
+        ),
     });
     if let Some(text) = text {
         let frame = div()
@@ -667,6 +670,9 @@ fn full(
             None => frame.text_message().text_color(c.text_standard),
         };
         body = body.child(frame.child(text));
+    }
+    if let Some(embeds) = embeds {
+        body = body.child(embeds);
     }
     if let Some(notice) = delivery_notice(row, rows, cx) {
         body = body.child(notice);

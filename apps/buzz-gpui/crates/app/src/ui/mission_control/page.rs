@@ -105,7 +105,7 @@ impl MissionControlPage {
                     }
                 }),
                 None => {
-                    let row = cx.new(|_| AgentRow::new(entry.clone()));
+                    let row = cx.new(|cx| AgentRow::new(entry.clone(), cx));
                     self.rows.insert(entry.key.clone(), row);
                 }
             }
@@ -378,7 +378,7 @@ impl MissionControlPage {
         let rows = shown.into_iter().enumerate().filter_map(|(ix, entry)| {
             let row = self.rows.get(&entry.key)?.clone();
             // Rows draw from their last frame unless they changed.
-            let view: AnyElement = if row.read(cx).overlay_open() {
+            let view: AnyElement = if row.read(cx).overlay_open(cx) {
                 row.into_any_element()
             } else {
                 AnyView::from(row)

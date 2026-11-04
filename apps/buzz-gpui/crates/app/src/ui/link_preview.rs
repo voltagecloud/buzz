@@ -1,6 +1,9 @@
 //! Hover cards on Buzz links (`BuzzLinkPreview.tsx`): a message link shows
 //! its message, read exactly while the card is open; a channel link shows
-//! the channel's public details. Clicking a card opens the link.
+//! the channel's public details. Clicking a card opens the link. Web
+//! links preview under their message instead ([`web`]).
+
+pub mod web;
 
 use super::markdown::Directory;
 use super::{media, navigation, time};

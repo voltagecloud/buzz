@@ -6,10 +6,10 @@
 //! close-to-tray or minimize-to-tray the window may be closed while the app
 //! keeps running. Hosts that support it hand over an activation token
 //! first (`ProvideXdgActivationToken`), which is what lets GNOME raise the
-//! window. The icon asks for attention while mentions or direct messages
-//! are unread.
+//! window. The icon asks for attention, which draws its dot, while
+//! messages are unread.
 
-use super::{TrayEvent, icon, tool_tip};
+use super::{TrayEvent, Unread, icon, tool_tip};
 use crate::ui::navigation::{Arrival, Request};
 use futures::channel::mpsc::UnboundedSender;
 use std::collections::HashMap;
@@ -58,7 +58,7 @@ impl Tray {
         let item = Item {
             token,
             open: open.clone(),
-            attention: 0,
+            unread: Unread::default(),
         };
         let menu = Menu {
             open,
@@ -109,20 +109,19 @@ impl Tray {
         })
     }
 
-    /// Asks for attention while `count` mentions and direct messages are
-    /// unread.
-    pub async fn set_attention(&self, count: u32) -> zbus::Result<()> {
+    /// Shows what is unread: the dot, and the count in the tooltip.
+    pub async fn set_unread(&self, unread: Unread) -> zbus::Result<()> {
         let item = self
             .connection
             .object_server()
             .interface::<_, Item>(ITEM_PATH)
             .await?;
         let mut state = item.get_mut().await;
-        if state.attention == count {
+        if state.unread == unread {
             return Ok(());
         }
         let was = state.current_status();
-        state.attention = count;
+        state.unread = unread;
         let now = state.current_status();
         drop(state);
         let emitter = item.signal_emitter();
@@ -156,12 +155,12 @@ struct Item {
     /// From `ProvideXdgActivationToken`, for the next activation.
     token: Arc<Mutex<Option<String>>>,
     open: Arc<dyn Fn() + Send + Sync>,
-    attention: u32,
+    unread: Unread,
 }
 
 impl Item {
     fn current_status(&self) -> &'static str {
-        if self.attention > 0 {
+        if self.unread.dot() {
             "NeedsAttention"
         } else {
             "Active"
@@ -232,7 +231,7 @@ impl Item {
             String::new(),
             Vec::new(),
             "Buzz".into(),
-            tool_tip(self.attention),
+            tool_tip(self.unread),
         )
     }
 

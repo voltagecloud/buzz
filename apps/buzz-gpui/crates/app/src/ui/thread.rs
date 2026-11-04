@@ -300,9 +300,9 @@ impl ThreadPanel {
         subscriptions.push(super::thread_banners::observe(cx));
         let weak = cx.entity().downgrade();
         list.set_scroll_handler(move |event, _, cx| {
+            // The list is still borrowed while it reports a scroll, and
+            // paging stops its tail-following, so page once it is free.
             if event.visible_range.start < LOAD_OLDER_WITHIN && event.is_scrolled {
-                // GPUI runs this while it holds the list's state, and
-                // load_older reads and changes that state; run it after.
                 let weak = weak.clone();
                 cx.defer(move |cx| {
                     let _ = weak.update(cx, |this, _| this.load_older());
@@ -1190,7 +1190,8 @@ impl Render for ThreadPanel {
         };
         if self.joining && matches!(access, Access::Member) {
             self.joining = false;
-            ThreadPanel::focus_composer(&cx.entity(), window, cx);
+            // The panel is mid-render, so its input is focused directly.
+            self.input.update(cx, |state, cx| state.focus(window, cx));
         }
         if let Some(channel) = &preview
             && self.join.is_none()

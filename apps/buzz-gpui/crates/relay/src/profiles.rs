@@ -405,6 +405,25 @@ impl ProfileDirectory {
         true
     }
 
+    /// Forgets everyone but `keep`, as [`Self::clear`] does for all.
+    /// Returns whether the snapshot changed.
+    pub fn retain(&mut self, keep: &HashSet<String>) -> bool {
+        self.in_flight.clear();
+        self.absent.clear();
+        for id in self.events.keys() {
+            if !keep.contains(&id) {
+                self.events.remove(&id);
+            }
+        }
+        if self.snapshot.keys().all(|id| keep.contains(id)) {
+            return false;
+        }
+        let mut next = (*self.snapshot).clone();
+        next.retain(|id, _| keep.contains(id));
+        self.snapshot = Arc::new(next);
+        true
+    }
+
     pub fn clear(&mut self) {
         self.events.clear();
         self.in_flight.clear();
@@ -561,6 +580,30 @@ mod tests {
         // A newer event with identical fields leaves the snapshot alone.
         assert!(!directory.accept(&[profile(&keys, r#"{"name":"new"}"#, 11, vec![])]));
         assert!(Arc::ptr_eq(&before, &directory.snapshot()[&id]));
+    }
+
+    #[test]
+    fn retain_forgets_only_the_others() {
+        let (kept, gone) = (Keys::generate(), Keys::generate());
+        let (kept_id, gone_id) = (kept.public_key().to_hex(), gone.public_key().to_hex());
+        let mut directory = ProfileDirectory::default();
+        directory.accept(&[
+            profile(&kept, r#"{"name":"kept"}"#, 1, vec![]),
+            profile(&gone, r#"{"name":"gone"}"#, 1, vec![]),
+        ]);
+        let before = directory.snapshot()[&kept_id].clone();
+        let keep = HashSet::from([kept_id.clone()]);
+        assert!(directory.retain(&keep));
+        let after = directory.snapshot();
+        assert!(Arc::ptr_eq(&before, &after[&kept_id]));
+        assert!(!after.contains_key(&gone_id));
+        assert!(directory.event(&gone_id).is_none());
+        // The forgotten one is read again; the kept one is not.
+        assert_eq!(
+            directory.ensure([kept_id.as_str(), gone_id.as_str()])[0].0,
+            vec![gone_id]
+        );
+        assert!(!directory.retain(&keep));
     }
 
     #[test]

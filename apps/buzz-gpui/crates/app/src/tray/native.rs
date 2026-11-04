@@ -4,10 +4,10 @@
 //!
 //! A click on the Windows icon brings the window back, and a right-click
 //! opens the menu; a click on a menu-bar item opens its menu, as they all
-//! do on macOS. While mentions or direct messages are unread the icon
-//! carries a red dot, and its tooltip counts them.
+//! do on macOS. While messages are unread the icon carries a red dot, and
+//! its tooltip counts unread mentions and direct messages.
 
-use super::{TrayEvent, icon, tool_tip};
+use super::{TrayEvent, Unread, icon, tool_tip};
 use crate::ui::navigation::{Arrival, Request};
 use futures::channel::mpsc::UnboundedSender;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
@@ -19,7 +19,7 @@ const SIZE: u32 = if cfg!(target_os = "macos") { 44 } else { 32 };
 /// The tray icon while it is up; dropping it takes the icon down.
 pub struct Tray {
     icon: TrayIcon,
-    attention: u32,
+    unread: Unread,
 }
 
 impl Tray {
@@ -68,22 +68,24 @@ impl Tray {
             .map_err(|error| error.to_string())?;
         // The system always shows it, if only in the overflow.
         let _ = events.unbounded_send(TrayEvent::Shown(true));
-        Ok(Self { icon, attention: 0 })
+        Ok(Self {
+            icon,
+            unread: Unread::default(),
+        })
     }
 
-    /// Asks for attention while `count` mentions and direct messages are
-    /// unread.
-    pub fn set_attention(&mut self, count: u32) -> Result<(), String> {
-        if self.attention == count {
+    /// Shows what is unread: the dot, and the count in the tooltip.
+    pub fn set_unread(&mut self, unread: Unread) -> Result<(), String> {
+        if self.unread == unread {
             return Ok(());
         }
-        if (self.attention > 0) != (count > 0) {
+        if self.unread.dot() != unread.dot() {
             self.icon
-                .set_icon(Some(image(count > 0)?))
+                .set_icon(Some(image(unread.dot())?))
                 .map_err(|error| error.to_string())?;
         }
-        self.attention = count;
-        let tip = match tool_tip(count) {
+        self.unread = unread;
+        let tip = match tool_tip(unread) {
             tip if tip.is_empty() => "Buzz".to_string(),
             tip => format!("Buzz: {tip}"),
         };

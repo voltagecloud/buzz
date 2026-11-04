@@ -67,6 +67,8 @@ pub struct Run {
     pub since: Option<u64>,
     /// The last run's failure: when it ended, Unix ms, and why.
     pub failed: Option<(u64, String)>,
+    /// Why its community could not be reached, while connecting.
+    pub unreachable: Option<String>,
 }
 
 /// An agent's open turn, from observed activity.
@@ -318,7 +320,10 @@ pub fn attention(run: &Run, live: Option<&Live>, link: Link, now: u64) -> Option
         let since = run.since?;
         return (now.saturating_sub(since) >= TRANSITION_STUCK_MS).then(|| Attention {
             need: Need::Stuck,
-            reason: format!("Connecting for {}", working_duration(since, now)),
+            reason: match &run.unreachable {
+                Some(error) => format!("Can't reach its community: {}", first_line(error)),
+                None => format!("Connecting for {}", working_duration(since, now)),
+            },
         });
     }
     if let Some(turn) = live.and_then(|live| live.turn.as_ref()) {
@@ -406,7 +411,12 @@ pub fn doing(run: &Run, live: Option<&Live>, link: Link, now: u64) -> Doing {
     };
     match (run.status, live.and_then(|live| live.turn.as_ref())) {
         (Status::Connecting, _) => Doing {
-            text: "Connecting to its community…".into(),
+            text: if run.unreachable.is_some() {
+                "Retrying its community…"
+            } else {
+                "Connecting to its community…"
+            }
+            .into(),
             elapsed: elapsed(run.since),
             active: false,
         },

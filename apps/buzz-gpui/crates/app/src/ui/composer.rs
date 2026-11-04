@@ -1784,6 +1784,20 @@ impl Composer {
         }) {
             return;
         }
+        let pages = MentionPages::key(community);
+        if let Some((people, more)) = cx
+            .try_global::<MentionPages>()
+            .and_then(|all| all.0.get(&pages)?.get(&needle))
+        {
+            self.recent_people = people.clone();
+            self.directory = Some(DirectorySearch {
+                needle,
+                attempt: self.directory_attempt,
+                result: Some(Ok((people, more))),
+                _task: None,
+            });
+            return;
+        }
         let hex = needle.len() == 64 && needle.bytes().all(|b| b.is_ascii_hexdigit());
         if !hex
             && self
@@ -1822,6 +1836,11 @@ impl Composer {
                     return;
                 }
                 if let Ok((people, more)) = &result {
+                    cx.default_global::<MentionPages>()
+                        .0
+                        .entry(pages)
+                        .or_default()
+                        .remember(&wanted, people, *more);
                     this.recent_people = people.clone();
                     if people.is_empty() && !more && wanted.chars().any(char::is_alphanumeric) {
                         this.refuted = Some(wanted.clone());
@@ -2051,6 +2070,26 @@ impl Composer {
             .and_then(|h| h.0.get(&community.origin.http()))
             .map(|h| h.get(&self.channel))
             .unwrap_or_default();
+        // While a search runs, people already known whose names match
+        // show beside the last answer instead of only a status line.
+        let loading = match &self.directory {
+            Some(DirectorySearch {
+                needle,
+                result: None,
+                ..
+            }) => {
+                let mut people = self.recent_people.clone();
+                for key in
+                    mentions::known_matches(&snapshot.profiles, needle, community.session.viewer())
+                {
+                    if !people.contains(&key) {
+                        people.push(key);
+                    }
+                }
+                people
+            }
+            _ => Vec::new(),
+        };
         let directory = match &self.directory {
             None => mentions::Directory::Idle,
             Some(DirectorySearch {
@@ -2064,9 +2103,7 @@ impl Composer {
                 result: Some(Err(_)),
                 ..
             }) => mentions::Directory::Failed,
-            Some(DirectorySearch { result: None, .. }) => {
-                mentions::Directory::Loading(&self.recent_people)
-            }
+            Some(DirectorySearch { result: None, .. }) => mentions::Directory::Loading(&loading),
         };
         let inputs = mentions::Inputs {
             channel,
@@ -2231,7 +2268,12 @@ impl Composer {
             channels::Retry::Channels => self.community.read(cx).session.retry(),
             channels::Retry::People => {
                 self.directory_attempt += 1;
-                self.directory = None;
+                if let Some(search) = self.directory.take() {
+                    let pages = MentionPages::key(self.community.read(cx));
+                    if let Some(pages) = cx.default_global::<MentionPages>().0.get_mut(&pages) {
+                        pages.forget(&search.needle);
+                    }
+                }
                 self.refuted = None;
                 self.community.read(cx).session.retry();
             }
@@ -3854,6 +3896,19 @@ struct DirectorySearch {
     /// `None` while it waits or runs: the people and whether there are more.
     result: Option<Result<(Vec<String>, bool), String>>,
     _task: Option<Task<()>>,
+}
+
+/// Directory search answers per community and viewer, so a query asked
+/// again shows at once (`useMentionDirectory`'s page cache).
+#[derive(Default)]
+struct MentionPages(std::collections::HashMap<String, mentions::Pages>);
+
+impl Global for MentionPages {}
+
+impl MentionPages {
+    fn key(community: &Community) -> String {
+        format!("{} {}", community.origin.http(), community.session.viewer())
+    }
 }
 
 /// Explicit picks per community and channel (`mention-history.ts`).
@@ -5579,13 +5634,8 @@ impl Composer {
                     .when(disabled.is_some(), |row| row.opacity(0.5))
                     .children(leading.as_ref().map(|(name, picture)| {
                         let mut avatar = Avatar::new(name.clone()).size(AvatarSize::Small);
-                        let image = match picture {
-                            Some(data) if data.starts_with("data:") => media::inline_image(data),
-                            Some(url) => Some(media::avatar(url, &media)),
-                            None => None,
-                        };
-                        if let Some(image) = image {
-                            avatar = avatar.image(image);
+                        if let Some(picture) = picture {
+                            avatar = avatar.image(media::avatar(picture, &media));
                         }
                         avatar
                     }))

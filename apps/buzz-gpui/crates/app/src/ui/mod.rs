@@ -60,7 +60,7 @@ pub mod pages;
 mod panels;
 pub mod profile_panel;
 pub mod projects;
-mod rail_menu;
+pub(crate) mod rail_menu;
 mod reading;
 pub mod renderers;
 mod report;

@@ -146,6 +146,48 @@ pub fn in_place<T>(thread: bool, draw: impl FnOnce() -> T) -> T {
     drawn
 }
 
+/// The most links a message shows embeds for.
+const MAX_EMBEDS: usize = 3;
+
+/// Previews of the body's web links under it, as chat apps unfurl them:
+/// the first few links that are not the message's own attachments.
+pub fn embeds(row: &Arc<MessageRow>, directory: &Directory) -> Option<AnyElement> {
+    let document = prepared(row, directory);
+    let urls: Vec<String> = document
+        .links
+        .iter()
+        .filter(|url| !row.attachments.iter().any(|a| a.url == **url))
+        .take(MAX_EMBEDS)
+        .cloned()
+        .collect();
+    if urls.is_empty() {
+        return None;
+    }
+    let origin = (!NO_ORIGIN.get()).then(|| navigation::LinkOrigin {
+        thread: IN_THREAD.get(),
+        ..navigation::LinkOrigin::of(row)
+    });
+    let mode = links::mode();
+    let id = row.id.to_hex();
+    Some(
+        div()
+            .flex()
+            .flex_col()
+            .children(urls.into_iter().enumerate().map(|(index, url)| {
+                let (target, origin) = (url.clone(), origin.clone());
+                let open = move |modifiers, window: &mut Window, cx: &mut App| {
+                    links::open_web(mode, &target, modifiers, origin.clone(), window, cx)
+                };
+                super::link_preview::web::Embed::new(
+                    SharedString::from(format!("embed-{id}-{index}")),
+                    url,
+                    open,
+                )
+            }))
+            .into_any_element(),
+    )
+}
+
 /// Renders a row's body.
 pub fn body(row: &Arc<MessageRow>, directory: &Directory, cx: &App) -> AnyElement {
     let document = prepared(row, directory);
@@ -349,6 +391,8 @@ struct Prepared {
     body: Document,
     /// Each spoiler's inner one-paragraph Markdown, by index.
     spoilers: Arc<[SharedString]>,
+    /// The body's web links in order, once each, leaving out spoilers'.
+    links: Arc<[String]>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -586,6 +630,7 @@ fn prepare(row: &MessageRow, directory: &Directory) -> Prepared {
     let plain = |body| Prepared {
         body,
         spoilers: Arc::from([]),
+        links: Arc::from([]),
     };
     if is_emoji_only(&row.content, &row.emoji) {
         return plain(Document::Emoji(emoji_parts(row.content.trim(), &row.emoji)));
@@ -636,6 +681,8 @@ fn prepare(row: &MessageRow, directory: &Directory) -> Prepared {
         footnote_order: Vec::new(),
         spoilers: Vec::new(),
         in_link: false,
+        links: Vec::new(),
+        in_spoiler: false,
     };
     let mut blocks = prep.blocks(tree.children().map_or(&[][..], Vec::as_slice));
     // Footnotes follow the body, in the order they were first referenced.
@@ -663,6 +710,7 @@ fn prepare(row: &MessageRow, directory: &Directory) -> Prepared {
     Prepared {
         body: Document::Blocks(blocks),
         spoilers: prep.spoilers.into_iter().map(SharedString::from).collect(),
+        links: prep.links.into(),
     }
 }
 
@@ -730,6 +778,10 @@ struct Prep<'a> {
     spoilers: Vec<String>,
     /// Inside a link label: text is escaped and nothing more.
     in_link: bool,
+    /// Web links seen so far, for the embeds under the body.
+    links: Vec<String>,
+    /// Inside a spoiler, whose links get no embed.
+    in_spoiler: bool,
 }
 
 impl Prep<'_> {
@@ -819,7 +871,9 @@ impl Prep<'_> {
                 Piece::Text(value, start) => self.text(value, *start, out),
                 Piece::Spoiler(inner) => {
                     let mut markdown = String::new();
+                    let was = std::mem::replace(&mut self.in_spoiler, true);
                     self.pieces(inner, &mut markdown);
+                    self.in_spoiler = was;
                     let plain = plain_markdown(&markdown);
                     let index = self.spoilers.len();
                     self.spoilers.push(markdown);
@@ -984,6 +1038,12 @@ impl Prep<'_> {
 
     /// A link keeps its label's formatting; text inside is only escaped.
     fn link(&mut self, children: &[Node], url: &str, out: &mut String) {
+        if !self.in_spoiler
+            && (url.starts_with("https://") || url.starts_with("http://"))
+            && !self.links.iter().any(|seen| seen == url)
+        {
+            self.links.push(url.to_string());
+        }
         let was = std::mem::replace(&mut self.in_link, true);
         let mut inner = String::new();
         for child in children {
@@ -2004,10 +2064,9 @@ fn text_style(color: Hsla, c: &buzz_ui::Colors) -> TextViewStyle {
         .with_link(c.text_link)
         .with_border(c.border_standard)
         .with_code_background(c.affordance_subtle)
-        .with_inline_code(HighlightStyle {
-            background_color: Some(c.affordance_subtle),
-            ..Default::default()
-        })
+        // The default's inline code is the light palette's; without it,
+        // code spans take the code background above.
+        .with_inline_code(HighlightStyle::default())
         .with_selection(c.text_link.opacity(0.25))
         .with_paragraph_gap(rems(0.))
 }
@@ -2036,7 +2095,7 @@ fn inline(source: &SharedString, path: &str, color: Hsla, wrap: bool, out: &Out)
 // Inline objects
 
 /// Bumped when [`Objects::parse`] changes.
-const PARSER_REVISION: u64 = 0xb022_0002;
+const PARSER_REVISION: u64 = 0xb022_0003;
 /// Longer code spans stay in the text flow so they can wrap; shorter ones
 /// get the padded chip.
 const CODE_CHIP_MAX: usize = 40;
@@ -2060,20 +2119,29 @@ struct Objects {
 }
 
 enum Object {
-    Link { url: String, label: StyledLabel },
-    Image { url: String, alt: String },
+    /// The label stays parsed: its code background is the theme's,
+    /// known only when drawn.
+    Link {
+        url: String,
+        label: Vec<Node>,
+    },
+    Image {
+        url: String,
+        alt: String,
+    },
     Code(String),
 }
 
-/// A label's text and styles, from its parsed children.
-fn styled_label(nodes: &[Node], c: &buzz_ui::Colors) -> StyledLabel {
-    fn walk(nodes: &[Node], style: HighlightStyle, out: &mut StyledLabel, c: &buzz_ui::Colors) {
+/// A label's text and styles, from its parsed children; `code_bg` backs
+/// its code spans.
+fn styled_label(nodes: &[Node], code_bg: Hsla) -> StyledLabel {
+    fn walk(nodes: &[Node], style: HighlightStyle, out: &mut StyledLabel, code_bg: Hsla) {
         for node in nodes {
             let mut style = style;
             let text = match node {
                 Node::Text(text) => text.value.clone(),
                 Node::InlineCode(code) => {
-                    style.background_color = Some(c.affordance_subtle);
+                    style.background_color = Some(code_bg);
                     style.font_weight = style.font_weight.or(None);
                     code.value.clone()
                 }
@@ -2096,7 +2164,7 @@ fn styled_label(nodes: &[Node], c: &buzz_ui::Colors) -> StyledLabel {
                         node.children().map_or(&[][..], Vec::as_slice),
                         style,
                         out,
-                        c,
+                        code_bg,
                     );
                     continue;
                 }
@@ -2112,7 +2180,7 @@ fn styled_label(nodes: &[Node], c: &buzz_ui::Colors) -> StyledLabel {
         }
     }
     let mut out = StyledLabel::default();
-    walk(nodes, HighlightStyle::default(), &mut out, c);
+    walk(nodes, HighlightStyle::default(), &mut out, code_bg);
     out
 }
 
@@ -2122,15 +2190,14 @@ impl MarkdownPlugin for Objects {
     }
 
     fn parse(&self, node: &mdast::Node, _: &MarkdownParseContext<'_>) -> Option<MarkdownNode> {
-        let colors = buzz_ui::Colors::light();
         let (object, text) = match node {
             Node::Link(link) => {
-                let label = styled_label(&link.children, &colors);
-                let copy = copy_text(&link.url, &label.text, &self.directory);
+                let label = styled_label(&link.children, Hsla::default()).text;
+                let copy = copy_text(&link.url, &label, &self.directory);
                 (
                     Object::Link {
                         url: link.url.clone(),
-                        label,
+                        label: link.children.clone(),
                     },
                     copy,
                 )
@@ -2280,9 +2347,10 @@ impl MarkdownPlugin for Objects {
                     self.row,
                     node.source_range().map_or(0, |r| r.start)
                 ));
+                let label = styled_label(label, c.affordance_subtle);
                 let element = links::with_mode(self.link_mode, || {
                     super::renderers::with_plain(self.plain, || {
-                        self.link(url, label, id, size, line, window, cx)
+                        self.link(url, &label, id, size, line, window, cx)
                     })
                 })?;
                 Some(InlineElement::new(element).with_baseline(baseline))
@@ -2696,6 +2764,33 @@ pub(super) mod tests {
         assert_eq!(
             paragraph("see [**bold** and `code`](https://x.test)"),
             "see [**bold** and `code`](<https://x.test>)"
+        );
+    }
+
+    #[test]
+    fn link_label_code_takes_the_drawn_background() {
+        let tree = markdown::to_mdast("[see `code`](https://x.test)", &Default::default())
+            .expect("parses");
+        let Some(Node::Link(link)) = tree.children().and_then(|c| c[0].children()?.first()) else {
+            panic!("no link");
+        };
+        let dark = buzz_ui::Colors::dark().affordance_subtle;
+        let label = styled_label(&link.children, dark);
+        assert_eq!(label.text, "see code");
+        assert_eq!(label.runs.len(), 1);
+        assert_eq!(label.runs[0].0, 4..8);
+        assert_eq!(label.runs[0].1.background_color, Some(dark));
+    }
+
+    #[test]
+    fn collects_web_links_for_embeds_but_not_spoilers_or_code() {
+        let row = row("see https://a.example/x and [b](https://b.example) \
+            and https://a.example/x again, ||secret https://hidden.example now||, \
+            `https://code.example` and buzz://channel/general");
+        let links = prepare(&row, &directory()).links;
+        assert_eq!(
+            links.as_ref(),
+            ["https://a.example/x", "https://b.example"].map(String::from)
         );
     }
 
