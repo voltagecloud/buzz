@@ -435,6 +435,7 @@ pub struct ChannelSettingsPanel {
     diagnostics: bool,
     tools: Entity<ChannelDiagnostics>,
     outbox: Entity<OutboxStatus>,
+    agent_sharing: Option<Entity<super::channel_agent_sharing::ChannelAgentSharing>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -540,6 +541,7 @@ impl ChannelSettingsPanel {
             diagnostics: false,
             tools,
             outbox,
+            agent_sharing: None,
             _subscriptions: subscriptions,
         };
         panel.sync(window, cx);
@@ -581,6 +583,19 @@ impl ChannelSettingsPanel {
         let Some(channel) = self.channel(cx) else {
             return;
         };
+        if matches!(
+            channel.channel_type,
+            Some(ChannelType::Stream | ChannelType::Forum)
+        ) && self.agent_sharing.is_none()
+        {
+            self.agent_sharing = Some(cx.new(|cx| {
+                super::channel_agent_sharing::ChannelAgentSharing::new(
+                    self.community.clone(),
+                    self.channel_id.clone(),
+                    cx,
+                )
+            }));
+        }
         if editable(&channel) && !self.details_started {
             self.details_started = true;
             self.load_details(window, cx);
@@ -1441,6 +1456,13 @@ impl Render for ChannelSettingsPanel {
                 .when(shows_lifecycle(channel), |this| {
                     this.child(self.lifecycle_actions(cx))
                 })
+                .when(
+                    matches!(
+                        channel.channel_type,
+                        Some(ChannelType::Stream | ChannelType::Forum)
+                    ),
+                    |this| this.children(self.agent_sharing.clone()),
+                )
         });
         let editor = self.details.editing.then(|| {
             let weak = cx.entity().downgrade();
