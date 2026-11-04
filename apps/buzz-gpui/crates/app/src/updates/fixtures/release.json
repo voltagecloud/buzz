@@ -52,6 +52,15 @@
       "browser_download_url": "https://github.com/benthecarman/buzz-gpui/releases/download/v0.1.1/buzz-gpui_0.1.1-1_amd64.deb"
     },
     {
+      "url": "https://api.github.com/repos/benthecarman/buzz-gpui/releases/assets/300000007",
+      "id": 300000007,
+      "name": "Buzz-0.1.1-linux-x86_64.AppImage",
+      "content_type": "application/vnd.appimage",
+      "state": "uploaded",
+      "size": 98566144,
+      "browser_download_url": "https://github.com/benthecarman/buzz-gpui/releases/download/v0.1.1/Buzz-0.1.1-linux-x86_64.AppImage"
+    },
+    {
       "url": "https://api.github.com/repos/benthecarman/buzz-gpui/releases/assets/300000005",
       "id": 300000005,
       "name": "buzz-gpui-dbgsym_0.1.1-1_amd64.ddeb.txt",

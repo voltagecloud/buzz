@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
-# Builds the Ubuntu .deb inside an ubuntu:26.04 container, so the binary links
-# against Ubuntu's libraries rather than Nix store paths.
+# Builds the Ubuntu .deb inside an ubuntu:24.04 container, so the binary links
+# against Ubuntu's libraries rather than Nix store paths, and needs only the
+# glibc of Ubuntu 24.04 or Debian 13 and later. Builds for the architecture
+# of the machine it runs on.
 #
-# Usage: scripts/package-deb.sh            -> dist/buzz-gpui_<version>_amd64.deb
+# Usage: scripts/package-deb.sh   -> dist/buzz-gpui_<version>_<amd64|arm64>.deb
+#
+# BUZZ_GPUI_APPIMAGE=1 also wraps the same build in an AppImage, for other
+# distributions: dist/Buzz-<version>-linux-<x86_64|aarch64>.AppImage (see
+# scripts/build-appimage.sh).
 #
 # BUZZ_GPUI_RELEASE_VERSION, when set, is the package version and the version
 # the app reports.
@@ -11,27 +17,38 @@
 # runs them, pinned below and checked against its published checksum.
 set -euo pipefail
 node_version=22.23.3
-node_sha256=df450af89261115ef9f9e3830c3eeb2cc9213b63c720b1af623cb5dcbe2e02de
+case "$(uname -m)" in
+  x86_64) node_arch=x64 node_sha256=df450af89261115ef9f9e3830c3eeb2cc9213b63c720b1af623cb5dcbe2e02de ;;
+  aarch64) node_arch=arm64 node_sha256=a44aeb94849a299b22df10b9e622ec2f605c2183501bc40590705131de7c740f ;;
+  *) echo "No Node for $(uname -m)." >&2; exit 1 ;;
+esac
+image=ubuntu:24.04
 here="$(cd "$(dirname "$0")/.." && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 cache="$HOME/.cache/buzz-gpui-deb"
-mkdir -p "$here/dist" "$cache/cargo" "$cache/rustup" "$cache/target"
+# What one Ubuntu release builds links against its libraries, cargo-deb
+# included; keep each release's apart.
+cargo_home="$cache/cargo-${image//:/-}"
+target="$cache/target-${image//:/-}"
+mkdir -p "$here/dist" "$cargo_home" "$cache/rustup" "$target"
 # Never leave an older package around to be mistaken for this build.
-rm -f "$here"/dist/*.deb
+rm -f "$here"/dist/*.deb "$here"/dist/*.AppImage
 
 docker run --rm \
   -v "$repo:$repo" \
-  -v "$cache/cargo:/root/.cargo" \
+  -v "$cargo_home:/root/.cargo" \
   -v "$cache/rustup:/root/.rustup" \
-  -v "$cache/target:$here/target-deb" \
+  -v "$target:$here/target-deb" \
   -e CARGO_TARGET_DIR="$here/target-deb" \
   -e OWNER="$(id -u):$(id -g)" \
   -e NODE_VERSION="$node_version" \
+  -e NODE_ARCH="$node_arch" \
   -e NODE_SHA256="$node_sha256" \
   -e BUZZ_GPUI_RELEASE_VERSION \
   -e BUZZ_GPUI_VOLTAGE \
+  -e BUZZ_GPUI_APPIMAGE \
   -w "$here" \
-  ubuntu:26.04 bash -euo pipefail -c '
+  "$image" bash -euo pipefail -c '
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
     apt-get install -y -qq --no-install-recommends \
@@ -43,8 +60,8 @@ docker run --rm \
     # Node, for the plugins and to build them.
     bundle="$CARGO_TARGET_DIR/release/bundle"
     rm -rf "$bundle" && mkdir -p "$bundle/node/bin" "$bundle/plugins"
-    tarball="/tmp/node-v$NODE_VERSION-linux-x64.tar.xz"
-    curl -sSfL -o "$tarball" "https://nodejs.org/dist/v$NODE_VERSION/node-v$NODE_VERSION-linux-x64.tar.xz"
+    tarball="/tmp/node-v$NODE_VERSION-linux-$NODE_ARCH.tar.xz"
+    curl -sSfL -o "$tarball" "https://nodejs.org/dist/v$NODE_VERSION/node-v$NODE_VERSION-linux-$NODE_ARCH.tar.xz"
     echo "$NODE_SHA256  $tarball" | sha256sum -c --quiet
     mkdir -p /opt/node && tar -xJf "$tarball" -C /opt/node --strip-components=1
     cp /opt/node/bin/node "$bundle/node/bin/node"
@@ -81,6 +98,9 @@ docker run --rm \
       "$bundle/node/bin/node" scripts/check-remote-provider.mjs "$extracted/usr/bin/buzz-backend-relay"
       rm -rf "$extracted"
     fi
+    if [ "${BUZZ_GPUI_APPIMAGE:-0}" = 1 ]; then
+      bash scripts/build-appimage.sh "${BUZZ_GPUI_RELEASE_VERSION:-$(dpkg-deb -f dist/*.deb Version)}"
+    fi
     chown -R "$OWNER" dist
   '
-ls -la "$here"/dist/*.deb
+ls -la "$here"/dist/

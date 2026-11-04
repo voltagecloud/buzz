@@ -17,8 +17,10 @@ See [Move existing agents to Remote workspace](docs/remote-agent-migration.md) f
 sudo apt install ./buzz-gpui_0.1.0-1_amd64.deb
 ```
 
-Build the package with `scripts/package-deb.sh`. It builds inside an
-`ubuntu:26.04` container and writes `dist/buzz-gpui_<version>_amd64.deb`.
+The package installs on Ubuntu 24.04, Debian 13 and later, on x86_64
+(`amd64`) or ARM (`arm64`). Build it with `scripts/package-deb.sh`. It builds
+inside an `ubuntu:24.04` container for the machine's own architecture and
+writes `dist/buzz-gpui_<version>_<arch>.deb`.
 
 On first start the app reads your identity from the keyring. It uses the
 `dev.local.buzz.foundation.identity` entry. If that entry is empty, it copies
@@ -34,6 +36,43 @@ tray icons through the AppIndicator extension, which Ubuntu turns on.
 
 Agents on the laptop run inside the app. Their keys are kept in the system
 keyring, and they stop when the app quits.
+
+## Laptop: install the app (other Linux)
+
+`Buzz-<version>-linux-x86_64.AppImage` (or `-aarch64`) runs on any Linux
+with glibc 2.39 or later, for example Fedora 40 and later. It carries the
+GStreamer libraries and plugins it plays audio and video with, plus the
+GIO TLS backend for HTTPS media. It takes
+the desktop libraries every system has (X11, fontconfig, ALSA) from the
+system. Its static runtime does not require the host `libfuse2` library.
+
+```sh
+chmod +x Buzz-<version>-linux-x86_64.AppImage
+./Buzz-<version>-linux-x86_64.AppImage
+```
+
+If FUSE mounting is unavailable, extract and run it instead:
+
+```sh
+./Buzz-<version>-linux-x86_64.AppImage --appimage-extract-and-run
+```
+
+It registers itself for `buzz://` links, and its update notice downloads
+the next AppImage. Ubuntu's GStreamer has no AV1 decoder, so the AppImage
+does not play AV1 video.
+
+Build it with `BUZZ_GPUI_APPIMAGE=1 scripts/package-deb.sh`, which writes
+the AppImage beside the `.deb` from the same build.
+`scripts/check-appimage.sh <AppImage>` then runs it on Ubuntu, Debian and
+Fedora containers that have no GStreamer or GIO TLS backend: every library
+it loads must be in the image or a desktop library, and it must play local
+and HTTPS media.
+
+On NixOS, which has no `/lib64` loader, install the flake's
+`buzz-gpui-voltage-bin` instead. It runs the release AppImage in nixpkgs'
+`appimageTools` environment (`nix/appimage.nix`). `nix/release.json` pins
+the AppImages; after each release, Voltage's release workflow opens a pull
+request with the new pin (`scripts/pin-nix-release.py`).
 
 ## Laptop: install the app (macOS)
 
@@ -87,8 +126,9 @@ The ones you may notice:
   Code there; install them yourself and Buzz finds them on `PATH`.
 - On Windows, hosts and `buzzd` listen and connect over `tcp://` only, not
   `unix://`.
-- HEIC avatars need `ffmpeg`: `brew install ffmpeg` on macOS, and on
-  Windows an `ffmpeg.exe` on `PATH`.
+- HEIC avatars need `ffmpeg`: `brew install ffmpeg` on macOS, on Windows
+  an `ffmpeg.exe` on `PATH`, and with the AppImage the distribution's
+  `ffmpeg` package.
 
 ### Builds
 

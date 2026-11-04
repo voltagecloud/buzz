@@ -18,6 +18,10 @@ on:
       - apps/buzz-gpui/.github/actions/**
       - apps/buzz-gpui/scripts/package-*
       - apps/buzz-gpui/scripts/build-package.sh
+      - apps/buzz-gpui/scripts/*-appimage.sh
+      # What the AppImage and --gst-check lanes exercise in the app.
+      - apps/buzz-gpui/crates/app/src/appimage.rs
+      - apps/buzz-gpui/crates/app/src/gst_bundle.rs
       - apps/buzz-gpui/scripts/check-remote-provider.mjs
       - apps/buzz-gpui/scripts/check-remote-provider.test.mjs
       - apps/buzz-gpui/scripts/test-package-build.py
@@ -79,23 +83,40 @@ jobs:
           echo "version=$upstream+voltage.$(( ${last:-0} + 1 ))" >> "$GITHUB_OUTPUT"
 
   linux:
-    name: GPUI Linux x86_64 (.deb)
+    name: GPUI Linux ${{ matrix.arch }} (.deb, .AppImage)
     needs: [version, package-contract]
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
     env:
       BUZZ_GPUI_RELEASE_VERSION: ${{ needs.version.outputs.version }}
+      BUZZ_GPUI_APPIMAGE: "1"
+    defaults:
+      run:
+        working-directory: apps/buzz-gpui
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
-      # Builds inside ubuntu:26.04, so the package links Ubuntu's libraries.
+      # Builds inside ubuntu:24.04, so the packages link Ubuntu's libraries
+      # and need only its glibc.
       - run: scripts/package-deb.sh
-        working-directory: apps/buzz-gpui
+      # The AppImage runs on other distributions, with only what it carries
+      # and the desktop libraries every system has.
+      - run: scripts/check-appimage.sh dist/*.AppImage
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: buzz-gpui-linux-x86_64
-          path: apps/buzz-gpui/dist/*.deb
+          name: buzz-gpui-linux-${{ matrix.arch }}
+          path: |
+            apps/buzz-gpui/dist/*.deb
+            apps/buzz-gpui/dist/*.AppImage
           if-no-files-found: error
 
   macos:
@@ -214,3 +235,58 @@ jobs:
             --title "Buzz GPUI ${TAG#v}" --notes "$notes" --draft
           gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY"
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+
+  # Nix users install a release through the flake's buzz-gpui-voltage-bin,
+  # which pins the release's AppImages in apps/buzz-gpui/nix/release.json.
+  # main takes changes only through reviewed pull requests, so this proposes
+  # the new pin as one. A job of its own, so a failure here can be re-run
+  # without publishing the release again.
+  nix-pin:
+    name: GPUI pin the release for Nix
+    if: github.event_name == 'workflow_dispatch'
+    needs: [version, release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          pattern: buzz-gpui-linux-*
+          merge-multiple: true
+      - run: python3 apps/buzz-gpui/scripts/pin-nix-release.py "$VERSION" "$GITHUB_REPOSITORY" dist
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+      # A commit made through the API is signed by GitHub, as main requires.
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          branch="chore/gpui-nix-pin-v$VERSION"
+          title="chore(gpui): pin Buzz GPUI $VERSION for Nix"
+          # A re-run starts the branch, which only this job writes, again.
+          gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$branch" >/dev/null 2>&1 || true
+          gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/heads/$branch" -f sha="$GITHUB_SHA" >/dev/null
+          jq -n \
+            --arg repository "$GITHUB_REPOSITORY" --arg branch "$branch" --arg head "$GITHUB_SHA" \
+            --arg headline "$title" \
+            --arg contents "$(base64 -w0 apps/buzz-gpui/nix/release.json)" \
+            '{
+              query: "mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid } } }",
+              variables: { input: {
+                branch: { repositoryNameWithOwner: $repository, branchName: $branch },
+                expectedHeadOid: $head,
+                message: {
+                  headline: $headline,
+                  body: "Signed-off-by: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
+                },
+                fileChanges: { additions: [ { path: "apps/buzz-gpui/nix/release.json", contents: $contents } ] }
+              } }
+            }' | gh api graphql --input - >/dev/null
+          gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$branch" --title "$title" \
+            --body "Points the flake's \`buzz-gpui-voltage-bin\` at the AppImages of [v$VERSION]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/v$VERSION). Generated by the release workflow."

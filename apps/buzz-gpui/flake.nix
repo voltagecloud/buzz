@@ -229,8 +229,20 @@
               platforms = pkgs.lib.platforms.linux ++ pkgs.lib.platforms.darwin;
             };
           });
+        # The Voltage build without compiling it: the latest release's
+        # AppImage, which the release workflow pins in nix/release.json.
+        release = builtins.fromJSON (builtins.readFile ./nix/release.json);
+        releaseAsset = (release.assets or { }).${system} or null;
+        # nixpkgs.lib, not pkgs.lib: flake-utils reads every system's output
+        # names, and pkgs fails to evaluate on systems nixpkgs dropped.
+        voltageBin = nixpkgs.lib.optionalAttrs (releaseAsset != null) {
+          packages.buzz-gpui-voltage-bin = pkgs.callPackage ./nix/appimage.nix {
+            inherit (release) version;
+            inherit (releaseAsset) url hash;
+          };
+        };
       in
-      {
+      nixpkgs.lib.recursiveUpdate {
         # The dependencies build in their own derivation, so CI can keep
         # them and rebuild only this workspace's crates.
         packages.buzzd = craneLib.buildPackage (buzzdArgs // {
@@ -262,5 +274,5 @@
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath runtimeLibs;
           };
         };
-      });
+      } voltageBin);
 }

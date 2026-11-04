@@ -8,9 +8,12 @@
 pub enum InstallKind {
     /// Installed from the .deb: download, verify and install in place.
     Deb,
-    /// A packaged release elsewhere (macOS, Windows): the browser
-    /// downloads the new one.
-    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+    /// A packaged release elsewhere (macOS, Windows, a Linux AppImage):
+    /// the browser downloads the new one.
+    #[cfg_attr(
+        not(any(target_os = "linux", target_os = "macos", target_os = "windows")),
+        allow(dead_code)
+    )]
     Browser,
     /// Built from source: only say that a release exists.
     Dev,
@@ -39,10 +42,25 @@ impl InstallKind {
 
     #[cfg(target_os = "linux")]
     fn detect_release() -> Self {
-        let exe = std::env::current_exe().ok();
-        let from_deb = exe.is_some_and(|exe| running_binary(&exe) == DEB_BINARY)
-            && std::fs::read_to_string(DEB_FILE_LIST).is_ok_and(|list| lists_binary(&list));
-        if from_deb { Self::Deb } else { Self::Dev }
+        Self::linux_release(crate::appimage::path().is_some(), || {
+            let exe = std::env::current_exe().ok();
+            exe.is_some_and(|exe| running_binary(&exe) == DEB_BINARY)
+                && std::fs::read_to_string(DEB_FILE_LIST).is_ok_and(|list| lists_binary(&list))
+        })
+    }
+
+    /// A Linux release: an AppImage downloads the next one, even with the
+    /// .deb also installed; otherwise only the .deb's own binary updates in
+    /// place.
+    #[cfg(target_os = "linux")]
+    fn linux_release(from_appimage: bool, from_deb: impl FnOnce() -> bool) -> Self {
+        if from_appimage {
+            Self::Browser
+        } else if from_deb() {
+            Self::Deb
+        } else {
+            Self::Dev
+        }
     }
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -193,6 +211,24 @@ mod tests {
     use super::*;
     use core::prelude::v1::test;
     use std::path::Path;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_appimage_updates_through_the_browser() {
+        assert_eq!(
+            InstallKind::linux_release(true, || true),
+            InstallKind::Browser
+        );
+        assert_eq!(
+            InstallKind::linux_release(true, || false),
+            InstallKind::Browser
+        );
+        assert_eq!(InstallKind::linux_release(false, || true), InstallKind::Deb);
+        assert_eq!(
+            InstallKind::linux_release(false, || false),
+            InstallKind::Dev
+        );
+    }
 
     #[test]
     fn installs_through_apt_with_a_prompt() {
