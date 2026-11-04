@@ -3,9 +3,12 @@
 # users install it without compiling it. The AppImage carries the app, its
 # provider, Node, Buzz's plugins and GStreamer. The environment supplies
 # the desktop libraries the AppImage leaves to the system.
-{ lib, appimageTools, fetchurl, version, url, hash, src ? fetchurl { inherit url hash; } }:
+# `src` is not an argument: callPackage would fill it from nixpkgs' `src`
+# alias, which throws.
+{ lib, appimageTools, fetchurl, version, url, hash }:
 let
   pname = "buzz-gpui";
+  src = fetchurl { inherit url hash; };
   contents = appimageTools.extractType2 { inherit pname version src; };
 in
 appimageTools.wrapType2 {
