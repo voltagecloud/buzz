@@ -237,6 +237,7 @@ jobs:
         run: |
           docker run --rm "$IMAGE" --help
           docker run --rm "$IMAGE" reconcile --help
+          docker run --rm "$IMAGE" serve --help | grep -- '--mention-launch'
       - name: Relay smoke test
         if: matrix.image == 'buzz-relay'
         run: bash voltage/images/test-relay-image.sh "$IMAGE"
@@ -304,7 +305,9 @@ jobs:
           tags: ${{ env.IMAGE }}
       - name: Reaper smoke test
         if: matrix.image == 'buzz-sandbox-reaper'
-        run: docker run --rm "$IMAGE" --help
+        run: |
+          docker run --rm "$IMAGE" --help
+          docker run --rm "$IMAGE" serve --help | grep -- '--mention-launch'
       - name: Relay smoke test
         if: matrix.image == 'buzz-relay'
         run: bash voltage/images/test-relay-image.sh "$IMAGE"

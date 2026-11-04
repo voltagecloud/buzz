@@ -13,8 +13,8 @@ use sha2::{Digest, Sha256};
 
 use crate::manager::refusal;
 
-const DATA_KEY: &str = "launch.json";
-const LABEL: &str = "buzz.voltage.cloud/mobile-launch";
+pub(crate) const DATA_KEY: &str = "launch.json";
+pub(crate) const LABEL: &str = "buzz.voltage.cloud/mobile-launch";
 
 fn store_failed() -> Value {
     refusal(
@@ -23,7 +23,7 @@ fn store_failed() -> Value {
     )
 }
 
-fn relay_endpoint(text: &str) -> Result<String, Value> {
+pub(crate) fn relay_endpoint(text: &str) -> Result<String, Value> {
     let url = url::Url::parse(text).map_err(|_| invalid())?;
     if !matches!(url.scheme(), "wss" | "ws") || url.host_str().is_none() {
         return Err(invalid());
@@ -49,11 +49,11 @@ fn invalid() -> Value {
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Registration {
-    version: u32,
-    owner: PublicKey,
-    agent: PublicKey,
-    relay: String,
-    payload: Value,
+    pub(crate) version: u32,
+    pub(crate) owner: PublicKey,
+    pub(crate) agent: PublicKey,
+    pub(crate) relay: String,
+    pub(crate) payload: Value,
 }
 
 impl Registration {
@@ -77,7 +77,7 @@ impl Registration {
         })
     }
 
-    fn name(owner: PublicKey, agent: PublicKey, relay: &str) -> String {
+    pub(crate) fn name(owner: PublicKey, agent: PublicKey, relay: &str) -> String {
         let hash = Sha256::digest(format!("{owner}\n{agent}\n{relay}").as_bytes());
         let hex: String = hash[..20].iter().map(|b| format!("{b:02x}")).collect();
         format!("buzz-mobile-launch-{hex}")
@@ -208,6 +208,14 @@ impl Start {
     /// The addressed agent, used to confine the managed provider target.
     pub fn agent(&self) -> PublicKey {
         self.agent
+    }
+
+    /// Verified channel and thread for an ordinary startup failure reply.
+    pub(crate) fn conversation(&self) -> (&str, &str) {
+        (
+            self.scope["channel_id"].as_str().unwrap_or_default(),
+            self.scope["thread_root"].as_str().unwrap_or_default(),
+        )
     }
 
     /// Read only the verified owner's namespace. Recheck all saved identity

@@ -421,6 +421,53 @@ fn op_matches(op: Op, request: &Request) -> bool {
 }
 
 impl Manager {
+    /// Registry discovery uses only the manager's configured namespaces.
+    pub(crate) fn mention_bindings(&self) -> impl Iterator<Item = (PublicKey, &Developer)> {
+        self.config
+            .developers
+            .iter()
+            .map(|(owner, developer)| (*owner, developer))
+    }
+
+    /// Share the confined manager's existing Kubernetes client with its inbox.
+    pub(crate) fn cluster(&self) -> kube::Client {
+        self.client.clone()
+    }
+
+    /// Reuse mobile start validation without manufacturing an owner control event.
+    pub(crate) async fn start_mention(
+        &self,
+        owner: PublicKey,
+        agent: PublicKey,
+        relay: &str,
+        event: &Event,
+    ) -> serde_json::Value {
+        let Some(developer) = self.config.developer(&owner) else {
+            return refusal(ErrorCode::UnauthorizedOwner, "owner is not configured");
+        };
+        let start = match Start::admit(
+            serde_json::json!({"agent_pubkey": agent, "relay_url": relay, "trigger": event}),
+            owner,
+            Timestamp::now().as_secs(),
+        ) {
+            Ok(start) => start,
+            Err(error) => return error,
+        };
+        Work::Start {
+            start,
+            target: Target::Managed {
+                client: self.client.clone(),
+                namespace: developer.namespace.clone(),
+                agent,
+                owner,
+                defaults: self.defaults.clone(),
+                env: self.config.launch_env(developer),
+            },
+        }
+        .run(self)
+        .await
+    }
+
     pub fn new(
         keys: Keys,
         config: ManagerConfig,
