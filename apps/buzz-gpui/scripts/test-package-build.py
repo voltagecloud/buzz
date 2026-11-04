@@ -9,7 +9,7 @@ import unittest
 
 
 class PackageBuild(unittest.TestCase):
-    def run_build(self, voltage, windows=False, fail=False):
+    def run_build(self, voltage, windows=False, fail=False, cross=None):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -29,7 +29,7 @@ provider = "buzz-backend-relay" in args
 if provider and os.environ.get("FAIL_PROVIDER") == "1":
     sys.exit(9)
 target = pathlib.Path(args[args.index("--target-dir")+1] if provider else os.environ["CARGO_TARGET_DIR"])
-release = target / "release"
+release = target / os.environ.get("CARGO_BUILD_TARGET", "") / "release"
 release.mkdir(parents=True, exist_ok=True)
 name = "buzz-backend-relay" if provider else "buzz-gpui"
 if os.environ.get("OS") == "Windows_NT":
@@ -41,10 +41,21 @@ if os.environ.get("OS") == "Windows_NT":
                    CALLS=str(root/"calls.jsonl"), CARGO_TARGET_DIR=str(root/"build"),
                    BUZZ_GPUI_VOLTAGE="1" if voltage else "0",
                    OS="Windows_NT" if windows else "Linux", FAIL_PROVIDER="1" if fail else "0")
+        env.pop("CARGO_BUILD_TARGET", None)
+        if cross:
+            env["CARGO_BUILD_TARGET"] = cross
         result = subprocess.run(["bash", str(scripts/"build-package.sh")],
                                 env=env, capture_output=True, text=True, timeout=10)
         calls = [json.loads(line) for line in (root/"calls.jsonl").read_text().splitlines()]
         return root, result, calls
+
+    def test_cross_build_stages_the_provider_beside_the_cross_built_app(self):
+        root, result, calls = self.run_build(True, cross="x86_64-apple-darwin")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(calls), 2)
+        staged = root/"build"/"x86_64-apple-darwin"/"release"/"buzz-backend-relay"
+        self.assertEqual(staged.read_text(), "fresh buzz-backend-relay")
+        self.assertFalse((root/"build"/"release"/"buzz-backend-relay").exists())
 
     def test_voltage_build_enables_remote_ui_and_stages_the_same_builds_provider(self):
         for windows in [False, True]:
