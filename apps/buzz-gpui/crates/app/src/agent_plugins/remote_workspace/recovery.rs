@@ -115,8 +115,27 @@ impl View {
 struct Entry {
     /// The start that failed, sent again by its actions.
     session: SandboxSession,
+    replay_floor: u64,
     view: View,
     busy: bool,
+}
+
+impl Entry {
+    fn request(&self, action: Action) -> Option<SandboxRequest> {
+        if self.busy {
+            return None;
+        }
+        let session = self.session.clone();
+        match action {
+            Action::Recover(mode) => Some(SandboxRequest::Recover {
+                session,
+                mode,
+                replay_floor: Some(self.replay_floor),
+            }),
+            Action::End | Action::Check => Some(SandboxRequest::End { session }),
+            Action::Dismiss => None,
+        }
+    }
 }
 
 /// Failed starts awaiting a choice, and which agents' providers can end
@@ -151,7 +170,12 @@ impl Prompts {
     /// Records a start that failed with a lifecycle code, and clears the
     /// thread's prompt once one works. Returns whether a prompt was
     /// recorded.
-    pub fn started(&mut self, (session, result): &Sent, name: &str) -> bool {
+    pub fn started(&mut self, sent: &Sent, name: &str) -> bool {
+        let Sent {
+            session,
+            result,
+            replay_floor,
+        } = sent;
         let Some((key, scope)) = key_of(session) else {
             return false;
         };
@@ -175,6 +199,7 @@ impl Prompts {
         });
         let entry = Entry {
             session: session.clone(),
+            replay_floor: *replay_floor,
             view,
             busy: false,
         };
@@ -244,10 +269,10 @@ pub fn started(sent: &Sent, name: &str, cx: &mut App) {
         return;
     }
     let recorded = cx.update_global(|prompts: &mut Prompts, _| prompts.started(sent, name));
-    let pubkey = sent.0.pubkey.clone();
+    let pubkey = sent.session.pubkey.clone();
     let prompts = cx.global::<Prompts>();
     if recorded && !prompts.lifecycle.contains_key(&pubkey) && !prompts.checking.contains(&pubkey) {
-        check_lifecycle(&sent.0, cx);
+        check_lifecycle(&sent.session, cx);
     }
     thread_banners::refresh(cx);
 }
@@ -317,17 +342,15 @@ fn act(key: &RecoveryPromptKey, action: Action, cx: &mut App) {
     let Some(entry) = cx.global::<Prompts>().entries.get(key).cloned() else {
         return;
     };
-    let (pubkey, session) = (entry.session.pubkey.clone(), entry.session);
-    let request = match action {
-        _ if entry.busy => return,
-        Action::Dismiss => {
-            cx.global_mut::<Prompts>().clear(key);
-            thread_banners::refresh(cx);
-            return;
-        }
-        Action::Recover(mode) => SandboxRequest::Recover { session, mode },
-        Action::End | Action::Check => SandboxRequest::End { session },
+    if action == Action::Dismiss && !entry.busy {
+        cx.global_mut::<Prompts>().clear(key);
+        thread_banners::refresh(cx);
+        return;
+    }
+    let Some(request) = entry.request(action) else {
+        return;
     };
+    let pubkey = entry.session.pubkey.clone();
     let Some(link) = link_of(&pubkey, cx) else {
         return;
     };
@@ -417,10 +440,39 @@ mod tests {
         );
     }
 
+    fn sent(root: char, result: Result<(), SessionError>) -> Sent {
+        Sent {
+            session: session(root),
+            result,
+            replay_floor: 1_700_000_123,
+        }
+    }
+
+    #[test]
+    fn recovery_buttons_replay_the_failed_mention_for_both_modes() {
+        let mut prompts = Prompts::default();
+        assert!(prompts.started(&sent('c', Err(coded("session_ended"))), "Ada"));
+        let shown = prompts.for_thread(&thread('c'));
+        let entry = &shown[0].1;
+        for mode in [RecoveryMode::Checkpoint, RecoveryMode::Fresh] {
+            let Some(SandboxRequest::Recover {
+                session,
+                mode: requested,
+                replay_floor,
+            }) = entry.request(Action::Recover(mode))
+            else {
+                panic!("expected recovery request")
+            };
+            assert_eq!(requested, mode);
+            assert_eq!(session.scope.thread_root, "c".repeat(64));
+            assert_eq!(replay_floor, Some(1_700_000_123));
+        }
+    }
+
     #[test]
     fn a_coded_failure_records_a_prompt_and_a_success_clears_it() {
         let mut prompts = Prompts::default();
-        assert!(prompts.started(&(session('c'), Err(coded("session_ended"))), "Ada"));
+        assert!(prompts.started(&sent('c', Err(coded("session_ended"))), "Ada"));
         let shown = prompts.for_thread(&thread('c'));
         assert_eq!(shown.len(), 1);
         assert_eq!(shown[0].0.agent_name, "Ada");
@@ -432,17 +484,17 @@ mod tests {
 
         // A failure without a lifecycle code asks for nothing.
         let transient = SessionError::from("The cluster is unreachable");
-        assert!(!prompts.started(&(session('d'), Err(transient)), "Ada"));
+        assert!(!prompts.started(&sent('d', Err(transient)), "Ada"));
         assert!(prompts.for_thread(&thread('d')).is_empty());
 
-        assert!(!prompts.started(&(session('c'), Ok(())), "Ada"));
+        assert!(!prompts.started(&sent('c', Ok(())), "Ada"));
         assert!(prompts.for_thread(&thread('c')).is_empty());
     }
 
     #[test]
     fn an_end_reply_picks_the_next_banner() {
         let mut prompts = Prompts::default();
-        prompts.started(&(session('c'), Err(coded("session_active"))), "Ada");
+        prompts.started(&sent('c', Err(coded("session_active"))), "Ada");
         let key = key_of(&session('c')).unwrap().0;
         let view = |prompts: &Prompts| prompts.entries[&key].view.clone();
         assert_eq!(view(&prompts).kind, RecoveryKind::EndFirst);

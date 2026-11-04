@@ -152,7 +152,17 @@ async fn a_mention_starts_its_threads_session() {
     )
     .await
     .unwrap();
-    assert!(matches!(started, Some((_, Ok(())))), "{started:?}");
+    assert!(
+        matches!(
+            started,
+            Some(Sent {
+                result: Ok(()),
+                replay_floor: 1_700_000_123,
+                ..
+            })
+        ),
+        "{started:?}"
+    );
     let sent: [SandboxRequest; 1] = sent.lock().unwrap().clone().try_into().unwrap();
     let [
         SandboxRequest::Start {
@@ -350,7 +360,17 @@ async fn a_relay_mention_starts_its_session_through_the_host() {
         "provider_config": {"relay_url": RELAY, "manager_pubkey": MANAGER},
     });
     let started = deliver(delivery, RELAY.into()).await.unwrap();
-    assert!(matches!(started, Some((_, Ok(())))), "{started:?}");
+    assert!(
+        matches!(
+            started,
+            Some(Sent {
+                result: Ok(()),
+                replay_floor: 1_700_000_123,
+                ..
+            })
+        ),
+        "{started:?}"
+    );
     let [SandboxRequest::Start { session, .. }] = &sent.lock().unwrap()[..] else {
         panic!("expected one Start");
     };

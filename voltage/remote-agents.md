@@ -334,6 +334,10 @@ Entering a Codex access token replaces a stored OpenAI API key, and entering a C
 3. Reply in the same thread to continue the session.
 4. Select **End session** in the thread banner to save a checkpoint and stop the Sandbox. Select **Recover from checkpoint** to continue from that checkpoint later.
 
+When a mention fails because its session ended, recovery replays that mention after restoring or starting the workspace.
+This requires an updated desktop and host; existing clients retain their earlier recovery behavior.
+The replay timestamp belongs to that recovery request and does not change the saved agent configuration.
+
 Each thread gets its own Sandbox, so threads run in parallel. A developer can have five sessions at the same time. A session stops after 12 hours.
 
 ### Coordinate a team

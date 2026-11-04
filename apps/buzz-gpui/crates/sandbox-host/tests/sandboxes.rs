@@ -251,7 +251,15 @@ async fn a_relay_session_runs_the_relay_provider_by_its_id() {
     .await;
     assert!(matches!(ended, SandboxResponse::Ended { .. }), "{ended:?}");
     let mode = RecoveryMode::Fresh;
-    let recovered = sandbox(&host, SandboxRequest::Recover { session, mode }).await;
+    let recovered = sandbox(
+        &host,
+        SandboxRequest::Recover {
+            session,
+            mode,
+            replay_floor: Some(1_700_000_123),
+        },
+    )
+    .await;
     assert!(
         matches!(recovered, SandboxResponse::Started),
         "{recovered:?}"
@@ -262,6 +270,10 @@ async fn a_relay_session_runs_the_relay_provider_by_its_id() {
     assert_eq!(deploy["op"], "deploy");
     assert_eq!(stop["op"], "stop");
     assert_eq!(recover["op"], "deploy");
+    assert_eq!(
+        recover["agent"]["launch"]["policy_env"]["BUZZ_ACP_REPLAY_FLOOR"],
+        "1700000123"
+    );
     assert_eq!(
         recover["provider_config"]["sandbox"]["recovery"]["mode"],
         "fresh"

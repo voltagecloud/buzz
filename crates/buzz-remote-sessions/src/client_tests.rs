@@ -503,3 +503,37 @@ async fn operations_on_one_agent_wait_for_its_lock() {
         .unwrap();
     assert_eq!(*source.rebuilds.lock().unwrap(), ["idle", "busy"]);
 }
+
+#[tokio::test]
+async fn recovery_replays_the_failed_mention_without_persisting_its_floor() {
+    let source = FakeSource::default().with("thread-agent", "kubernetes", json!({"sandbox": true}));
+    let provider = Provider::new();
+    provider.install(
+        "kubernetes",
+        json!(LIFECYCLE),
+        json!({"ok": true, "agent_id": "remote"}),
+    );
+    let sessions = provider.sessions(&source);
+    for mode in [RecoveryMode::Checkpoint, RecoveryMode::Fresh] {
+        sessions
+            .recover_with_replay_floor(
+                "thread-agent",
+                tenant(RELAY, OWNER),
+                &thread(),
+                mode,
+                Some(1_700_000_123),
+            )
+            .await
+            .unwrap();
+        let request = provider.take_request().unwrap();
+        assert_eq!(
+            request["agent"]["launch"]["policy_env"][crate::REPLAY_FLOOR_ENV_VAR],
+            "1700000123"
+        );
+        assert!(
+            source.records.lock().unwrap()["thread-agent"].payload["launch"]
+                .get("policy_env")
+                .is_none()
+        );
+    }
+}

@@ -143,7 +143,7 @@ impl AgentType for RemoteWorkspace {
                 return Ok(());
             };
             cx.update(|cx| recovery::started(&sent, &name, cx));
-            sent.1.map_err(|error| error.message)
+            sent.result.map_err(|error| error.message)
         })
     }
 
@@ -174,11 +174,21 @@ pub(crate) async fn deliver(delivery: Delivery, relay: String) -> Result<Option<
         Ok(()) => WorkOutcome::ok(),
         Err(error) => WorkOutcome::failed(error.message.clone()),
     });
-    Ok(Some((session, result)))
+    Ok(Some(Sent {
+        session,
+        result,
+        replay_floor,
+    }))
 }
 
 /// A session request the host answered.
-pub(crate) type Sent = (SandboxSession, Result<(), SessionError>);
+#[derive(Debug)]
+pub(crate) struct Sent {
+    pub session: SandboxSession,
+    pub result: Result<(), SessionError>,
+    /// The signed mention that requested this start, retained for recovery.
+    pub replay_floor: u64,
+}
 
 /// The mention's thread session and the time the harness replays from,
 /// for a mention by the owner or an agent it attested.
