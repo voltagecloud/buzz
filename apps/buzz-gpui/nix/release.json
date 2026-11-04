@@ -1,1 +1,13 @@
-{}
+{
+  "version": "0.2.0+voltage.2",
+  "assets": {
+    "x86_64-linux": {
+      "url": "https://github.com/voltagecloud/buzz/releases/download/v0.2.0%2Bvoltage.2/Buzz-0.2.0%2Bvoltage.2-linux-x86_64.AppImage",
+      "hash": "sha256-nsgTxC5s8E1jOsfZCivqddmFLjTYU6kdsLThUJwxSKU="
+    },
+    "aarch64-linux": {
+      "url": "https://github.com/voltagecloud/buzz/releases/download/v0.2.0%2Bvoltage.2/Buzz-0.2.0%2Bvoltage.2-linux-aarch64.AppImage",
+      "hash": "sha256-Dfyft/THmE1iW2soZjrfjR4LdmVQxSZovqJT6ymAanw="
+    }
+  }
+}
