@@ -11,6 +11,7 @@ mod audience_address;
 mod canvas;
 mod channel;
 mod channel_activity;
+mod channel_agent_sharing;
 mod channel_diagnostics;
 mod channel_menu;
 pub mod channel_panels;
