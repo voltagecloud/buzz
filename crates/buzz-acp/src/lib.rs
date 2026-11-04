@@ -22,6 +22,8 @@ mod recovery_wake;
 mod relay;
 mod run_task;
 mod runtime;
+/// Shared channel task admission through the existing encrypted control plane.
+pub mod sharing;
 use runtime::{AgentRuntime, PoolStartup, SessionMode};
 mod scope;
 mod setup_mode;
@@ -622,6 +624,7 @@ mod inbound_author_gate {
         relay_self: Option<String>,
         // None means no authoritative NIP-11 result yet, including at startup.
         refreshed_generation: Option<u64>,
+        sharing: Option<std::sync::Arc<crate::sharing::Client>>,
     }
 
     pub(crate) fn refresh_needed(refreshed_generation: Option<u64>, event_generation: u64) -> bool {
@@ -640,6 +643,7 @@ mod inbound_author_gate {
                 agent_pubkey_hex: agent_pubkey_hex.to_string(),
                 relay_self,
                 refreshed_generation: completed.then_some(0),
+                sharing: None,
             }
         }
 
@@ -725,6 +729,73 @@ mod inbound_author_gate {
                 allowed,
                 is_dm,
             }
+        }
+
+        pub(crate) fn enable_sharing(
+            &mut self,
+            sharing: Option<std::sync::Arc<crate::sharing::Client>>,
+        ) {
+            self.sharing = sharing;
+        }
+
+        pub(crate) async fn authorize_shared_listener_event(
+            &mut self,
+            buzz_event: relay::BuzzEvent,
+            respond_to: &RespondTo,
+            allowlist: &HashSet<String>,
+            owner_cache: &OwnerCache,
+            channel_info: &pool::ChannelInfoResolver,
+            rest_client: &relay::RestClient,
+        ) -> Result<Option<AuthorizedListenerEvent>, crate::sharing::Error> {
+            if self.sharing.is_none() {
+                return Ok(self
+                    .authorize_listener_event(
+                        buzz_event,
+                        respond_to,
+                        allowlist,
+                        owner_cache,
+                        channel_info,
+                        rest_client,
+                    )
+                    .await);
+            }
+            let decision = self
+                .evaluate_listener_event(
+                    &buzz_event,
+                    respond_to,
+                    allowlist,
+                    owner_cache,
+                    channel_info,
+                    rest_client,
+                )
+                .await;
+            if decision.allowed {
+                return Ok(Some(AuthorizedListenerEvent {
+                    buzz_event,
+                    effective_author: decision.effective_author,
+                }));
+            }
+            if matches!(respond_to, RespondTo::Owner) && !decision.is_dm {
+                if let Some(sharing) = &self.sharing {
+                    if sharing.accepts(&buzz_event.event) {
+                        let refusal = match sharing.authorize(&buzz_event.event).await {
+                            Ok(None) => {
+                                return Ok(Some(AuthorizedListenerEvent {
+                                    buzz_event,
+                                    effective_author: decision.effective_author,
+                                }))
+                            }
+                            Ok(Some(reason)) => reason,
+                            Err(error) => error.to_string(),
+                        };
+                        // Persist a visible refusal before handling a transient
+                        // outage; never abandon the task or kill an in-flight turn.
+                        sharing.refuse(&buzz_event.event, &refusal).await?;
+                        return Ok(None);
+                    }
+                }
+            }
+            Ok(None)
         }
 
         pub(crate) async fn authorize_listener_event(
@@ -970,9 +1041,9 @@ async fn authorize_normal_listener_event(
     owner_cache: &OwnerCache,
     channel_info: &pool::ChannelInfoResolver,
     rest_client: &relay::RestClient,
-) -> Option<AuthorizedListenerEvent> {
+) -> std::result::Result<Option<AuthorizedListenerEvent>, sharing::Error> {
     author_gate
-        .authorize_listener_event(
+        .authorize_shared_listener_event(
             buzz_event,
             respond_to,
             allowlist,
@@ -3139,6 +3210,11 @@ async fn run_harness(
         channel_info_map,
         SessionMode::Conversation,
     )?);
+    author_gate_ctx.enable_sharing(ctx.sharing.clone());
+    let _shared_notice_worker = ctx
+        .sharing
+        .as_ref()
+        .map(|client| client.clone().start_notices());
 
     if !config.memory_enabled {
         tracing::info!(
@@ -3838,7 +3914,7 @@ async fn run_harness(
                                 &ctx.channel_info,
                                 &ctx.rest_client,
                             )
-                            .await
+                            .await?
                             else {
                                 continue;
                             };
@@ -7937,18 +8013,17 @@ mod author_gate_tests {
             event: relay_signed_workflow_dispatch(relay_keys, workflow_owner, &agent),
         };
         let authorized = match listener {
-            ListenerBoundary::Normal => {
-                authorize_normal_listener_event(
-                    &mut gate,
-                    event,
-                    &respond_to,
-                    &allowlist,
-                    &owner_cache,
-                    &channel_info,
-                    &rest_client,
-                )
-                .await
-            }
+            ListenerBoundary::Normal => authorize_normal_listener_event(
+                &mut gate,
+                event,
+                &respond_to,
+                &allowlist,
+                &owner_cache,
+                &channel_info,
+                &rest_client,
+            )
+            .await
+            .unwrap(),
             ListenerBoundary::Setup => {
                 setup_mode::authorize_setup_listener_event(
                     &mut gate,
@@ -10609,6 +10684,7 @@ mod build_mcp_servers_tests {
             relay_observer: false,
             activity_log: false,
             bound_session: None,
+            sharing_manager: None,
             checkpoint_on_stop: false,
             checkpoint_after_turn_secs: 0,
             exit_after_inactivity_secs: 0,
@@ -11710,6 +11786,7 @@ mod error_outcome_emission_tests {
             relay_observer: false,
             activity_log: false,
             bound_session: None,
+            sharing_manager: None,
             checkpoint_on_stop: false,
             checkpoint_after_turn_secs: 0,
             exit_after_inactivity_secs: 0,

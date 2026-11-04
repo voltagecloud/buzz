@@ -301,7 +301,19 @@ impl RespondToArg {
 
 #[derive(Subcommand)]
 pub enum AgentsCmd {
-    /// Let current members invoke your agent in one channel using explicit mentions
+    /// Delegate work to another shared agent, retaining the incoming task's provenance
+    Handoff {
+        /// Target agent pubkey (hex)
+        agent: String,
+        /// Incoming task event ID; must explicitly address this signing agent
+        #[arg(long)]
+        from: String,
+        /// Task text, or '-' to read stdin
+        #[arg(long)]
+        message: String,
+    },
+    /// Let current channel members invoke your agent and its configured tools by explicit mention.
+    /// Ownership and lifecycle control stay with you; DMs remain private.
     Share {
         /// Agent pubkey (hex); you must sign as its human owner
         agent: String,
@@ -2463,6 +2475,7 @@ mod tests {
                 "archived",
                 "draft-create",
                 "draft-update",
+                "handoff",
                 "share",
                 "sharing",
                 "unarchive",
@@ -2609,7 +2622,7 @@ mod tests {
     #[test]
     fn subcommand_counts_are_stable() {
         let expected: Vec<(&str, usize)> = vec![
-            ("agents", 8),
+            ("agents", 9),
             ("canvas", 4),
             ("channels", 16),
             ("dms", 4),

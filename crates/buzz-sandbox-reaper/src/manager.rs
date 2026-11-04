@@ -48,6 +48,8 @@ pub struct ManagerConfig {
     developers: HashMap<PublicKey, Developer>,
     /// The bucket every developer's checkpoints go to, under `<id>/`.
     checkpoint_bucket: String,
+    /// Enable only after deploying a matching shared-task agent image.
+    shared_tasks: bool,
 }
 
 /// One configured developer.
@@ -72,6 +74,8 @@ struct ConfigFile {
     developers: BTreeMap<String, DeveloperEntry>,
     /// The checkpoint bucket, shared by every developer under `<id>/`.
     checkpoint_bucket: String,
+    #[serde(default)]
+    shared_tasks: bool,
 }
 
 #[derive(Deserialize)]
@@ -196,6 +200,7 @@ impl ManagerConfig {
         Ok(Self {
             developers,
             checkpoint_bucket: file.checkpoint_bucket,
+            shared_tasks: file.shared_tasks,
         })
     }
 
@@ -478,7 +483,7 @@ impl Manager {
                 agent,
                 owner,
                 defaults: self.defaults.clone(),
-                env: self.config.launch_env(developer),
+                env: self.shared_env(developer),
             },
         }
         .run(self)
@@ -571,6 +576,11 @@ impl Manager {
                 developer: developer.clone(),
             }
         } else if op == Op::Admit {
+            if !self.config.shared_tasks {
+                return answer(
+                    serde_json::json!({"ok":false,"code":"shared_task_denied","error":"shared tasks are not enabled on this manager"}),
+                );
+            }
             let request = match serde_json::from_value(opened.request.payload.clone()) {
                 Ok(request) => request,
                 Err(_) => {
@@ -600,7 +610,7 @@ impl Manager {
                 agent: start.agent(),
                 owner,
                 defaults: self.defaults.clone(),
-                env: self.config.launch_env(developer),
+                env: self.shared_env(developer),
             };
             Work::Start { start, target }
         } else {
@@ -618,18 +628,31 @@ impl Manager {
             };
             match self.payload(&opened) {
                 // 6. The namespace comes from the verified owner, never the request.
-                Ok(request) => Work::Provider {
-                    request,
-                    registration,
-                    target: Target::Managed {
-                        client: self.client.clone(),
-                        namespace: developer.namespace.clone(),
-                        agent: opened.signer,
-                        owner,
-                        defaults: self.defaults.clone(),
-                        env: self.config.launch_env(developer),
-                    },
-                },
+                Ok(request) => {
+                    let thread = match &request {
+                        Request::Deploy(d) | Request::Stop(d) => {
+                            d.provider_config["sandbox"]["thread_root"].is_string()
+                        }
+                        Request::Info => false,
+                    };
+                    let env = if thread {
+                        self.shared_env(developer)
+                    } else {
+                        self.config.launch_env(developer)
+                    };
+                    Work::Provider {
+                        request,
+                        registration,
+                        target: Target::Managed {
+                            client: self.client.clone(),
+                            namespace: developer.namespace.clone(),
+                            agent: opened.signer,
+                            owner,
+                            defaults: self.defaults.clone(),
+                            env,
+                        },
+                    }
+                }
                 Err(response) => return answer(response),
             }
         };
@@ -778,6 +801,17 @@ impl Manager {
         })
     }
 
+    fn shared_env(&self, developer: &Developer) -> BTreeMap<String, String> {
+        let mut env = self.config.launch_env(developer);
+        if self.config.shared_tasks {
+            env.insert(
+                "BUZZ_ACP_SHARING_MANAGER".into(),
+                self.keys.public_key().to_hex(),
+            );
+        }
+        env
+    }
+
     pub(crate) async fn admit_shared(
         &self,
         owner: PublicKey,
@@ -786,6 +820,9 @@ impl Manager {
         request: &crate::shared_tasks::Request,
     ) -> serde_json::Value {
         use buzz_sdk::sharing::policy::Error as PolicyError;
+        if !self.config.shared_tasks {
+            return serde_json::json!({"ok":false,"code":"shared_task_denied","error":"shared tasks are not enabled on this manager"});
+        }
         let result=tokio::time::timeout(std::time::Duration::from_secs(40),async {
             let task=match crate::shared_tasks::verify(self.client.clone(),namespace,owner,agent,request).await {
                 Ok(task)=>task,

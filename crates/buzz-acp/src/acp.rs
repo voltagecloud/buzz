@@ -113,6 +113,9 @@ pub enum AcpError {
     #[error("Protocol error: {0}")]
     Protocol(String),
 
+    #[error("Shared task permission: {0}")]
+    TaskPermission(String),
+
     #[error("Agent reported error (code {code}): {message}")]
     AgentError { code: i64, message: String },
 

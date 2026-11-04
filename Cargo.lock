@@ -1449,6 +1449,8 @@ dependencies = [
  "buzz-core",
  "buzz-persona",
  "buzz-sdk",
+ "buzz-session-control",
+ "buzz-ws-client",
  "chrono",
  "clap",
  "evalexpr",
