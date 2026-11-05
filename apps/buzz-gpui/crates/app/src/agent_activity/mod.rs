@@ -130,7 +130,8 @@ pub enum Capture {
     Error,
 }
 
-/// What views read; replaced as a whole when anything changes.
+/// What views read; replaced as a whole when anything changes, never
+/// edited in place, so work worked out from one stays true for its life.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Snapshot {
     pub status: FeedStatus,
@@ -155,6 +156,9 @@ pub struct Snapshot {
     /// `(channel, message)` pairs live turn starts name as their triggers:
     /// the messages telemetry may tie work to.
     pub requested: Arc<[(String, String)]>,
+    /// Request work already worked out from this snapshot: views ask on
+    /// every frame, the answer changes only with a new snapshot.
+    pub(crate) memo: request::Memo,
 }
 
 /// One page read from the archive, decrypted.
@@ -696,6 +700,7 @@ impl Activity {
             capture: self.capture,
             working_channels: working.into(),
             requested,
+            memo: request::Memo::default(),
         };
         if next == self.snapshot {
             return false;

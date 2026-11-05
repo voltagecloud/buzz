@@ -8,9 +8,69 @@ use super::local::{LocalWork, LocalWorkState, WorkStep, breathing, local_activit
 use super::transcript_model::{ItemKind, TranscriptTurn};
 use super::turns::{ActivityTurn, TurnState, parse_time};
 use super::{FeedStatus, Record, Snapshot, raw_records};
+use buzz_relay_client::EventId;
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::sync::Arc;
+use std::hash::Hash;
+use std::sync::{Arc, Mutex};
+
+/// Each message in a channel with work to show, as its bubble shows it.
+pub type MessageWorks = Arc<HashMap<EventId, Vec<RequestWork>>>;
+
+/// A request-work question: the channel and the message ids.
+type WorkKey = (String, Vec<String>);
+
+/// Answers the cap allows one snapshot to remember; past it the memo
+/// starts over.
+const MEMO_LIMIT: usize = 256;
+
+/// Request work worked out from one [`Snapshot`]. Reading records is
+/// costly and views ask on every frame while working dots animate, but a
+/// snapshot never changes, so its answers hold until the next one. A
+/// clone starts empty, and memos never make snapshots differ.
+#[derive(Default)]
+pub struct Memo {
+    work: Mutex<HashMap<WorkKey, Vec<RequestWork>>>,
+    messages: Mutex<HashMap<String, MessageWorks>>,
+}
+
+impl Clone for Memo {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl PartialEq for Memo {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl std::fmt::Debug for Memo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Memo")
+    }
+}
+
+/// The remembered answer for `key`, else `work`'s, then remembered. The
+/// lock is not held while working.
+fn remembered<K: Eq + Hash, V: Clone>(
+    memo: &Mutex<HashMap<K, V>>,
+    key: K,
+    work: impl FnOnce() -> V,
+) -> V {
+    let lock = || memo.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(value) = lock().get(&key) {
+        return value.clone();
+    }
+    let value = work();
+    let mut memo = lock();
+    if memo.len() >= MEMO_LIMIT {
+        memo.clear();
+    }
+    memo.insert(key, value.clone());
+    value
+}
 
 /// A request's state, from local work or from telemetry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -216,8 +276,19 @@ pub struct RequestWork {
     pub working: bool,
 }
 
-/// Each agent handling any of `ids` in `channel`, sorted by key.
+/// Each agent handling any of `ids` in `channel`, sorted by key;
+/// remembered for the snapshot.
 pub fn request_work(snapshot: &Snapshot, channel: &str, ids: &[&str]) -> Vec<RequestWork> {
+    let key: WorkKey = (
+        channel.to_string(),
+        ids.iter().map(|id| id.to_string()).collect(),
+    );
+    remembered(&snapshot.memo.work, key, || {
+        work_out(snapshot, channel, ids)
+    })
+}
+
+fn work_out(snapshot: &Snapshot, channel: &str, ids: &[&str]) -> Vec<RequestWork> {
     let live: Vec<Arc<Record>> = snapshot
         .records
         .iter()
@@ -354,6 +425,23 @@ pub fn message_activity(snapshot: &Snapshot, channel: &str, message: &str) -> Ve
             }
         })
         .collect()
+}
+
+/// Every message in `channel` with work to show, by message, remembered
+/// for the snapshot.
+pub fn message_works(snapshot: &Snapshot, channel: &str) -> MessageWorks {
+    remembered(&snapshot.memo.messages, channel.to_string(), || {
+        Arc::new(
+            candidates(snapshot, channel)
+                .into_iter()
+                .filter_map(|id| {
+                    let works = message_activity(snapshot, channel, &id);
+                    (!works.is_empty()).then(|| Some((EventId::from_hex(&id).ok()?, works)))
+                })
+                .flatten()
+                .collect(),
+        )
+    })
 }
 
 /// Agents working in the thread `root` (`threadWorkingAgents`), from the

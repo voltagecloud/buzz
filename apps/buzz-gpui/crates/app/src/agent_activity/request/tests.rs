@@ -238,3 +238,65 @@ fn a_recovered_session_shows_working_over_the_failure_it_replaced() {
     assert!(f.bubble(&mention)[0].working);
     assert_eq!(f.thread(&[&agent]), vec![agent.clone()]);
 }
+
+#[test]
+fn a_snapshot_remembers_its_request_work_until_replaced() {
+    let (request, root) = (key('c'), key('b'));
+    let mut f = Fixture::new();
+    f.send("turn_started", "one", &request);
+    f.message(&request, &root);
+    f.send("turn_liveness", "one", &request);
+    let s = f.snapshot();
+    assert_eq!(
+        request_work(s, "channel", &[&request]),
+        work_out(s, "channel", &[&request])
+    );
+    // A remembered answer is served without reading records again.
+    s.memo
+        .work
+        .lock()
+        .unwrap()
+        .insert(("channel".into(), vec![request.clone()]), Vec::new());
+    assert!(f.bubble(&request).is_empty());
+    assert!(bubbled_agents(f.snapshot(), "channel", None).is_empty());
+    // New activity replaces the snapshot, and with it the memo.
+    f.send("turn_liveness", "one", &request);
+    assert!(f.bubble(&request)[0].working);
+    assert_eq!(
+        bubbled_agents(f.snapshot(), "channel", None),
+        vec![key('a')]
+    );
+}
+
+#[test]
+fn message_works_are_shared_until_activity_changes() {
+    let request = key('c');
+    let mut f = Fixture::new();
+    f.send("turn_started", "one", &request);
+    f.send("turn_liveness", "one", &request);
+    let first = message_works(f.snapshot(), "channel");
+    let id = EventId::from_hex(&request).unwrap();
+    assert!(first[&id][0].working);
+    assert_eq!(first.len(), 1);
+    assert!(Arc::ptr_eq(&first, &message_works(f.snapshot(), "channel")));
+    assert!(message_works(f.snapshot(), "elsewhere").is_empty());
+    f.send("turn_completed", "one", &request);
+    let after = message_works(f.snapshot(), "channel");
+    assert!(!Arc::ptr_eq(&first, &after));
+    assert!(after.is_empty());
+}
+
+#[test]
+fn a_memo_is_bounded_and_never_copied_or_compared() {
+    let request = key('c');
+    let mut f = Fixture::new();
+    f.send("turn_started", "one", &request);
+    let s = f.snapshot();
+    for n in 0..MEMO_LIMIT + 10 {
+        request_work(s, &format!("channel-{n}"), &[&request]);
+    }
+    assert!(s.memo.work.lock().unwrap().len() <= MEMO_LIMIT);
+    let copy = s.clone();
+    assert!(copy.memo.work.lock().unwrap().is_empty());
+    assert_eq!(&copy, s);
+}
