@@ -98,6 +98,9 @@ if mode == 'inherited-claude': env['CLAUDE_CODE_OAUTH_TOKEN'] = 'synthetic-unsel
 if mode == 'symlink':
     Path('/home/agent/.config').symlink_to('/tmp')
 if mode == 'missing': env['BUZZ_DEVELOPER_PROFILE_ARN'] = env['BUZZ_DEVELOPER_PROFILE_ARN'].replace('/profile-', '/profile-missing-')
+INHERITED_NAMES = {'OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_ACCESS_TOKEN', 'ANTHROPIC_API_KEY',
+                   'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'OPENROUTER_API_KEY',
+                   'CODEX_REFRESH_TOKEN_URL_OVERRIDE', 'CODEX_CA_CERTIFICATE'}
 probe = Path('/tmp/profile-adapter')
 probe.write_text(r"""#!/usr/bin/env python3
 import json, os, subprocess, sys
@@ -106,6 +109,11 @@ home = Path('/home/agent/.config/buzz-agent')
 if home.joinpath('github-token').read_text() != 'synthetic-profile-github': raise RuntimeError('GitHub token missing')
 for key, expected in EXPECTED.items():
     if os.environ.get(key) != expected: raise RuntimeError('runtime environment differs from profile')
+# Exactly the configured model credentials reach the agent's tool shell.
+forwarded = set(filter(None, os.environ.get('BUZZ_ACP_MCP_FORWARD_ENV', '').split(',')))
+models = {k for k, v in EXPECTED.items() if v and k in INHERITED}
+if not models <= forwarded or forwarded - models - {'CODEX_HOME'}:
+    raise RuntimeError('forwarded tool-shell variables differ from the profile credentials')
 if subprocess.check_output(['git','config','--global','user.email'], text=True).strip() != 'alice@example.invalid':
     raise RuntimeError('Git identity missing')
 Path('/tmp/profile-adapter.ran').touch()
@@ -113,7 +121,7 @@ for line in sys.stdin:
     value = json.loads(line)
     if value.get('method') == 'initialize':
         print(json.dumps({'jsonrpc':'2.0','id':value['id'],'result':{'protocolVersion':2,'agentCapabilities':{},'authMethods':[]}}), flush=True)
-""".replace('EXPECTED', repr(expected)))
+""".replace('EXPECTED', repr(expected)).replace('INHERITED', repr(INHERITED_NAMES)))
 probe.chmod(0o700)
 result = subprocess.run(['sprig-entrypoint', 'auth-methods', '--agent-command', str(probe), '--agent-args', '', '--json'],
                         env=env, capture_output=True, text=True, timeout=45)
