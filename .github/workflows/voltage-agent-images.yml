@@ -97,6 +97,7 @@ jobs:
     outputs:
       any: ${{ steps.select.outputs.any }}
       build: ${{ steps.select.outputs.build }}
+      agent: ${{ steps.select.outputs.agent }}
       merge: ${{ steps.select.outputs.merge }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -176,6 +177,7 @@ jobs:
             --args "${selected[@]}")
           {
             echo "any=$([ "${#selected[@]}" -gt 0 ] && echo true || echo false)"
+            echo "agent=$([[ " ${selected[*]} " == *" buzz-agent "* ]] && echo true || echo false)"
             echo "build=$build"
             echo "merge=$merge"
           } >> "$GITHUB_OUTPUT"
@@ -289,7 +291,7 @@ jobs:
   skills:
     name: Resolve engineering skills
     needs: changes
-    if: needs.changes.outputs.any == 'true' && github.repository == 'voltagecloud/buzz' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    if: needs.changes.outputs.agent == 'true' && github.repository == 'voltagecloud/buzz' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     environment: engineering-skills
@@ -319,13 +321,16 @@ jobs:
   # main: build each platform on its native runner and push it by digest.
   publish:
     name: Publish ${{ matrix.image }} (${{ matrix.arch }})
+    # A skills failure fails only the agent image: the relay and reaper still
+    # publish. skills is skipped when this run does not build the agent.
     needs: [changes, lint, skills]
-    if: needs.changes.outputs.any == 'true' && github.repository == 'voltagecloud/buzz' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.lint.result == 'success' && needs.skills.result != 'cancelled' && needs.changes.outputs.any == 'true' && github.repository == 'voltagecloud/buzz' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
-    # Holds the engineering-skills app secrets; restricted to main. The
-    # github-buzz-ecr-push role trusts this environment's OIDC subject.
-    environment: engineering-skills
+    # Only the agent image needs the engineering-skills app secrets, which this
+    # main-only environment holds. The github-buzz-ecr-push role trusts its
+    # OIDC subject; the other images keep the main branch subject.
+    environment: ${{ matrix.image == 'buzz-agent' && 'engineering-skills' || '' }}
     permissions:
       contents: read
       id-token: write # OIDC token for the github-buzz-ecr-push role
@@ -347,6 +352,12 @@ jobs:
           buildkitd-config-inline: |
             [worker.oci]
               max-parallelism = 2
+      - name: Require the resolved skills commit
+        if: matrix.image == 'buzz-agent'
+        env:
+          REVISION: ${{ needs.skills.outputs.revision }}
+        run: |
+          [[ "$REVISION" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::engineering skills were not resolved (skills job: ${{ needs.skills.result }})"; exit 1; }
       # Read-only, for engineering-skills alone, and revoked when the job ends.
       - name: Engineering skills token
         id: skills-token
