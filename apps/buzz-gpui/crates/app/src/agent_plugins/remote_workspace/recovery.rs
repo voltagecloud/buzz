@@ -233,11 +233,14 @@ impl Prompts {
             error: error.clone(),
         });
         self.generation += 1;
+        // An action still in flight for the replaced prompt keeps the
+        // buttons blocked until its request returns.
+        let busy = self.entries.get(&key).and_then(|entry| entry.busy);
         let entry = Entry {
             session: session.clone(),
             replay_floor: *replay_floor,
             view,
-            busy: None,
+            busy,
             generation: self.generation,
         };
         self.entries.insert(key, entry);
@@ -251,46 +254,52 @@ impl Prompts {
         self.entries.remove(key);
     }
 
-    /// Moves `key`'s prompt to a new generation and ends its action in
-    /// flight, so that action's answer is dropped. The prompt and its
-    /// buttons stay, so the owner can act again.
+    /// Moves `key`'s prompt to a new generation, so the answer of an
+    /// action in flight changes nothing but ending that action.
     fn supersede(&mut self, key: &RecoveryPromptKey) {
         if let Some(entry) = self.entries.get_mut(key) {
             self.generation += 1;
             entry.generation = self.generation;
-            entry.busy = None;
         }
     }
 
-    /// Whether `key`'s prompt is still the failure an action of
-    /// `generation` was sent for.
-    fn current(&self, key: &RecoveryPromptKey, generation: u64) -> bool {
-        self.entries
-            .get(key)
-            .is_some_and(|entry| entry.generation == generation)
-    }
-
-    /// An action's answer: a recovery clears the prompt; an End or a
-    /// failure picks the next banner. An answer for an older generation
-    /// changes nothing: a newer failed start replaced its prompt.
+    /// The answer to `action`, sent for the prompt's `generation`. It ends
+    /// the action in flight. If a newer failed start has since replaced
+    /// the prompt, that is all: the newer failure stays shown. Otherwise a
+    /// recovery clears the prompt, and an End or a failure picks the next
+    /// banner.
+    ///
+    /// Returns whether the thread's failures are resolved: true only when
+    /// a Recover for the current prompt started a session.
     pub fn answered(
         &mut self,
         key: &RecoveryPromptKey,
         generation: u64,
+        action: Action,
         answer: &Result<SandboxResponse, SessionError>,
-    ) {
-        let Some(entry) = self
-            .entries
-            .get_mut(key)
-            .filter(|entry| entry.generation == generation)
-        else {
-            return;
+    ) -> bool {
+        let Some(entry) = self.entries.get_mut(key) else {
+            return false;
         };
         entry.busy = None;
+        if entry.generation != generation {
+            return false;
+        }
         match answer {
-            Ok(SandboxResponse::Ended { state }) => entry.view = View::ended(*state),
-            Ok(_) => self.clear(key),
-            Err(error) => entry.view = entry.view.failed(error),
+            Ok(SandboxResponse::Ended { state }) => {
+                entry.view = View::ended(*state);
+                false
+            }
+            Err(error) => {
+                entry.view = entry.view.failed(error);
+                false
+            }
+            Ok(response) => {
+                let recovered = matches!(action, Action::Recover(_))
+                    && matches!(response, SandboxResponse::Started);
+                self.clear(key);
+                recovered
+            }
         }
     }
 
@@ -482,18 +491,14 @@ fn act(key: &RecoveryPromptKey, action: Action, cx: &mut App) {
             .await
             .unwrap_or_else(|_| Err("The request was cancelled".into()));
         cx.update(|cx| {
-            // A newer failed start may have replaced this prompt while the
-            // request ran; its failure must stay shown.
-            if !cx.global::<Prompts>().current(&key, generation) {
-                return;
-            }
-            if matches!(action, Action::Recover(_))
-                && matches!(&answer, Ok(SandboxResponse::Started))
-            {
+            // `answered` decides: a newer failed start may have replaced
+            // this prompt while the request ran, and its failure must stay.
+            let recovered = cx
+                .global_mut::<Prompts>()
+                .answered(&key, generation, action, &answer);
+            if recovered {
                 resolve(&session, cx);
             }
-            cx.global_mut::<Prompts>()
-                .answered(&key, generation, &answer);
             thread_banners::refresh(cx);
         });
     })
@@ -658,19 +663,22 @@ mod tests {
         let ending = Ok(SandboxResponse::Ended {
             state: EndState::Ending,
         });
-        prompts.answered(&key, generation, &ending);
+        assert!(!prompts.answered(&key, generation, Action::End, &ending));
         assert_eq!(view(&prompts).kind, RecoveryKind::Ending);
         let absent = Ok(SandboxResponse::Ended {
             state: EndState::Absent,
         });
-        prompts.answered(&key, generation, &absent);
+        assert!(!prompts.answered(&key, generation, Action::Check, &absent));
         assert_eq!(view(&prompts).kind, RecoveryKind::Recover);
         assert!(!view(&prompts).offers_checkpoint);
         // A failure without a code keeps the buttons.
-        prompts.answered(&key, generation, &Err("Timed out".into()));
+        let recover = Action::Recover(RecoveryMode::Fresh);
+        assert!(!prompts.answered(&key, generation, recover, &Err("Timed out".into())));
         assert_eq!(view(&prompts).kind, RecoveryKind::Recover);
         assert_eq!(view(&prompts).message, "Timed out");
-        prompts.answered(&key, generation, &Ok(SandboxResponse::Started));
+        // A recovery that starts a session clears the prompt and resolves
+        // the thread's failures.
+        assert!(prompts.answered(&key, generation, recover, &Ok(SandboxResponse::Started)));
         assert!(prompts.for_thread(&thread('c')).is_empty());
     }
 
@@ -698,60 +706,55 @@ mod tests {
         }
         let generation = prompts.entries[&key].generation;
         prompts.entries.get_mut(&key).unwrap().busy = Some(Action::End);
-        prompts.answered(&key, generation, &Err("Timed out".into()));
+        prompts.answered(&key, generation, Action::End, &Err("Timed out".into()));
         let (message, actions) = shown(&prompts.entries[&key], true);
         assert_eq!(message, "Timed out");
         assert!(actions.len() > 1, "the choices return after an answer");
     }
 
+    /// A Recover in flight while a later start fails, with or without a
+    /// lifecycle code. The stale answer only ends the action; the newer
+    /// failure stays, and its own answer still applies.
     #[test]
     fn an_older_answer_leaves_a_newer_failure_alone() {
-        let mut prompts = Prompts::default();
-        prompts.started(&sent('c', Err(coded("session_ended"))), "Ada");
-        let key = key_of(&session('c')).unwrap().0;
-        let older = prompts.entries[&key].generation;
-        prompts.entries.get_mut(&key).unwrap().busy = Some(Action::Recover(RecoveryMode::Fresh));
-        // While Recover runs, a later mention fails to start too.
-        prompts.started(&sent('c', Err(coded("config_differs"))), "Ada");
-        let newer = prompts.entries[&key].generation;
-        assert_ne!(older, newer);
-        assert!(!prompts.current(&key, older));
-        assert!(prompts.current(&key, newer));
+        let recover = Action::Recover(RecoveryMode::Fresh);
+        let coded_failure = || Err(coded("config_differs"));
+        let uncoded_failure = || Err(SessionError::from("The cluster is unreachable"));
+        for (later, recorded) in [
+            (coded_failure as fn() -> Result<(), SessionError>, true),
+            (uncoded_failure, false),
+        ] {
+            let mut prompts = Prompts::default();
+            prompts.started(&sent('c', Err(coded("session_ended"))), "Ada");
+            let key = key_of(&session('c')).unwrap().0;
+            let older = prompts.entries[&key].generation;
+            let request = prompts.entries[&key].request(recover);
+            assert!(request.is_some());
+            prompts.entries.get_mut(&key).unwrap().busy = Some(recover);
 
-        // The first Recover's answers arrive late: nothing changes.
-        let before = prompts.entries[&key].view.clone();
-        prompts.answered(&key, older, &Ok(SandboxResponse::Started));
-        assert_eq!(prompts.for_thread(&thread('c')).len(), 1);
-        assert_eq!(prompts.entries[&key].view, before);
-        prompts.answered(&key, older, &Err("Timed out".into()));
-        assert_eq!(prompts.entries[&key].view, before);
+            assert_eq!(prompts.started(&sent('c', later()), "Ada"), recorded);
+            let newer = prompts.entries[&key].generation;
+            assert_ne!(older, newer);
+            // The first Recover still runs: no second request can start.
+            assert_eq!(prompts.entries[&key].busy, Some(recover));
+            assert!(prompts.entries[&key].request(recover).is_none());
 
-        // The newer prompt's own answer still applies.
-        prompts.answered(&key, newer, &Ok(SandboxResponse::Started));
-        assert!(prompts.for_thread(&thread('c')).is_empty());
-    }
+            // Its Started answer arrives late: no resolution, prompt kept.
+            let before = prompts.entries[&key].view.clone();
+            let started = Ok(SandboxResponse::Started);
+            assert!(!prompts.answered(&key, older, recover, &started));
+            assert_eq!(prompts.for_thread(&thread('c')).len(), 1);
+            assert_eq!(prompts.entries[&key].view, before);
+            assert_eq!(prompts.entries[&key].busy, None, "the buttons return");
 
-    #[test]
-    fn an_uncoded_failure_fences_off_the_action_in_flight() {
-        let mut prompts = Prompts::default();
-        prompts.started(&sent('c', Err(coded("session_ended"))), "Ada");
-        let key = key_of(&session('c')).unwrap().0;
-        let older = prompts.entries[&key].generation;
-        prompts.entries.get_mut(&key).unwrap().busy = Some(Action::Recover(RecoveryMode::Fresh));
-        // While Recover runs, a later mention fails without a lifecycle code.
-        let transient = SessionError::from("The cluster is unreachable");
-        assert!(!prompts.started(&sent('c', Err(transient)), "Ada"));
-        assert!(!prompts.current(&key, older));
-        assert_eq!(prompts.entries[&key].busy, None, "the buttons return");
-
-        // The first Recover's Started answer arrives late: the prompt stays.
-        prompts.answered(&key, older, &Ok(SandboxResponse::Started));
-        assert_eq!(prompts.for_thread(&thread('c')).len(), 1);
+            // The newer prompt's own Recover still resolves and clears.
+            assert!(prompts.answered(&key, newer, recover, &started));
+            assert!(prompts.for_thread(&thread('c')).is_empty());
+        }
 
         // Without a prompt, an uncoded failure records nothing.
         let mut empty = Prompts::default();
-        let transient = SessionError::from("The cluster is unreachable");
-        assert!(!empty.started(&sent('c', Err(transient)), "Ada"));
+        assert!(!empty.started(&sent('c', uncoded_failure()), "Ada"));
         assert!(empty.entries.is_empty());
     }
 
