@@ -7,7 +7,7 @@
 use super::local::{LocalWork, LocalWorkState, WorkStep, breathing, local_activity};
 use super::transcript_model::{ItemKind, TranscriptTurn};
 use super::turns::{ActivityTurn, TurnState, parse_time};
-use super::{FeedStatus, Record, Snapshot, raw_records};
+use super::{FeedStatus, Record, Snapshot, children};
 use buzz_relay_client::EventId;
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -108,9 +108,77 @@ pub struct Selected {
     pub uncertain: bool,
 }
 
+/// What request selection reads from one envelope, or one batch child,
+/// parsed once when its record arrives (`requestActivity` reads the same
+/// fields from the JSON each time).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Event {
+    /// `channelId`, exactly as sent.
+    pub channel: String,
+    /// `kind`, or "" when absent.
+    pub kind: String,
+    /// `turnId`, when non-empty and at most 256 bytes.
+    pub turn: Option<String>,
+    /// `seq`, when within `0..2^53`.
+    pub seq: Option<i64>,
+    /// `timestamp`, in milliseconds.
+    pub at: Option<u64>,
+    /// A turn start's string `payload.triggeringEventIds`; empty for other
+    /// kinds, which no selection asks.
+    pub triggers: Vec<String>,
+}
+
+/// The events of a record's parsed plaintext, in order: a batch's
+/// children, else the envelope itself. Events naming no channel, and
+/// events with no usable turn id that are not turn starts, are left out:
+/// no selection can read them.
+pub(crate) fn events(raw: &Value) -> Vec<Event> {
+    children(raw)
+        .into_iter()
+        .filter_map(|value| {
+            let channel = value.get("channelId")?.as_str()?;
+            let kind = value.get("kind").and_then(Value::as_str).unwrap_or("");
+            let turn = value
+                .get("turnId")
+                .and_then(Value::as_str)
+                .filter(|turn| !turn.is_empty() && turn.len() <= 256);
+            let start = kind == "turn_started";
+            if turn.is_none() && !start {
+                return None;
+            }
+            let triggers = value
+                .get("payload")
+                .and_then(|p| p.get("triggeringEventIds"))
+                .and_then(Value::as_array)
+                .filter(|_| start)
+                .map(|ids| {
+                    ids.iter()
+                        .filter_map(|id| id.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(Event {
+                channel: channel.to_string(),
+                kind: kind.to_string(),
+                turn: turn.map(str::to_string),
+                seq: value
+                    .get("seq")
+                    .and_then(Value::as_i64)
+                    .filter(|seq| *seq >= 0 && *seq < (1 << 53)),
+                at: value
+                    .get("timestamp")
+                    .and_then(Value::as_str)
+                    .and_then(parse_time),
+                triggers,
+            })
+        })
+        .collect()
+}
+
 /// Turns whose start names one of `ids`, from captured trigger ids only:
 /// no inference from time or names, and no wider fallback when the start
-/// is missing.
+/// is missing. Reads the events parsed on arrival, never the JSON; an
+/// empty `channel` names no channel and selects nothing.
 pub fn request_activity(
     records: &[Arc<Record>],
     agent: &str,
@@ -119,52 +187,34 @@ pub fn request_activity(
 ) -> Selected {
     let mut selected = Selected::default();
     let wanted: HashSet<&str> = ids.iter().copied().filter(|id| super::hex64(id)).collect();
-    if wanted.is_empty() {
+    if wanted.is_empty() || channel.is_empty() {
         return selected;
     }
-    struct Parsed {
-        kind: String,
-        turn: String,
+    struct Parsed<'a> {
+        kind: &'a str,
+        turn: &'a str,
         seq: Option<i64>,
         admitted: bool,
-        triggers: Vec<String>,
+        triggers: &'a [String],
     }
-    let parsed: Vec<Parsed> = raw_records(records, agent, Some(channel))
-        .into_iter()
-        .filter_map(|record| {
-            let value: Value = serde_json::from_str(&record.plaintext).ok()?;
-            let turn = value.get("turnId")?.as_str()?;
-            if turn.is_empty() || turn.len() > 256 {
-                return None;
-            }
-            let admitted = value
-                .get("timestamp")
-                .and_then(Value::as_str)
-                .and_then(parse_time)
-                .is_some_and(|at| at <= record.received_at + 5000);
-            Some(Parsed {
-                kind: value
-                    .get("kind")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .into(),
-                turn: turn.into(),
-                seq: value
-                    .get("seq")
-                    .and_then(Value::as_i64)
-                    .filter(|seq| *seq >= 0 && *seq < (1 << 53)),
-                admitted,
-                triggers: value
-                    .get("payload")
-                    .and_then(|p| p.get("triggeringEventIds"))
-                    .and_then(Value::as_array)
-                    .map(|ids| {
-                        ids.iter()
-                            .filter_map(|id| id.as_str().map(str::to_string))
-                            .collect()
+    // In receipt order, then batch order.
+    let parsed: Vec<Parsed> = records
+        .iter()
+        .filter(|record| record.agent == agent)
+        .flat_map(|record| {
+            record
+                .events
+                .iter()
+                .filter(|event| event.channel == channel)
+                .filter_map(|event| {
+                    Some(Parsed {
+                        kind: &event.kind,
+                        turn: event.turn.as_deref()?,
+                        seq: event.seq,
+                        admitted: event.at.is_some_and(|at| at <= record.received_at + 5000),
+                        triggers: &event.triggers,
                     })
-                    .unwrap_or_default(),
-            })
+                })
         })
         .collect();
     for start in parsed.iter().filter(|p| p.kind == "turn_started") {
@@ -191,7 +241,7 @@ pub fn request_activity(
             selected.uncertain = true;
             continue;
         }
-        selected.turn_ids.insert(start.turn.clone());
+        selected.turn_ids.insert(start.turn.to_string());
         if !start.admitted {
             selected.uncertain = true;
             continue;
@@ -199,17 +249,14 @@ pub fn request_activity(
         // The first admitted terminal frame in receipt order, not the
         // largest seq: a later error must not rewrite an earlier end.
         let end = turn.iter().find(|p| {
-            matches!(
-                p.kind.as_str(),
-                "turn_completed" | "turn_error" | "agent_panic"
-            ) && p.admitted
+            matches!(p.kind, "turn_completed" | "turn_error" | "agent_panic") && p.admitted
         });
         if let Some(end) = end
             && end.seq.is_some_and(|seq| seq >= from)
         {
             selected
                 .terminal
-                .insert(start.turn.clone(), end.kind == "turn_completed");
+                .insert(start.turn.to_string(), end.kind == "turn_completed");
         }
     }
     selected
