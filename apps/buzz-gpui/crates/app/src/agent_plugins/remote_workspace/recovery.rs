@@ -40,6 +40,25 @@ impl Action {
             Self::Dismiss => "Dismiss",
         }
     }
+
+    /// What the banner says while this action runs. A recovery can wait
+    /// minutes for a machine, so it says the user has nothing left to do.
+    fn progress(self) -> &'static str {
+        match self {
+            Self::Recover(RecoveryMode::Checkpoint) => {
+                "Recovering from the checkpoint. Starting a machine can take a few minutes. \
+                 Nothing else to do: the agent replies here when it is ready."
+            }
+            Self::Recover(RecoveryMode::Fresh) => {
+                "Starting a fresh session. Starting a machine can take a few minutes. \
+                 Nothing else to do: the agent replies here when it is ready."
+            }
+            // Dismiss is never in flight: it sends nothing.
+            Self::End | Self::Check | Self::Dismiss => {
+                "Ending the session and saving its checkpoint."
+            }
+        }
+    }
 }
 
 /// The buttons for a prompt, as the desktop shows them. Without
@@ -118,12 +137,17 @@ struct Entry {
     session: SandboxSession,
     replay_floor: u64,
     view: View,
-    busy: bool,
+    /// The action in flight, if any.
+    busy: Option<Action>,
+    /// Which recorded failure this is. A later failed start replaces the
+    /// entry with a newer generation, so an older action's answer cannot
+    /// clear or change it.
+    generation: u64,
 }
 
 impl Entry {
     fn request(&self, action: Action) -> Option<SandboxRequest> {
-        if self.busy {
+        if self.busy.is_some() {
             return None;
         }
         let session = self.session.clone();
@@ -148,6 +172,8 @@ pub struct Prompts {
     /// By agent; absent until its host answers.
     lifecycle: HashMap<String, bool>,
     checking: HashSet<String>,
+    /// The last [`Entry::generation`] given out.
+    generation: u64,
 }
 
 impl Global for Prompts {}
@@ -192,6 +218,10 @@ impl Prompts {
             Err(error) => error,
         };
         let Some(view) = View::of(error) else {
+            // A failure without a lifecycle code asks for nothing new, but it
+            // is newer than any action in flight here: fence that action's
+            // answer off so it cannot hide this failure.
+            self.supersede(&key);
             return false;
         };
         self.prompts.record(RecoveryPrompt {
@@ -202,11 +232,16 @@ impl Prompts {
             expected_signer_pubkey: session.tenant.signer.clone(),
             error: error.clone(),
         });
+        self.generation += 1;
+        // An action still in flight for the replaced prompt keeps the
+        // buttons blocked until its request returns.
+        let busy = self.entries.get(&key).and_then(|entry| entry.busy);
         let entry = Entry {
             session: session.clone(),
             replay_floor: *replay_floor,
             view,
-            busy: false,
+            busy,
+            generation: self.generation,
         };
         self.entries.insert(key, entry);
         let kept: HashSet<RecoveryPromptKey> = self.prompts.iter().map(|p| p.key()).collect();
@@ -219,21 +254,52 @@ impl Prompts {
         self.entries.remove(key);
     }
 
-    /// An action's answer: a recovery clears the prompt; an End or a
-    /// failure picks the next banner.
+    /// Moves `key`'s prompt to a new generation, so the answer of an
+    /// action in flight changes nothing but ending that action.
+    fn supersede(&mut self, key: &RecoveryPromptKey) {
+        if let Some(entry) = self.entries.get_mut(key) {
+            self.generation += 1;
+            entry.generation = self.generation;
+        }
+    }
+
+    /// The answer to `action`, sent for the prompt's `generation`. It ends
+    /// the action in flight. If a newer failed start has since replaced
+    /// the prompt, that is all: the newer failure stays shown. Otherwise a
+    /// recovery clears the prompt, and an End or a failure picks the next
+    /// banner.
+    ///
+    /// Returns whether the thread's failures are resolved: true only when
+    /// a Recover for the current prompt started a session.
     pub fn answered(
         &mut self,
         key: &RecoveryPromptKey,
+        generation: u64,
+        action: Action,
         answer: &Result<SandboxResponse, SessionError>,
-    ) {
+    ) -> bool {
         let Some(entry) = self.entries.get_mut(key) else {
-            return;
+            return false;
         };
-        entry.busy = false;
+        entry.busy = None;
+        if entry.generation != generation {
+            return false;
+        }
         match answer {
-            Ok(SandboxResponse::Ended { state }) => entry.view = View::ended(*state),
-            Ok(_) => self.clear(key),
-            Err(error) => entry.view = entry.view.failed(error),
+            Ok(SandboxResponse::Ended { state }) => {
+                entry.view = View::ended(*state);
+                false
+            }
+            Err(error) => {
+                entry.view = entry.view.failed(error);
+                false
+            }
+            Ok(response) => {
+                let recovered = matches!(action, Action::Recover(_))
+                    && matches!(response, SandboxResponse::Started);
+                self.clear(key);
+                recovered
+            }
         }
     }
 
@@ -277,6 +343,9 @@ pub fn init(cx: &mut App) {
 /// After a start: records or clears its prompt, and asks once whether the
 /// agent's provider can end and recover sessions.
 pub fn started(sent: &Sent, name: &str, cx: &mut App) {
+    if sent.result.is_ok() {
+        resolve(&sent.session, cx);
+    }
     if !cx.has_global::<Prompts>() {
         return;
     }
@@ -287,6 +356,35 @@ pub fn started(sent: &Sent, name: &str, cx: &mut App) {
         check_lifecycle(&sent.session, cx);
     }
     thread_banners::refresh(cx);
+}
+
+/// A session that works in a thread replaces the attempts that failed
+/// there, so their "Could not finish" no longer hides its activity. Only
+/// the session's own community changes: the scope is the one the agent's
+/// local work records (`agents2::service::work_scope`).
+fn resolve(session: &SandboxSession, cx: &mut App) {
+    let Some(scope) = work_scope(session) else {
+        return;
+    };
+    let (channel, root) = match &session.scope {
+        SandboxScope::Thread {
+            channel_id,
+            thread_root,
+        } => (channel_id, Some(thread_root.as_str())),
+        // One session serves the whole conversation.
+        SandboxScope::DirectMessage { dm_channel_id } => (dm_channel_id, None),
+    };
+    cx.default_global::<crate::agent_activity::local::LocalActivity>()
+        .resolve_thread(&scope, &session.pubkey, channel, root);
+}
+
+/// The local work scope of the session's community and owner.
+fn work_scope(session: &SandboxSession) -> Option<String> {
+    let origin = buzz_relay_client::RelayOrigin::parse(&session.tenant.relay).ok()?;
+    Some(crate::agent_activity::local::scope(
+        &origin.http(),
+        &session.tenant.signer,
+    ))
 }
 
 fn check_lifecycle(session: &SandboxSession, cx: &mut App) {
@@ -331,30 +429,43 @@ fn banners(thread: &BannerThread, cx: &App) -> Vec<Banner> {
         .map(|(prompt, entry)| {
             let lifecycle = prompts.lifecycle.get(&prompt.agent_pubkey) == Some(&true);
             let key = prompt.key();
-            let buttons = banner_actions(entry.view.kind, entry.view.offers_checkpoint, lifecycle)
+            let (message, actions) = shown(&entry, lifecycle);
+            let buttons = actions
                 .into_iter()
                 .map(|action| {
                     let key = key.clone();
                     BannerButton {
                         label: action.label().into(),
-                        loading: entry.busy && action != Action::Dismiss,
+                        loading: entry.busy == Some(action),
                         action: Rc::new(move |_, cx| act(&key, action, cx)),
                     }
                 })
                 .collect();
             Banner {
-                text: format!("{}: {}", prompt.agent_name, entry.view.message).into(),
+                text: format!("{}: {}", prompt.agent_name, message).into(),
                 buttons,
             }
         })
         .collect()
 }
 
+/// The banner's message and buttons. While an action runs, only that
+/// action shows, with its progress: the other buttons cannot act then.
+fn shown(entry: &Entry, lifecycle: bool) -> (&str, Vec<Action>) {
+    match entry.busy {
+        Some(action) => (action.progress(), vec![action]),
+        None => (
+            entry.view.message.as_str(),
+            banner_actions(entry.view.kind, entry.view.offers_checkpoint, lifecycle),
+        ),
+    }
+}
+
 fn act(key: &RecoveryPromptKey, action: Action, cx: &mut App) {
     let Some(entry) = cx.global::<Prompts>().entries.get(key).cloned() else {
         return;
     };
-    if action == Action::Dismiss && !entry.busy {
+    if action == Action::Dismiss && entry.busy.is_none() {
         cx.global_mut::<Prompts>().clear(key);
         thread_banners::refresh(cx);
         return;
@@ -367,18 +478,27 @@ fn act(key: &RecoveryPromptKey, action: Action, cx: &mut App) {
         return;
     };
     if let Some(entry) = cx.global_mut::<Prompts>().entries.get_mut(key) {
-        entry.busy = true;
+        entry.busy = Some(action);
     }
     thread_banners::refresh(cx);
     let answer =
         crate::runtime::Runtime::handle(cx).spawn(async move { send(&link, request).await });
     let key = key.clone();
+    let session = entry.session.clone();
+    let generation = entry.generation;
     cx.spawn(async move |cx| {
         let answer = answer
             .await
             .unwrap_or_else(|_| Err("The request was cancelled".into()));
         cx.update(|cx| {
-            cx.global_mut::<Prompts>().answered(&key, &answer);
+            // `answered` decides: a newer failed start may have replaced
+            // this prompt while the request ran, and its failure must stay.
+            let recovered = cx
+                .global_mut::<Prompts>()
+                .answered(&key, generation, action, &answer);
+            if recovered {
+                resolve(&session, cx);
+            }
             thread_banners::refresh(cx);
         });
     })
@@ -537,24 +657,114 @@ mod tests {
         let mut prompts = Prompts::default();
         prompts.started(&sent('c', Err(coded("session_active"))), "Ada");
         let key = key_of(&session('c')).unwrap().0;
+        let generation = prompts.entries[&key].generation;
         let view = |prompts: &Prompts| prompts.entries[&key].view.clone();
         assert_eq!(view(&prompts).kind, RecoveryKind::EndFirst);
         let ending = Ok(SandboxResponse::Ended {
             state: EndState::Ending,
         });
-        prompts.answered(&key, &ending);
+        assert!(!prompts.answered(&key, generation, Action::End, &ending));
         assert_eq!(view(&prompts).kind, RecoveryKind::Ending);
         let absent = Ok(SandboxResponse::Ended {
             state: EndState::Absent,
         });
-        prompts.answered(&key, &absent);
+        assert!(!prompts.answered(&key, generation, Action::Check, &absent));
         assert_eq!(view(&prompts).kind, RecoveryKind::Recover);
         assert!(!view(&prompts).offers_checkpoint);
         // A failure without a code keeps the buttons.
-        prompts.answered(&key, &Err("Timed out".into()));
+        let recover = Action::Recover(RecoveryMode::Fresh);
+        assert!(!prompts.answered(&key, generation, recover, &Err("Timed out".into())));
         assert_eq!(view(&prompts).kind, RecoveryKind::Recover);
         assert_eq!(view(&prompts).message, "Timed out");
-        prompts.answered(&key, &Ok(SandboxResponse::Started));
+        // A recovery that starts a session clears the prompt and resolves
+        // the thread's failures.
+        assert!(prompts.answered(&key, generation, recover, &Ok(SandboxResponse::Started)));
         assert!(prompts.for_thread(&thread('c')).is_empty());
+    }
+
+    #[test]
+    fn a_running_action_shows_only_its_progress() {
+        let mut prompts = Prompts::default();
+        prompts.started(&sent('c', Err(coded("session_ended"))), "Ada");
+        let key = key_of(&session('c')).unwrap().0;
+        let idle = prompts.entries[&key].clone();
+        let (message, actions) = shown(&idle, true);
+        assert_eq!(message, idle.view.message);
+        assert!(actions.contains(&Action::Recover(RecoveryMode::Fresh)));
+        assert!(actions.contains(&Action::Dismiss));
+        for action in [
+            Action::Recover(RecoveryMode::Fresh),
+            Action::Recover(RecoveryMode::Checkpoint),
+            Action::End,
+        ] {
+            let mut running = idle.clone();
+            running.busy = Some(action);
+            let (message, actions) = shown(&running, true);
+            assert_eq!(actions, vec![action], "{action:?}");
+            assert_eq!(message, action.progress());
+            assert!(running.request(action).is_none(), "no second send");
+        }
+        let generation = prompts.entries[&key].generation;
+        prompts.entries.get_mut(&key).unwrap().busy = Some(Action::End);
+        prompts.answered(&key, generation, Action::End, &Err("Timed out".into()));
+        let (message, actions) = shown(&prompts.entries[&key], true);
+        assert_eq!(message, "Timed out");
+        assert!(actions.len() > 1, "the choices return after an answer");
+    }
+
+    /// A Recover in flight while a later start fails, with or without a
+    /// lifecycle code. The stale answer only ends the action; the newer
+    /// failure stays, and its own answer still applies.
+    #[test]
+    fn an_older_answer_leaves_a_newer_failure_alone() {
+        let recover = Action::Recover(RecoveryMode::Fresh);
+        let coded_failure = || Err(coded("config_differs"));
+        let uncoded_failure = || Err(SessionError::from("The cluster is unreachable"));
+        for (later, recorded) in [
+            (coded_failure as fn() -> Result<(), SessionError>, true),
+            (uncoded_failure, false),
+        ] {
+            let mut prompts = Prompts::default();
+            prompts.started(&sent('c', Err(coded("session_ended"))), "Ada");
+            let key = key_of(&session('c')).unwrap().0;
+            let older = prompts.entries[&key].generation;
+            let request = prompts.entries[&key].request(recover);
+            assert!(request.is_some());
+            prompts.entries.get_mut(&key).unwrap().busy = Some(recover);
+
+            assert_eq!(prompts.started(&sent('c', later()), "Ada"), recorded);
+            let newer = prompts.entries[&key].generation;
+            assert_ne!(older, newer);
+            // The first Recover still runs: no second request can start.
+            assert_eq!(prompts.entries[&key].busy, Some(recover));
+            assert!(prompts.entries[&key].request(recover).is_none());
+
+            // Its Started answer arrives late: no resolution, prompt kept.
+            let before = prompts.entries[&key].view.clone();
+            let started = Ok(SandboxResponse::Started);
+            assert!(!prompts.answered(&key, older, recover, &started));
+            assert_eq!(prompts.for_thread(&thread('c')).len(), 1);
+            assert_eq!(prompts.entries[&key].view, before);
+            assert_eq!(prompts.entries[&key].busy, None, "the buttons return");
+
+            // The newer prompt's own Recover still resolves and clears.
+            assert!(prompts.answered(&key, newer, recover, &started));
+            assert!(prompts.for_thread(&thread('c')).is_empty());
+        }
+
+        // Without a prompt, an uncoded failure records nothing.
+        let mut empty = Prompts::default();
+        assert!(!empty.started(&sent('c', uncoded_failure()), "Ada"));
+        assert!(empty.entries.is_empty());
+    }
+
+    #[test]
+    fn resolve_uses_the_scope_local_work_records() {
+        let expected =
+            crate::agent_activity::local::scope("https://relay.example", &"a".repeat(64));
+        assert_eq!(work_scope(&session('c')), Some(expected));
+        let mut unparsable = session('c');
+        unparsable.tenant.relay = "not a relay".into();
+        assert_eq!(work_scope(&unparsable), None);
     }
 }

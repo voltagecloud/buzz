@@ -227,7 +227,9 @@ pub fn request_work(snapshot: &Snapshot, channel: &str, ids: &[&str]) -> Vec<Req
     let requests: Vec<&LocalWork> = snapshot
         .local
         .iter()
-        .filter(|row| row.channel_id == channel && ids.contains(&row.message_id.as_str()))
+        .filter(|row| {
+            row.channel_id == channel && ids.contains(&row.message_id.as_str()) && !row.hidden()
+        })
         .collect();
     let agents: BTreeSet<&str> = live
         .iter()

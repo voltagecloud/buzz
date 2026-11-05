@@ -93,6 +93,15 @@ pub struct LocalWork {
     pub dismissed: bool,
 }
 
+impl LocalWork {
+    /// A failure the owner dismissed, or a working session replaced. It
+    /// keeps its outcome but is passed over wherever a row is chosen, so
+    /// it never outranks live evidence of the agent.
+    pub fn hidden(&self) -> bool {
+        self.state == LocalWorkState::Error && self.dismissed
+    }
+}
+
 /// The scope rows carry: a community's `https://` origin and its viewer.
 pub fn scope(http_origin: &str, viewer: &str) -> String {
     format!("{http_origin}:{viewer}")
@@ -218,6 +227,41 @@ impl LocalActivity {
         }
     }
 
+    /// Hides `agent`'s failures in one thread of one community ([`scope`]),
+    /// or in the whole channel for a DM (`thread_root_id` `None`), once a
+    /// start or recovery there works. They describe attempts the working
+    /// session replaced, and a shown failure would hide that session's
+    /// activity. The session replays from its floor, so a failure on an
+    /// earlier message is hidden though it is not retried; the owner can
+    /// still read it in the outcome. Another community's rows never change,
+    /// even with the same agent, channel, and thread IDs.
+    #[cfg(any(feature = "voltage-sandbox", test))]
+    pub fn resolve_thread(
+        &self,
+        scope: &str,
+        agent: &str,
+        channel_id: &str,
+        thread_root_id: Option<&str>,
+    ) {
+        let mut inner = self.lock();
+        let mut changed = false;
+        for (_, row) in inner.entries.iter_mut() {
+            if row.state == LocalWorkState::Error
+                && !row.dismissed
+                && row.scope == scope
+                && row.agent == agent
+                && row.channel_id == channel_id
+                && thread_root_id.is_none_or(|root| row.thread_root_id == root)
+            {
+                row.dismissed = true;
+                changed = true;
+            }
+        }
+        if changed {
+            inner.publish();
+        }
+    }
+
     fn update(
         &self,
         id: u64,
@@ -332,7 +376,8 @@ pub fn breathing(row: Option<&LocalWork>) -> bool {
 }
 
 /// Each agent's most telling row in `channel` (or one thread of it):
-/// working over waiting over failed over settled (`localActivity`).
+/// working over waiting over failed over settled (`localActivity`). A
+/// dismissed failure is skipped, so it hides no live evidence.
 pub fn local_activity<'a>(
     local: &'a [LocalWork],
     channel: &str,
@@ -340,7 +385,9 @@ pub fn local_activity<'a>(
 ) -> BTreeMap<&'a str, &'a LocalWork> {
     let mut agents: BTreeMap<&str, &LocalWork> = BTreeMap::new();
     for row in local.iter().filter(|row| {
-        row.channel_id == channel && thread_root.is_none_or(|root| row.thread_root_id == root)
+        row.channel_id == channel
+            && thread_root.is_none_or(|root| row.thread_root_id == root)
+            && !row.hidden()
     }) {
         match agents.get(row.agent.as_str()) {
             Some(previous) if row.state.rank() <= previous.state.rank() => {}
