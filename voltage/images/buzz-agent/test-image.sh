@@ -51,5 +51,21 @@ docker run --rm --tmpfs /home/agent:uid=10001,gid=10001,mode=0700 \
     claude --version >/dev/null
     command -v codex-acp claude-agent-acp buzz-dev-mcp >/dev/null
   '
+# rust-crap-score accepts exactly these versions. Collect real coverage and
+# complexity for a one-function crate, offline, as the skill does.
+docker run --rm --entrypoint /bin/bash "$IMAGE" -ceu '
+  test "$(cargo llvm-cov --version)" = "cargo-llvm-cov 0.8.5"
+  test "$(knots --version)" = "knots 1.16.0"
+  rustup component list --installed | grep -q "^llvm-tools"
+  cd "$(mktemp -d)"
+  cargo new --quiet --vcs none --lib crap-smoke
+  cd crap-smoke
+  printf "%s\n" "pub fn magnitude(x: i32) -> i32 { if x > 0 { x } else { -x } }" \
+    "#[test] fn negative() { assert_eq!(magnitude(-1), 1); }" > src/lib.rs
+  cargo llvm-cov --offline --lcov --output-path lcov.info 2>/dev/null
+  grep -q "^SF:.*src/lib.rs" lcov.info
+  knots --recursive --language rust --count-anonymous-closures --format json src \
+    | python3 -c "import json, sys; json.load(sys.stdin)"
+'
 python3 "$(dirname "$0")/test-review.py" "$IMAGE"
 printf 'PASS: agent adapter packaging and unauthenticated ACP initialization (%s)\n' "$IMAGE"
