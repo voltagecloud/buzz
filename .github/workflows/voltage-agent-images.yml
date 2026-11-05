@@ -200,12 +200,15 @@ jobs:
         with:
           dockerfile: voltage/images/buzz-sandbox-reaper/Dockerfile
           failure-threshold: error
+      # --check resolves every COPY --from source, so the agent image needs its
+      # engineering-skills context; the other images ignore it.
       - name: BuildKit checks
         run: |
           set -euo pipefail
+          sh voltage/images/buzz-agent/select-skills.sh --none "$RUNNER_TEMP/engineering-skills"
           for file in voltage/images/buzz-agent/Dockerfile voltage/images/buzz-sandbox-reaper/Dockerfile Dockerfile; do
             echo "==> $file"
-            docker buildx build --check -f "$file" .
+            docker buildx build --check --build-context engineering-skills="$RUNNER_TEMP/engineering-skills" -f "$file" .
           done
 
   # Pull requests, and runs on refs other than main: build and test, no push.

@@ -96,6 +96,7 @@ COPY --chmod=0644 voltage/images/buzz-agent/cluster.md /etc/buzz-agent/cluster.m
 # select-skills.sh: master of voltagecloud/engineering-skills on main, empty for
 # pull requests and local builds. Root owns the copy, so the agent can read but
 # not change it; profile.py links each skill into the harnesses.
+# hadolint ignore=DL3022
 COPY --from=engineering-skills . /opt/engineering-skills/
 COPY --chmod=0755 voltage/images/buzz-agent/heavy-bin/ /opt/buzz-heavy/bin/
 COPY --chmod=0755 voltage/images/buzz-agent/gh.sh /usr/local/bin/gh
