@@ -80,6 +80,7 @@ Start with these limits, subject to validation:
 
 - Four agent handoffs per human-to-agent task. A human message addressing multiple agents creates separate initial tasks.
 - At most two task admissions for one agent under that request.
+- One return per handoff: the target's result, addressed to the agent that handed it the work, which wakes that agent. A return cannot be returned and does not count against these limits, so returns never exceed handoffs. The ancestry walk is bounded by twice the handoff limit.
 - Existing per-turn deadlines and five primary sessions per owner.
 - Existing worker quotas and 100% Spot capacity.
 

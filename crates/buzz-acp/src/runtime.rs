@@ -94,7 +94,7 @@ fn make_prompt_context(
         system_prompt: config.system_prompt.clone(),
         session_title: config.session_title.clone(),
         team_instructions: if sharing.is_some() {
-            Some(format!("{}\n\nTo delegate to another shared agent, use `buzz agents handoff <agent-pubkey> --from <incoming-event-id> --message '<task>'`. Use the current incoming task's event ID. Delegate specific work or reviews; avoid acknowledgement loops. Sharing preserves the original requester and does not confer owner lifecycle rights.",config.team_instructions.as_deref().unwrap_or("")))
+            Some(format!("{}\n\nTo delegate to another shared agent, use `buzz agents handoff <agent-pubkey> --from <incoming-event-id> --message '<task>'`. Use the current incoming task's event ID. Delegate specific work or reviews; avoid acknowledgement loops. When you finish work another agent handed you, report the result with `buzz agents return --from <incoming-event-id> --message '<result>'`, which wakes that agent; a plain @mention of an agent does not. Each handoff returns once. Sharing preserves the original requester and does not confer owner lifecycle rights.",config.team_instructions.as_deref().unwrap_or("")))
         } else {
             config.team_instructions.clone()
         },

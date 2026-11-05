@@ -362,6 +362,16 @@ pub enum AgentsCmd {
         #[arg(long)]
         message: String,
     },
+    /// Report the result of a handoff to the agent that sent it, waking that agent.
+    /// Each handoff returns once and costs no handoff budget.
+    Return {
+        /// The incoming handoff event ID you are answering
+        #[arg(long)]
+        from: String,
+        /// Result text, or '-' to read stdin
+        #[arg(long)]
+        message: String,
+    },
     /// Let current channel members invoke your agent and its configured tools by explicit mention.
     /// Ownership and lifecycle control stay with you; DMs remain private.
     Share {
@@ -2568,6 +2578,7 @@ mod tests {
                 "draft-create",
                 "draft-update",
                 "handoff",
+                "return",
                 "share",
                 "sharing",
                 "unarchive",
@@ -2714,7 +2725,7 @@ mod tests {
     #[test]
     fn subcommand_counts_are_stable() {
         let expected: Vec<(&str, usize)> = vec![
-            ("agents", 9),
+            ("agents", 10),
             ("canvas", 4),
             ("channels", 16),
             ("dms", 4),

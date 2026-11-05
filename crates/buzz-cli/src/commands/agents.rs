@@ -13,6 +13,55 @@ use crate::{AgentsCmd, RespondToArg};
 #[path = "agents_sharing_tests.rs"]
 mod sharing_tests;
 
+/// The incoming task `from` names, as this agent's relay connection sees it.
+async fn incoming_task(client: &BuzzClient, from: &str) -> Result<nostr::Event, CliError> {
+    if client.auth_tag_owner_hex().is_none() {
+        return Err(CliError::Auth("handoff requires an agent identity".into()));
+    }
+    let from = crate::validate::parse_event_id(from)?;
+    let raw = client
+        .query(&json!({"kinds":[9,40002],"ids":[from],"limit":1}))
+        .await?;
+    let mut events: Vec<nostr::Event> = serde_json::from_str(&raw)
+        .map_err(|_| CliError::Other("invalid incoming task response".into()))?;
+    if events.len() != 1 {
+        return Err(CliError::Usage(
+            "incoming task is not visible to this agent".into(),
+        ));
+    }
+    let source = events
+        .pop()
+        .ok_or_else(|| CliError::Other("incoming task was not returned".into()))?;
+    if source.id != from {
+        return Err(CliError::Other(
+            "relay returned a different incoming task".into(),
+        ));
+    }
+    Ok(source)
+}
+
+/// Sign and submit a handoff carrying `source`'s provenance to `target`.
+async fn send_handoff(
+    client: &BuzzClient,
+    source: &nostr::Event,
+    target: PublicKey,
+    message: &str,
+) -> Result<(), CliError> {
+    let builder = buzz_sdk::sharing::task::handoff(
+        source,
+        client.keys().public_key(),
+        target,
+        &read_or_stdin(message)?,
+        nostr::Timestamp::now().as_secs(),
+    )
+    .map_err(|e| CliError::Usage(e.to_string()))?;
+    println!(
+        "{}",
+        client.submit_event(client.sign_event(builder)?).await?
+    );
+    Ok(())
+}
+
 pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), CliError> {
     match command {
         AgentsCmd::Handoff {
@@ -20,43 +69,24 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
             from,
             message,
         } => {
-            if client.auth_tag_owner_hex().is_none() {
-                return Err(CliError::Auth("handoff requires an agent identity".into()));
-            }
             validate_hex64(&agent)?;
             let target = PublicKey::from_hex(&agent).map_err(|e| CliError::Usage(e.to_string()))?;
-            let from = crate::validate::parse_event_id(&from)?;
-            let raw = client
-                .query(&json!({"kinds":[9,40002],"ids":[from],"limit":1}))
-                .await?;
-            let mut events: Vec<nostr::Event> = serde_json::from_str(&raw)
-                .map_err(|_| CliError::Other("invalid incoming task response".into()))?;
-            if events.len() != 1 {
+            let source = incoming_task(client, &from).await?;
+            send_handoff(client, &source, target, &message).await
+        }
+        AgentsCmd::Return { from, message } => {
+            let source = incoming_task(client, &from).await?;
+            if buzz_sdk::sharing::task::origin(&source)
+                .map_err(|e| CliError::Usage(e.to_string()))?
+                .is_none()
+            {
                 return Err(CliError::Usage(
-                    "incoming task is not visible to this agent".into(),
+                    "only a handoff from another agent can be returned; reply in the thread instead"
+                        .into(),
                 ));
             }
-            let source = events
-                .pop()
-                .ok_or_else(|| CliError::Other("incoming task was not returned".into()))?;
-            if source.id != from {
-                return Err(CliError::Other(
-                    "relay returned a different incoming task".into(),
-                ));
-            }
-            let builder = buzz_sdk::sharing::task::handoff(
-                &source,
-                client.keys().public_key(),
-                target,
-                &read_or_stdin(&message)?,
-                nostr::Timestamp::now().as_secs(),
-            )
-            .map_err(|e| CliError::Usage(e.to_string()))?;
-            println!(
-                "{}",
-                client.submit_event(client.sign_event(builder)?).await?
-            );
-            Ok(())
+            // Back to the agent that delegated this work.
+            send_handoff(client, &source, source.pubkey, &message).await
         }
         AgentsCmd::Share { agent, channel } => sharing(client, &agent, channel, true).await,
         AgentsCmd::Unshare { agent, channel } => sharing(client, &agent, channel, false).await,
