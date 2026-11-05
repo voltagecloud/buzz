@@ -121,3 +121,38 @@ fn ranks_working_over_waiting_over_failed() {
             .copied()
     ));
 }
+
+#[test]
+fn a_working_session_hides_the_failed_attempts_it_replaced() {
+    let store = LocalActivity::default();
+    let agent = "a".repeat(64);
+    let root = "b".repeat(64);
+    // Two refused starts in the thread, then one in another thread.
+    begin(&store, "config-differs").finish(WorkOutcome::failed("config_differs"));
+    begin(&store, "session-ended").finish(WorkOutcome::failed("session_ended"));
+    let other = store.begin(
+        Begin {
+            scope: SCOPE.into(),
+            agent: agent.clone(),
+            channel_id: "channel".into(),
+            message_id: "elsewhere".into(),
+            thread_root_id: "c".repeat(64),
+        },
+        1,
+    );
+    other.finish(WorkOutcome::failed("other thread"));
+    let shown = |thread: &str| {
+        let work = store.work();
+        local_activity(&work, "channel", Some(thread))
+            .get(agent.as_str())
+            .map(|row| row.state)
+    };
+    assert_eq!(shown(&root), Some(LocalWorkState::Error));
+
+    store.resolve_thread(&agent, "channel", &root);
+    // Nothing left to outrank live evidence of the recovered session.
+    assert_eq!(shown(&root), None);
+    // The outcomes stay, hidden; the other thread's failure still shows.
+    assert_eq!(store.work().iter().filter(|row| row.dismissed).count(), 2);
+    assert_eq!(shown(&"c".repeat(64)), Some(LocalWorkState::Error));
+}

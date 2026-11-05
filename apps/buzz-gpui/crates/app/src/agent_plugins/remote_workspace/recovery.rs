@@ -40,6 +40,23 @@ impl Action {
             Self::Dismiss => "Dismiss",
         }
     }
+
+    /// What the banner says while this action runs. A recovery can wait
+    /// minutes for a machine, so it says the user has nothing left to do.
+    fn progress(self) -> &'static str {
+        match self {
+            Self::Recover(RecoveryMode::Checkpoint) => {
+                "Recovering from the checkpoint. Starting a machine can take a few minutes. \
+                 Nothing else to do: the agent replies here when it is ready."
+            }
+            Self::Recover(RecoveryMode::Fresh) => {
+                "Starting a fresh session. Starting a machine can take a few minutes. \
+                 Nothing else to do: the agent replies here when it is ready."
+            }
+            Self::End | Self::Check => "Ending the session and saving its checkpoint.",
+            Self::Dismiss => "",
+        }
+    }
 }
 
 /// The buttons for a prompt, as the desktop shows them. Without
@@ -118,12 +135,13 @@ struct Entry {
     session: SandboxSession,
     replay_floor: u64,
     view: View,
-    busy: bool,
+    /// The action in flight, if any.
+    busy: Option<Action>,
 }
 
 impl Entry {
     fn request(&self, action: Action) -> Option<SandboxRequest> {
-        if self.busy {
+        if self.busy.is_some() {
             return None;
         }
         let session = self.session.clone();
@@ -206,7 +224,7 @@ impl Prompts {
             session: session.clone(),
             replay_floor: *replay_floor,
             view,
-            busy: false,
+            busy: None,
         };
         self.entries.insert(key, entry);
         let kept: HashSet<RecoveryPromptKey> = self.prompts.iter().map(|p| p.key()).collect();
@@ -229,7 +247,7 @@ impl Prompts {
         let Some(entry) = self.entries.get_mut(key) else {
             return;
         };
-        entry.busy = false;
+        entry.busy = None;
         match answer {
             Ok(SandboxResponse::Ended { state }) => entry.view = View::ended(*state),
             Ok(_) => self.clear(key),
@@ -277,6 +295,9 @@ pub fn init(cx: &mut App) {
 /// After a start: records or clears its prompt, and asks once whether the
 /// agent's provider can end and recover sessions.
 pub fn started(sent: &Sent, name: &str, cx: &mut App) {
+    if sent.result.is_ok() {
+        resolve(&sent.session, cx);
+    }
     if !cx.has_global::<Prompts>() {
         return;
     }
@@ -287,6 +308,19 @@ pub fn started(sent: &Sent, name: &str, cx: &mut App) {
         check_lifecycle(&sent.session, cx);
     }
     thread_banners::refresh(cx);
+}
+
+/// A session that works in a thread replaces the attempts that failed
+/// there, so their "Could not finish" no longer hides its activity.
+fn resolve(session: &SandboxSession, cx: &mut App) {
+    if let SandboxScope::Thread {
+        channel_id,
+        thread_root,
+    } = &session.scope
+    {
+        cx.default_global::<crate::agent_activity::local::LocalActivity>()
+            .resolve_thread(&session.pubkey, channel_id, thread_root);
+    }
 }
 
 fn check_lifecycle(session: &SandboxSession, cx: &mut App) {
@@ -331,30 +365,43 @@ fn banners(thread: &BannerThread, cx: &App) -> Vec<Banner> {
         .map(|(prompt, entry)| {
             let lifecycle = prompts.lifecycle.get(&prompt.agent_pubkey) == Some(&true);
             let key = prompt.key();
-            let buttons = banner_actions(entry.view.kind, entry.view.offers_checkpoint, lifecycle)
+            let (message, actions) = shown(&entry, lifecycle);
+            let buttons = actions
                 .into_iter()
                 .map(|action| {
                     let key = key.clone();
                     BannerButton {
                         label: action.label().into(),
-                        loading: entry.busy && action != Action::Dismiss,
+                        loading: entry.busy == Some(action),
                         action: Rc::new(move |_, cx| act(&key, action, cx)),
                     }
                 })
                 .collect();
             Banner {
-                text: format!("{}: {}", prompt.agent_name, entry.view.message).into(),
+                text: format!("{}: {}", prompt.agent_name, message).into(),
                 buttons,
             }
         })
         .collect()
 }
 
+/// The banner's message and buttons. While an action runs, only that
+/// action shows, with its progress: the other buttons cannot act then.
+fn shown(entry: &Entry, lifecycle: bool) -> (&str, Vec<Action>) {
+    match entry.busy {
+        Some(action) => (action.progress(), vec![action]),
+        None => (
+            entry.view.message.as_str(),
+            banner_actions(entry.view.kind, entry.view.offers_checkpoint, lifecycle),
+        ),
+    }
+}
+
 fn act(key: &RecoveryPromptKey, action: Action, cx: &mut App) {
     let Some(entry) = cx.global::<Prompts>().entries.get(key).cloned() else {
         return;
     };
-    if action == Action::Dismiss && !entry.busy {
+    if action == Action::Dismiss && entry.busy.is_none() {
         cx.global_mut::<Prompts>().clear(key);
         thread_banners::refresh(cx);
         return;
@@ -367,17 +414,23 @@ fn act(key: &RecoveryPromptKey, action: Action, cx: &mut App) {
         return;
     };
     if let Some(entry) = cx.global_mut::<Prompts>().entries.get_mut(key) {
-        entry.busy = true;
+        entry.busy = Some(action);
     }
     thread_banners::refresh(cx);
     let answer =
         crate::runtime::Runtime::handle(cx).spawn(async move { send(&link, request).await });
     let key = key.clone();
+    let session = entry.session.clone();
     cx.spawn(async move |cx| {
         let answer = answer
             .await
             .unwrap_or_else(|_| Err("The request was cancelled".into()));
         cx.update(|cx| {
+            if matches!(action, Action::Recover(_))
+                && matches!(&answer, Ok(response) if !matches!(response, SandboxResponse::Ended { .. }))
+            {
+                resolve(&session, cx);
+            }
             cx.global_mut::<Prompts>().answered(&key, &answer);
             thread_banners::refresh(cx);
         });
@@ -556,5 +609,34 @@ mod tests {
         assert_eq!(view(&prompts).message, "Timed out");
         prompts.answered(&key, &Ok(SandboxResponse::Started));
         assert!(prompts.for_thread(&thread('c')).is_empty());
+    }
+
+    #[test]
+    fn a_running_action_shows_only_its_progress() {
+        let mut prompts = Prompts::default();
+        prompts.started(&sent('c', Err(coded("session_ended"))), "Ada");
+        let key = key_of(&session('c')).unwrap().0;
+        let idle = prompts.entries[&key].clone();
+        let (message, actions) = shown(&idle, true);
+        assert_eq!(message, idle.view.message);
+        assert!(actions.contains(&Action::Recover(RecoveryMode::Fresh)));
+        assert!(actions.contains(&Action::Dismiss));
+        for action in [
+            Action::Recover(RecoveryMode::Fresh),
+            Action::Recover(RecoveryMode::Checkpoint),
+            Action::End,
+        ] {
+            let mut running = idle.clone();
+            running.busy = Some(action);
+            let (message, actions) = shown(&running, true);
+            assert_eq!(actions, vec![action], "{action:?}");
+            assert_eq!(message, action.progress());
+            assert!(running.request(action).is_none(), "no second send");
+        }
+        prompts.entries.get_mut(&key).unwrap().busy = Some(Action::End);
+        prompts.answered(&key, &Err("Timed out".into()));
+        let (message, actions) = shown(&prompts.entries[&key], true);
+        assert_eq!(message, "Timed out");
+        assert!(actions.len() > 1, "the choices return after an answer");
     }
 }

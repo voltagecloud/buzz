@@ -218,6 +218,28 @@ impl LocalActivity {
         }
     }
 
+    /// Hides `agent`'s failures in one thread once a later start or
+    /// recovery there works. They describe attempts the working session
+    /// replaced, and a shown failure would hide that session's activity.
+    pub fn resolve_thread(&self, agent: &str, channel_id: &str, thread_root_id: &str) {
+        let mut inner = self.lock();
+        let mut changed = false;
+        for (_, row) in inner.entries.iter_mut() {
+            if row.state == LocalWorkState::Error
+                && !row.dismissed
+                && row.agent == agent
+                && row.channel_id == channel_id
+                && row.thread_root_id == thread_root_id
+            {
+                row.dismissed = true;
+                changed = true;
+            }
+        }
+        if changed {
+            inner.publish();
+        }
+    }
+
     fn update(
         &self,
         id: u64,
@@ -332,7 +354,8 @@ pub fn breathing(row: Option<&LocalWork>) -> bool {
 }
 
 /// Each agent's most telling row in `channel` (or one thread of it):
-/// working over waiting over failed over settled (`localActivity`).
+/// working over waiting over failed over settled (`localActivity`). A
+/// dismissed failure is skipped, so it hides no live evidence.
 pub fn local_activity<'a>(
     local: &'a [LocalWork],
     channel: &str,
@@ -340,7 +363,9 @@ pub fn local_activity<'a>(
 ) -> BTreeMap<&'a str, &'a LocalWork> {
     let mut agents: BTreeMap<&str, &LocalWork> = BTreeMap::new();
     for row in local.iter().filter(|row| {
-        row.channel_id == channel && thread_root.is_none_or(|root| row.thread_root_id == root)
+        row.channel_id == channel
+            && thread_root.is_none_or(|root| row.thread_root_id == root)
+            && !(row.state == LocalWorkState::Error && row.dismissed)
     }) {
         match agents.get(row.agent.as_str()) {
             Some(previous) if row.state.rank() <= previous.state.rank() => {}
