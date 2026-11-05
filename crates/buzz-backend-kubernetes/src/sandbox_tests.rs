@@ -1418,3 +1418,36 @@ fn direct_messages_have_one_isolated_workspace_and_owner_gated_conversation_env(
         assert!(parse(invalid).is_err());
     }
 }
+
+#[test]
+fn a_pod_the_quota_refused_names_the_full_limit() {
+    let sandbox = |ready: serde_json::Value| -> DynamicObject {
+        serde_json::from_value(serde_json::json!({
+            "apiVersion": "agents.x-k8s.io/v1alpha1", "kind": "Sandbox",
+            "metadata": {"name": "buzz-agent-a"},
+            "status": {"conditions": [
+                {"type": "Suspended", "status": "False", "message": "Sandbox is not suspended"},
+                ready,
+            ]},
+        }))
+        .unwrap()
+    };
+    // The controller's message from staging.
+    let sessions = sandbox(serde_json::json!({"type": "Ready", "status": "False",
+        "reason": "ReconcilerError",
+        "message": "Error seen: pods \"buzz-agent-a\" is forbidden: exceeded quota: primary-sessions, requested: pods=1, used: pods=5, limited: pods=5"}));
+    assert!(pod_not_created(&sessions).starts_with("All of your agent sessions are in use"));
+    let capacity = sandbox(serde_json::json!({"type": "Ready", "status": "False",
+        "message": "pods \"x\" is forbidden: exceeded quota: agent-capacity, requested: requests.cpu=2"}));
+    assert!(pod_not_created(&capacity).contains("quota `agent-capacity` is full"));
+    for unknown in [
+        sandbox(
+            serde_json::json!({"type": "Ready", "status": "False", "message": "image pull backoff"}),
+        ),
+        sandbox(
+            serde_json::json!({"type": "Ready", "status": "True", "message": "exceeded quota: primary-sessions"}),
+        ),
+    ] {
+        assert!(pod_not_created(&unknown).starts_with("Sandbox controller has not created its Pod"));
+    }
+}
