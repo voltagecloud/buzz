@@ -161,7 +161,7 @@ A profile can contain `openai_api_key` or `codex_access_token`, not both: Codex 
 A profile can contain `anthropic_api_key` or `claude_oauth_token`, not both. Claude Code prefers an API key, so mixing them would bill the API silently.
 `openrouter_api_key` serves the Buzz agent runtime (`buzz-agent`), which can run any OpenRouter model: set the agent's model to an OpenRouter model ID such as `qwen/qwen3-coder`.
 The bootstrap refuses an inherited `OPENAI_API_KEY`, `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, or `OPENROUTER_API_KEY`.
-Model credentials stay in the harness environment and are never written to workspace files. Tools that the agent runs inherit them.
+Model credentials stay in process environments and are never written to workspace files. Tools that the agent runs inherit them: the agent's tool shell starts from a cleared environment, so the bootstrap lists them in `BUZZ_ACP_MCP_FORWARD_ENV`, which `buzz-acp` forwards into that shell. `buzz-agent-review` uses them to run its reviewer.
 The checkpoint secret scan also refuses Claude subscription tokens.
 
 ### Commit signing

@@ -6673,6 +6673,43 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
     Ok(())
 }
 
+/// Operator-listed variables the agent's tool shell inherits from the harness.
+///
+/// MCP children start from a cleared environment. `BUZZ_ACP_MCP_FORWARD_ENV`
+/// names, comma-separated, the harness variables to pass through, such as an
+/// image's model credentials so tools the agent runs can reach its runtime.
+/// Unset forwards nothing. Invalid names, and names in `reserved`, which the
+/// harness sets itself, are ignored; unset or empty values are skipped.
+fn forwarded_mcp_env(
+    list: Option<&str>,
+    reserved: &[EnvVar],
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Vec<EnvVar> {
+    let mut forwarded: Vec<EnvVar> = Vec::new();
+    for name in list.unwrap_or("").split(',').map(str::trim) {
+        let valid = !name.is_empty()
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_');
+        if !valid
+            || git::is_managed_env(name)
+            || reserved
+                .iter()
+                .chain(&forwarded)
+                .any(|entry| entry.name == name)
+        {
+            continue;
+        }
+        if let Some(value) = lookup(name).filter(|value| !value.is_empty()) {
+            forwarded.push(EnvVar {
+                name: name.to_string(),
+                value,
+            });
+        }
+    }
+    forwarded
+}
+
 fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
     if config.mcp_command.is_empty() {
         return vec![];
@@ -6736,6 +6773,12 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
                     });
                 }
             }
+            let forwarded = forwarded_mcp_env(
+                std::env::var("BUZZ_ACP_MCP_FORWARD_ENV").ok().as_deref(),
+                &env,
+                |name| std::env::var(name).ok(),
+            );
+            env.extend(forwarded);
             env
         },
     }]
@@ -10857,6 +10900,55 @@ mod build_mcp_servers_tests {
         assert!(std::path::Path::new(&keyfile).exists());
         drop(git);
         assert!(!std::path::Path::new(&keyfile).exists());
+    }
+
+    #[test]
+    fn listed_harness_variables_reach_the_tool_shell_and_nothing_else() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = test_config();
+        let names = [
+            "BUZZ_ACP_MCP_FORWARD_ENV",
+            "BUZZ_TEST_FORWARD_CLAUDE",
+            "BUZZ_TEST_FORWARD_CODEX",
+            "BUZZ_TEST_FORWARD_UNLISTED",
+        ];
+        let saved: Vec<_> = names.iter().map(|n| (*n, std::env::var(n).ok())).collect();
+        let shell = |list: Option<&str>| {
+            match list {
+                Some(list) => std::env::set_var("BUZZ_ACP_MCP_FORWARD_ENV", list),
+                None => std::env::remove_var("BUZZ_ACP_MCP_FORWARD_ENV"),
+            }
+            build_mcp_servers(&config).remove(0).env
+        };
+        std::env::set_var("BUZZ_TEST_FORWARD_CLAUDE", "synthetic-claude");
+        std::env::set_var("BUZZ_TEST_FORWARD_CODEX", "synthetic-codex");
+        std::env::set_var("BUZZ_TEST_FORWARD_UNLISTED", "synthetic-unlisted");
+        let has = |env: &[EnvVar], name: &str| env.iter().any(|entry| entry.name == name);
+        // Default: the shell stays credential-free.
+        let env = shell(None);
+        assert!(!has(&env, "BUZZ_TEST_FORWARD_CLAUDE") && !has(&env, "BUZZ_TEST_FORWARD_CODEX"));
+        // Listed names pass through; unlisted, unset, invalid and the
+        // harness's own variables do not.
+        let env = shell(Some(
+            " BUZZ_TEST_FORWARD_CLAUDE,BUZZ_TEST_FORWARD_CODEX,BUZZ_TEST_FORWARD_UNSET,bad-name,BUZZ_PRIVATE_KEY,BUZZ_TEST_FORWARD_CODEX",
+        ));
+        let value = |name: &str| {
+            env.iter()
+                .filter(|entry| entry.name == name)
+                .map(|entry| entry.value.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(value("BUZZ_TEST_FORWARD_CLAUDE"), ["synthetic-claude"]);
+        assert_eq!(value("BUZZ_TEST_FORWARD_CODEX"), ["synthetic-codex"]);
+        assert!(!has(&env, "BUZZ_TEST_FORWARD_UNLISTED") && !has(&env, "BUZZ_TEST_FORWARD_UNSET"));
+        assert_eq!(value("BUZZ_PRIVATE_KEY").len(), 1, "never overridden");
+        assert_ne!(value("BUZZ_PRIVATE_KEY"), ["synthetic-unlisted"]);
+        for (name, value) in saved {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
     }
 
     #[test]

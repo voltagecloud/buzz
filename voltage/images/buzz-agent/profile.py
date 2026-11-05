@@ -277,6 +277,11 @@ def bootstrap():
         env.setdefault('BUZZ_AGENT_PROVIDER', 'openrouter')
     if 'claude_oauth_token' in profile['models']:
         env['CLAUDE_CODE_OAUTH_TOKEN'] = profile['models']['claude_oauth_token']
+    # The agent's tool shell starts from a cleared environment. Forward the model
+    # credentials so tools it runs, such as buzz-agent-review, reach the runtime;
+    # they stay in process environments and are never written to files.
+    env['BUZZ_ACP_MCP_FORWARD_ENV'] = ','.join(
+        name for name in (*INHERITED_MODEL_VARIABLES, 'CODEX_HOME') if env.get(name))
     step('configuring Git commit signing')
     command('/usr/local/bin/buzz-agent-account', 'init', env=env)
     return env
