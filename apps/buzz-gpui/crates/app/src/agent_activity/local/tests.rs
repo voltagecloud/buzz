@@ -149,13 +149,46 @@ fn a_working_session_hides_the_failed_attempts_it_replaced() {
     };
     assert_eq!(shown(&root), Some(LocalWorkState::Error));
 
-    store.resolve_thread(&agent, "channel", Some(&root));
+    store.resolve_thread(SCOPE, &agent, "channel", Some(&root));
     // Nothing left to outrank live evidence of the recovered session.
     assert_eq!(shown(&root), None);
     // The outcomes stay, hidden; the other thread's failure still shows.
     assert_eq!(store.work().iter().filter(|row| row.dismissed).count(), 2);
     assert_eq!(shown(&"c".repeat(64)), Some(LocalWorkState::Error));
     // A DM session serves the whole conversation: no thread to match.
-    store.resolve_thread(&agent, "channel", None);
+    store.resolve_thread(SCOPE, &agent, "channel", None);
     assert_eq!(shown(&"c".repeat(64)), None);
+}
+
+#[test]
+fn a_working_session_leaves_another_communitys_failures_alone() {
+    let store = LocalActivity::default();
+    let agent = "a".repeat(64);
+    let root = "b".repeat(64);
+    // The same agent, channel, and thread IDs in a second community.
+    let other_scope = "https://other.test:viewer";
+    store
+        .begin(
+            Begin {
+                scope: other_scope.into(),
+                agent: agent.clone(),
+                channel_id: "channel".into(),
+                message_id: "elsewhere".into(),
+                thread_root_id: root.clone(),
+            },
+            1,
+        )
+        .finish(WorkOutcome::failed("session_ended"));
+    begin(&store, "here").finish(WorkOutcome::failed("session_ended"));
+
+    store.resolve_thread(SCOPE, &agent, "channel", Some(&root));
+    let dismissed = |scope: &str| {
+        store
+            .work()
+            .iter()
+            .find(|row| row.scope == scope)
+            .map(|row| row.dismissed)
+    };
+    assert_eq!(dismissed(SCOPE), Some(true));
+    assert_eq!(dismissed(other_scope), Some(false));
 }

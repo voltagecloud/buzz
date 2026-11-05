@@ -231,7 +231,7 @@ fn a_recovered_session_shows_working_over_the_failure_it_replaced() {
     assert_eq!(f.bubble(&mention)[0].state, WorkState::Error);
 
     // Recover works; the recovered turn replays the same mention.
-    local.resolve_thread(&agent, "channel", Some(&root));
+    local.resolve_thread(SCOPE, &agent, "channel", Some(&root));
     f.activity.set_local(local.work(), NOW);
     f.send("turn_started", "recovered", &mention);
     f.send("turn_liveness", "recovered", &mention);

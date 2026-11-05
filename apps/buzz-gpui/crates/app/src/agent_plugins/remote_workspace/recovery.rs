@@ -139,6 +139,10 @@ struct Entry {
     view: View,
     /// The action in flight, if any.
     busy: Option<Action>,
+    /// Which recorded failure this is. A later failed start replaces the
+    /// entry with a newer generation, so an older action's answer cannot
+    /// clear or change it.
+    generation: u64,
 }
 
 impl Entry {
@@ -168,6 +172,8 @@ pub struct Prompts {
     /// By agent; absent until its host answers.
     lifecycle: HashMap<String, bool>,
     checking: HashSet<String>,
+    /// The last [`Entry::generation`] given out.
+    generation: u64,
 }
 
 impl Global for Prompts {}
@@ -222,11 +228,13 @@ impl Prompts {
             expected_signer_pubkey: session.tenant.signer.clone(),
             error: error.clone(),
         });
+        self.generation += 1;
         let entry = Entry {
             session: session.clone(),
             replay_floor: *replay_floor,
             view,
             busy: None,
+            generation: self.generation,
         };
         self.entries.insert(key, entry);
         let kept: HashSet<RecoveryPromptKey> = self.prompts.iter().map(|p| p.key()).collect();
@@ -239,14 +247,28 @@ impl Prompts {
         self.entries.remove(key);
     }
 
+    /// Whether `key`'s prompt is still the failure an action of
+    /// `generation` was sent for.
+    fn current(&self, key: &RecoveryPromptKey, generation: u64) -> bool {
+        self.entries
+            .get(key)
+            .is_some_and(|entry| entry.generation == generation)
+    }
+
     /// An action's answer: a recovery clears the prompt; an End or a
-    /// failure picks the next banner.
+    /// failure picks the next banner. An answer for an older generation
+    /// changes nothing: a newer failed start replaced its prompt.
     pub fn answered(
         &mut self,
         key: &RecoveryPromptKey,
+        generation: u64,
         answer: &Result<SandboxResponse, SessionError>,
     ) {
-        let Some(entry) = self.entries.get_mut(key) else {
+        let Some(entry) = self
+            .entries
+            .get_mut(key)
+            .filter(|entry| entry.generation == generation)
+        else {
             return;
         };
         entry.busy = None;
@@ -313,8 +335,13 @@ pub fn started(sent: &Sent, name: &str, cx: &mut App) {
 }
 
 /// A session that works in a thread replaces the attempts that failed
-/// there, so their "Could not finish" no longer hides its activity.
+/// there, so their "Could not finish" no longer hides its activity. Only
+/// the session's own community changes: the scope is the one the agent's
+/// local work records (`agents2::service::work_scope`).
 fn resolve(session: &SandboxSession, cx: &mut App) {
+    let Some(scope) = work_scope(session) else {
+        return;
+    };
     let (channel, root) = match &session.scope {
         SandboxScope::Thread {
             channel_id,
@@ -324,7 +351,16 @@ fn resolve(session: &SandboxSession, cx: &mut App) {
         SandboxScope::DirectMessage { dm_channel_id } => (dm_channel_id, None),
     };
     cx.default_global::<crate::agent_activity::local::LocalActivity>()
-        .resolve_thread(&session.pubkey, channel, root);
+        .resolve_thread(&scope, &session.pubkey, channel, root);
+}
+
+/// The local work scope of the session's community and owner.
+fn work_scope(session: &SandboxSession) -> Option<String> {
+    let origin = buzz_relay_client::RelayOrigin::parse(&session.tenant.relay).ok()?;
+    Some(crate::agent_activity::local::scope(
+        &origin.http(),
+        &session.tenant.signer,
+    ))
 }
 
 fn check_lifecycle(session: &SandboxSession, cx: &mut App) {
@@ -425,17 +461,24 @@ fn act(key: &RecoveryPromptKey, action: Action, cx: &mut App) {
         crate::runtime::Runtime::handle(cx).spawn(async move { send(&link, request).await });
     let key = key.clone();
     let session = entry.session.clone();
+    let generation = entry.generation;
     cx.spawn(async move |cx| {
         let answer = answer
             .await
             .unwrap_or_else(|_| Err("The request was cancelled".into()));
         cx.update(|cx| {
+            // A newer failed start may have replaced this prompt while the
+            // request ran; its failure must stay shown.
+            if !cx.global::<Prompts>().current(&key, generation) {
+                return;
+            }
             if matches!(action, Action::Recover(_))
                 && matches!(&answer, Ok(SandboxResponse::Started))
             {
                 resolve(&session, cx);
             }
-            cx.global_mut::<Prompts>().answered(&key, &answer);
+            cx.global_mut::<Prompts>()
+                .answered(&key, generation, &answer);
             thread_banners::refresh(cx);
         });
     })
@@ -594,24 +637,25 @@ mod tests {
         let mut prompts = Prompts::default();
         prompts.started(&sent('c', Err(coded("session_active"))), "Ada");
         let key = key_of(&session('c')).unwrap().0;
+        let generation = prompts.entries[&key].generation;
         let view = |prompts: &Prompts| prompts.entries[&key].view.clone();
         assert_eq!(view(&prompts).kind, RecoveryKind::EndFirst);
         let ending = Ok(SandboxResponse::Ended {
             state: EndState::Ending,
         });
-        prompts.answered(&key, &ending);
+        prompts.answered(&key, generation, &ending);
         assert_eq!(view(&prompts).kind, RecoveryKind::Ending);
         let absent = Ok(SandboxResponse::Ended {
             state: EndState::Absent,
         });
-        prompts.answered(&key, &absent);
+        prompts.answered(&key, generation, &absent);
         assert_eq!(view(&prompts).kind, RecoveryKind::Recover);
         assert!(!view(&prompts).offers_checkpoint);
         // A failure without a code keeps the buttons.
-        prompts.answered(&key, &Err("Timed out".into()));
+        prompts.answered(&key, generation, &Err("Timed out".into()));
         assert_eq!(view(&prompts).kind, RecoveryKind::Recover);
         assert_eq!(view(&prompts).message, "Timed out");
-        prompts.answered(&key, &Ok(SandboxResponse::Started));
+        prompts.answered(&key, generation, &Ok(SandboxResponse::Started));
         assert!(prompts.for_thread(&thread('c')).is_empty());
     }
 
@@ -637,10 +681,48 @@ mod tests {
             assert_eq!(message, action.progress());
             assert!(running.request(action).is_none(), "no second send");
         }
+        let generation = prompts.entries[&key].generation;
         prompts.entries.get_mut(&key).unwrap().busy = Some(Action::End);
-        prompts.answered(&key, &Err("Timed out".into()));
+        prompts.answered(&key, generation, &Err("Timed out".into()));
         let (message, actions) = shown(&prompts.entries[&key], true);
         assert_eq!(message, "Timed out");
         assert!(actions.len() > 1, "the choices return after an answer");
+    }
+
+    #[test]
+    fn an_older_answer_leaves_a_newer_failure_alone() {
+        let mut prompts = Prompts::default();
+        prompts.started(&sent('c', Err(coded("session_ended"))), "Ada");
+        let key = key_of(&session('c')).unwrap().0;
+        let older = prompts.entries[&key].generation;
+        prompts.entries.get_mut(&key).unwrap().busy = Some(Action::Recover(RecoveryMode::Fresh));
+        // While Recover runs, a later mention fails to start too.
+        prompts.started(&sent('c', Err(coded("config_differs"))), "Ada");
+        let newer = prompts.entries[&key].generation;
+        assert_ne!(older, newer);
+        assert!(!prompts.current(&key, older));
+        assert!(prompts.current(&key, newer));
+
+        // The first Recover's answers arrive late: nothing changes.
+        let before = prompts.entries[&key].view.clone();
+        prompts.answered(&key, older, &Ok(SandboxResponse::Started));
+        assert_eq!(prompts.for_thread(&thread('c')).len(), 1);
+        assert_eq!(prompts.entries[&key].view, before);
+        prompts.answered(&key, older, &Err("Timed out".into()));
+        assert_eq!(prompts.entries[&key].view, before);
+
+        // The newer prompt's own answer still applies.
+        prompts.answered(&key, newer, &Ok(SandboxResponse::Started));
+        assert!(prompts.for_thread(&thread('c')).is_empty());
+    }
+
+    #[test]
+    fn resolve_uses_the_scope_local_work_records() {
+        let expected =
+            crate::agent_activity::local::scope("https://relay.example", &"a".repeat(64));
+        assert_eq!(work_scope(&session('c')), Some(expected));
+        let mut unparsable = session('c');
+        unparsable.tenant.relay = "not a relay".into();
+        assert_eq!(work_scope(&unparsable), None);
     }
 }

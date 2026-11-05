@@ -227,19 +227,28 @@ impl LocalActivity {
         }
     }
 
-    /// Hides `agent`'s failures in one thread, or in the whole channel for
-    /// a DM (`thread_root_id` `None`), once a start or recovery there works.
-    /// They describe attempts the working session replaced, and a shown
-    /// failure would hide that session's activity. The session replays
-    /// from its floor, so a failure on an earlier message is hidden though
-    /// it is not retried; the owner can still read it in the outcome.
+    /// Hides `agent`'s failures in one thread of one community ([`scope`]),
+    /// or in the whole channel for a DM (`thread_root_id` `None`), once a
+    /// start or recovery there works. They describe attempts the working
+    /// session replaced, and a shown failure would hide that session's
+    /// activity. The session replays from its floor, so a failure on an
+    /// earlier message is hidden though it is not retried; the owner can
+    /// still read it in the outcome. Another community's rows never change,
+    /// even with the same agent, channel, and thread IDs.
     #[cfg(any(feature = "voltage-sandbox", test))]
-    pub fn resolve_thread(&self, agent: &str, channel_id: &str, thread_root_id: Option<&str>) {
+    pub fn resolve_thread(
+        &self,
+        scope: &str,
+        agent: &str,
+        channel_id: &str,
+        thread_root_id: Option<&str>,
+    ) {
         let mut inner = self.lock();
         let mut changed = false;
         for (_, row) in inner.entries.iter_mut() {
             if row.state == LocalWorkState::Error
                 && !row.dismissed
+                && row.scope == scope
                 && row.agent == agent
                 && row.channel_id == channel_id
                 && thread_root_id.is_none_or(|root| row.thread_root_id == root)
