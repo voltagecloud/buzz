@@ -212,6 +212,31 @@ fn teammate_tasks_and_cross_owner_handoffs_preserve_actual_requester() {
     assert_eq!(back.origin.request, f.request.id);
     assert_eq!(back.origin.parent, handoff.id);
     assert_eq!(back.requester, f.peer.public_key());
+    // Two more round trips: each handoff and its return is a link, so the
+    // chain reaches six links within the budget's bound.
+    let mut source = returned;
+    for _ in 0..2 {
+        let (out, back) = (
+            (f.agent.clone(), f.peer.clone()),
+            (f.peer.clone(), f.agent.clone()),
+        );
+        for (from, to) in [out, back] {
+            let link = task::handoff(&source, from.public_key(), to.public_key(), "more", 103)
+                .unwrap()
+                .custom_created_at(Timestamp::from(103))
+                .sign_with_keys(&from)
+                .unwrap();
+            f.events.push(link.clone());
+            let owner = if to.public_key() == f.agent.public_key() {
+                f.owner.public_key()
+            } else {
+                f.other.public_key()
+            };
+            let admitted = f.check(&link, owner, to.public_key()).unwrap();
+            assert_eq!(admitted.origin.parent, source.id);
+            source = link;
+        }
+    }
 }
 
 #[test]

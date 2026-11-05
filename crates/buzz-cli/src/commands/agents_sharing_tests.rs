@@ -147,3 +147,75 @@ async fn share_and_unshare_publish_signed_scoped_heads_after_owner_verification(
     }
     server.abort();
 }
+
+#[tokio::test]
+async fn return_answers_the_delegating_agent_and_refuses_a_human_mention() {
+    let owner = Keys::generate();
+    let (coordinator, worker, human) = (Keys::generate(), Keys::generate(), Keys::generate());
+    let channel = uuid::Uuid::new_v4();
+    let request = EventBuilder::new(Kind::Custom(9), "ship it")
+        .tag(nostr::Tag::parse(["h".to_owned(), channel.to_string()]).unwrap())
+        .tag(nostr::Tag::public_key(coordinator.public_key()))
+        .sign_with_keys(&human)
+        .unwrap();
+    let now = nostr::Timestamp::now().as_secs();
+    let handoff = buzz_sdk::sharing::task::handoff(
+        &request,
+        coordinator.public_key(),
+        worker.public_key(),
+        "build the price feed",
+        now,
+    )
+    .unwrap()
+    .sign_with_keys(&coordinator)
+    .unwrap();
+    let mention = EventBuilder::new(Kind::Custom(9), "@worker hi")
+        .tag(nostr::Tag::parse(["h".to_owned(), channel.to_string()]).unwrap())
+        .tag(nostr::Tag::public_key(worker.public_key()))
+        .sign_with_keys(&human)
+        .unwrap();
+    let known = vec![handoff.clone(), mention.clone()];
+    let writes = Arc::new(Mutex::new(Vec::<Event>::new()));
+    let app = Router::new()
+        .route("/query", post(move |Json(filters): Json<Vec<serde_json::Value>>| {
+            let known = known.clone();
+            async move {
+                let id = filters[0]["ids"][0].as_str().unwrap().to_owned();
+                Json(known.into_iter().filter(|e| e.id.to_hex() == id).collect::<Vec<_>>())
+            }
+        }))
+        .route("/events", post(|State(writes): State<Arc<Mutex<Vec<Event>>>>, Json(event): Json<Event>| async move {
+            event.verify().unwrap();
+            let id = event.id;
+            writes.lock().unwrap().push(event);
+            Json(json!({"event_id":id,"accepted":true,"message":""}))
+        })).with_state(writes.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let auth = buzz_sdk::nip_oa::compute_auth_tag(&owner, &worker.public_key(), "").unwrap();
+    let client = BuzzClient::new(
+        url,
+        worker.clone(),
+        Some(buzz_sdk::nip_oa::parse_auth_tag(&auth).unwrap()),
+        None,
+    )
+    .unwrap();
+    let back = |from: &Event| AgentsCmd::Return {
+        from: from.id.to_hex(),
+        message: "price feed merged".into(),
+    };
+    dispatch(back(&handoff), &client).await.unwrap();
+    assert!(dispatch(back(&mention), &client).await.is_err());
+    let events = writes.lock().unwrap();
+    assert_eq!(events.len(), 1, "the human mention was not returned");
+    let result = &events[0];
+    assert_eq!(result.pubkey, worker.public_key());
+    // Addressed to the coordinator, as the reply to its handoff.
+    buzz_sdk::sharing::task::scope(result, coordinator.public_key(), now + 1).unwrap();
+    let origin = buzz_sdk::sharing::task::origin(result).unwrap().unwrap();
+    assert_eq!(origin.request, request.id);
+    assert_eq!(origin.agent, coordinator.public_key());
+    assert_eq!(origin.parent, handoff.id);
+    server.abort();
+}

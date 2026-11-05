@@ -43,6 +43,19 @@ parent event. A durable manager journal permits four handoffs total and at most
 two admissions per agent under one human-to-initial-agent task. A duplicate
 admission consumes no additional budget. The task expires after seven days.
 
+When the target finishes, it reports back to the agent that handed it the work:
+
+```sh
+buzz agents return --from <incoming-handoff-event-id> --message 'Merged the price feed in #123'
+```
+
+A return wakes the delegating agent with the result, so a coordinator can fan
+work out and collect every result without a human. A plain @mention of an agent
+does not wake it: it is refused as an agent request without task ancestry.
+Each handoff returns once, and a return cannot itself be returned. Returns do not
+count against the four-handoff or two-admission limits, and there can never be
+more returns than handoffs. Replying to a result with new work is a handoff.
+
 ## Schedule remote work
 
 In desktop, open **Workflows**, choose a channel, and create a workflow with a

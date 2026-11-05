@@ -197,7 +197,8 @@ where
 }
 
 // Verify the signed relationship as well as the later manager's durable
-// receipt. Four links bound both work and relay queries; a cycle never grows.
+// receipt. Each handoff and its one return is a link, so the budget bounds
+// both work and relay queries; a cycle never grows.
 async fn ancestry<F, Fut>(
     query: &mut F,
     event: &Event,
@@ -212,7 +213,7 @@ where
 {
     let denied = || Error::Denied("handoff parent does not match this task");
     let mut child = event.clone();
-    for _ in 0..4 {
+    for _ in 0..2 * super::budget::MAX_HANDOFFS {
         let claimed = task::origin(&child)
             .map_err(|_| denied())?
             .ok_or_else(denied)?;
