@@ -42,12 +42,25 @@ class Refused(Exception):
     pass
 
 
+def kube_tls(cafile):
+    """A TLS context that verifies the API server against the cluster CA.
+
+    Python 3.13 turns on VERIFY_X509_STRICT, which requires an Authority Key
+    Identifier. EKS serves kube-apiserver certificates without one, so strict
+    mode refuses every request. Chain and hostname verification stay on;
+    only the RFC 5280 strict-profile checks are dropped.
+    """
+    context = ssl.create_default_context(cafile=cafile)
+    context.verify_flags &= ~ssl.VERIFY_X509_STRICT
+    return context
+
+
 def api(method, path, body=None):
     token = (CREDENTIALS / 'token').read_text().strip()
     server = os.environ.get('BUZZ_SUBAGENT_API') or 'https://{}:{}'.format(
         os.environ['KUBERNETES_SERVICE_HOST'], os.environ.get('KUBERNETES_SERVICE_PORT', '443'))
     # The API server is verified against the cluster CA; plain HTTP is only for tests.
-    context = ssl.create_default_context(cafile=str(CREDENTIALS / 'ca.crt')) if server.startswith('https://') else None
+    context = kube_tls(str(CREDENTIALS / 'ca.crt')) if server.startswith('https://') else None
     request = urllib.request.Request(server + '/' + path, method=method,
                                      data=None if body is None else json.dumps(body).encode(),
                                      headers={'Authorization': 'Bearer ' + token,
