@@ -98,6 +98,7 @@ COPY --chmod=0644 voltage/images/buzz-agent/cluster.md /etc/buzz-agent/cluster.m
 # not change it; profile.py links each skill into the harnesses.
 # hadolint ignore=DL3022
 COPY --from=engineering-skills . /opt/engineering-skills/
+COPY --chmod=0644 voltage/images/buzz-agent/environment.md /etc/buzz-agent/environment.md
 COPY --chmod=0755 voltage/images/buzz-agent/heavy-bin/ /opt/buzz-heavy/bin/
 COPY --chmod=0755 voltage/images/buzz-agent/gh.sh /usr/local/bin/gh
 COPY --chmod=0755 voltage/images/buzz-agent/via.sh /usr/local/bin/via
