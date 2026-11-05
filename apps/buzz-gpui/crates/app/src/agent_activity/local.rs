@@ -233,6 +233,7 @@ impl LocalActivity {
     /// failure would hide that session's activity. The session replays
     /// from its floor, so a failure on an earlier message is hidden though
     /// it is not retried; the owner can still read it in the outcome.
+    #[cfg(any(feature = "voltage-sandbox", test))]
     pub fn resolve_thread(&self, agent: &str, channel_id: &str, thread_root_id: Option<&str>) {
         let mut inner = self.lock();
         let mut changed = false;
