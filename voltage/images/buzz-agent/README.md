@@ -26,7 +26,9 @@ The build context is the repository root. `Dockerfile.dockerignore` next to the 
 From the repository root:
 
 ```bash
-docker build --platform linux/amd64 -f voltage/images/buzz-agent/Dockerfile -t buzz-agent:local .
+sh voltage/images/buzz-agent/select-skills.sh --none /tmp/engineering-skills
+docker build --platform linux/amd64 -f voltage/images/buzz-agent/Dockerfile \
+  --build-context engineering-skills=/tmp/engineering-skills -t buzz-agent:local .
 cd voltage/images/buzz-agent
 bash test-image.sh buzz-agent:local
 bash test-harness.sh buzz-agent:local
@@ -42,12 +44,35 @@ python3 test-worker.py buzz-agent:local
 python3 test-cache.py buzz-agent:local
 python3 -O test-profile.py buzz-agent:local
 python3 test-cluster.py buzz-agent:local
+python3 test-skills.py buzz-agent:local
 ```
+
+To build with the engineering skills, replace `--none` with a local checkout:
+`sh voltage/images/buzz-agent/select-skills.sh ../engineering-skills /tmp/engineering-skills`.
 
 `test-image.sh` also runs `test-review.py`; run the Python script directly for focused review checks.
 These checks use synthetic tasks and accounts. Live GitHub, signing, `via`, cache, and staging behavior require end-to-end validation.
 Run the bundled Rust suites with `docker build --platform linux/amd64 --target package-checks -f voltage/images/buzz-agent/Dockerfile .`.
 Build and test `linux/arm64` on an arm64 host, or through `.github/workflows/voltage-agent-images.yml`, which builds each platform on a native runner.
+
+## Engineering skills
+
+The image ships [voltagecloud/engineering-skills](https://github.com/voltagecloud/engineering-skills) (internal) in `/opt/engineering-skills`, owned by root.
+That repository is internal and this one is public, so the skills reach the build only as the `engineering-skills` [build context](https://docs.docker.com/build/building/context/#named-contexts).
+`select-skills.sh` makes that context. It leaves out `walkthrough-video` and `cli-demo-video`, which need a browser, narration, and VHS, and writes the source commit to `REVISION`.
+
+| Build | Skills |
+| --- | --- |
+| `main` (publish job) | `master` of engineering-skills at build time; the image label `cloud.voltage.engineering-skills.revision` records the commit |
+| Pull requests, other refs, local builds | None (`select-skills.sh --none`) |
+
+The publish job reads the repository with a short-lived token from the `voltage-agent-images` GitHub App: read-only contents, limited to engineering-skills.
+The app's client ID and private key are the `AGENT_IMAGE_APP_CLIENT_ID` and `AGENT_IMAGE_APP_PRIVATE_KEY` secrets of the `engineering-skills` environment, which only `main` may use.
+A skills change reaches agents with the next published agent image. To publish one without a code change, run the `Voltage images` workflow on `main` with `agent_only`.
+
+At each session and worker start, `buzz-agent-profile` links every skill into `~/.claude/skills`, `$CODEX_HOME/skills`, and `~/.agents/skills`.
+It manages only its own links: a skill the agent wrote keeps its name, and links to skills a newer image dropped are removed.
+A linking failure prints a warning; the session still starts.
 
 ## Sandbox contract
 

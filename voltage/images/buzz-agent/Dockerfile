@@ -92,6 +92,11 @@ COPY --chmod=0755 voltage/images/buzz-agent/subagent.py /usr/local/bin/buzz-suba
 RUN install -d -m 0755 /etc/buzz-agent
 COPY --chmod=0644 voltage/images/buzz-agent/subagents.md /etc/buzz-agent/subagents.md
 COPY --chmod=0644 voltage/images/buzz-agent/cluster.md /etc/buzz-agent/cluster.md
+# Voltage engineering skills from the `engineering-skills` build context, made by
+# select-skills.sh: master of voltagecloud/engineering-skills on main, empty for
+# pull requests and local builds. Root owns the copy, so the agent can read but
+# not change it; profile.py links each skill into the harnesses.
+COPY --from=engineering-skills . /opt/engineering-skills/
 COPY --chmod=0755 voltage/images/buzz-agent/heavy-bin/ /opt/buzz-heavy/bin/
 COPY --chmod=0755 voltage/images/buzz-agent/gh.sh /usr/local/bin/gh
 COPY --chmod=0755 voltage/images/buzz-agent/via.sh /usr/local/bin/via

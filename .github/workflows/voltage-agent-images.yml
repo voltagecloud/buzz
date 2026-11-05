@@ -11,13 +11,21 @@ name: Voltage images
 #   buzz-relay           the upstream root Dockerfile (target runtime) → buzz-relay
 #
 # The changes job selects only the images whose inputs changed. Manual runs
-# (workflow_dispatch) build all three.
+# (workflow_dispatch) build all three, or only buzz-agent with agent_only.
 #
 # Trust model: this repository and its logs are public. Pull requests run
 # without AWS access. Only the publish and merge jobs request an OIDC token,
 # and they run only on main, the only ref that the github-buzz-ecr-push role
 # trusts. The AWS_ACCOUNT_ID secret keeps the account ID out of the
 # repository and masks it in the logs.
+#
+# Engineering skills: the agent image ships voltagecloud/engineering-skills
+# (internal) from that repository's master branch at build time. Only the
+# publish job reads it, with a short-lived, read-only token from the
+# voltage-agent-images GitHub App. The app's client ID and key are secrets of
+# the `engineering-skills` environment, which only main may use, so pull
+# requests never receive them; they build with an empty skills context.
+# select-skills.sh prints counts only, never skill content.
 on:
   push:
     branches: [main]
@@ -61,7 +69,12 @@ on:
       - admin-web/**
       - .github/workflows/voltage-agent-images.yml
   # Publishes only when run on main; on other refs it builds and tests.
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      agent_only:
+        description: "Build only buzz-agent, for example to ship new engineering skills"
+        type: boolean
+        default: false
 
 # Pull requests share one group per ref and cancel superseded runs. Each main
 # commit gets its own group: a queued main run that a newer push replaced
@@ -138,14 +151,15 @@ jobs:
       - name: Build the image matrices
         id: select
         env:
-          ALL: ${{ github.event_name == 'workflow_dispatch' }}
+          ALL: ${{ github.event_name == 'workflow_dispatch' && !inputs.agent_only }}
+          AGENT_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.agent_only }}
           AGENT: ${{ steps.filter.outputs.agent }}
           REAPER: ${{ steps.filter.outputs.reaper }}
           RELAY: ${{ steps.filter.outputs.relay }}
         run: |
           set -euo pipefail
           selected=()
-          if [ "$ALL" = true ] || [ "$AGENT" = true ]; then selected+=(buzz-agent); fi
+          if [ "$ALL" = true ] || [ "$AGENT_ONLY" = true ] || [ "$AGENT" = true ]; then selected+=(buzz-agent); fi
           if [ "$ALL" = true ] || [ "$REAPER" = true ]; then selected+=(buzz-sandbox-reaper); fi
           if [ "$ALL" = true ] || [ "$RELAY" = true ]; then selected+=(buzz-relay); fi
           images='{
@@ -221,6 +235,9 @@ jobs:
           buildkitd-config-inline: |
             [worker.oci]
               max-parallelism = 2
+      # Pull requests never read the internal skills repository.
+      - name: Empty engineering skills context
+        run: sh voltage/images/buzz-agent/select-skills.sh --none "$RUNNER_TEMP/engineering-skills"
       - name: Build
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
@@ -229,6 +246,7 @@ jobs:
           target: ${{ matrix.target }}
           platforms: linux/${{ matrix.arch }}
           build-args: ${{ matrix.image == 'buzz-relay' && env.RELAY_BUILD_ARGS || '' }}
+          build-contexts: engineering-skills=${{ runner.temp }}/engineering-skills
           load: true
           push: false
           tags: ${{ env.IMAGE }}
@@ -261,6 +279,7 @@ jobs:
           python3 test-codex-login.py "$IMAGE"
           python3 -O test-profile.py "$IMAGE"
           python3 test-cluster.py "$IMAGE"
+          python3 test-skills.py "$IMAGE"
 
   # main: build each platform on its native runner and push it by digest.
   publish:
@@ -269,6 +288,8 @@ jobs:
     if: needs.changes.outputs.any == 'true' && github.repository == 'voltagecloud/buzz' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
+    # Holds the engineering-skills app secrets; restricted to main.
+    environment: engineering-skills
     permissions:
       contents: read
       id-token: write # OIDC token for the github-buzz-ecr-push role
@@ -290,6 +311,40 @@ jobs:
           buildkitd-config-inline: |
             [worker.oci]
               max-parallelism = 2
+      # Read-only, for engineering-skills alone, and revoked when the job ends.
+      - name: Engineering skills token
+        id: skills-token
+        if: matrix.image == 'buzz-agent'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ secrets.AGENT_IMAGE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.AGENT_IMAGE_APP_PRIVATE_KEY }}
+          owner: voltagecloud
+          repositories: engineering-skills
+          permission-contents: read
+      - name: Check out engineering skills
+        if: matrix.image == 'buzz-agent'
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          repository: voltagecloud/engineering-skills
+          ref: master
+          token: ${{ steps.skills-token.outputs.token }}
+          path: .engineering-skills
+          persist-credentials: false
+      - name: Select engineering skills
+        id: skills
+        env:
+          AGENT: ${{ matrix.image == 'buzz-agent' }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/engineering-skills"
+          if [ "$AGENT" = true ]; then
+            sh voltage/images/buzz-agent/select-skills.sh .engineering-skills "$out"
+            rm -rf .engineering-skills
+          else
+            sh voltage/images/buzz-agent/select-skills.sh --none "$out"
+          fi
+          echo "revision=$(cat "$out/REVISION")" >> "$GITHUB_OUTPUT"
       # Build and smoke-test before credentials exist; the push build below
       # reuses this build's cache.
       - name: Build
@@ -300,6 +355,7 @@ jobs:
           target: ${{ matrix.target }}
           platforms: linux/${{ matrix.arch }}
           build-args: ${{ matrix.image == 'buzz-relay' && env.RELAY_BUILD_ARGS || '' }}
+          build-contexts: engineering-skills=${{ runner.temp }}/engineering-skills
           load: true
           push: false
           tags: ${{ env.IMAGE }}
@@ -313,7 +369,11 @@ jobs:
         run: bash voltage/images/test-relay-image.sh "$IMAGE"
       - name: Image contract test
         if: matrix.image == 'buzz-agent'
-        run: bash voltage/images/buzz-agent/test-image.sh "$IMAGE"
+        env:
+          REQUIRE_SKILLS: "1"
+        run: |
+          bash voltage/images/buzz-agent/test-image.sh "$IMAGE"
+          python3 voltage/images/buzz-agent/test-skills.py "$IMAGE"
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-buzz-ecr-push
@@ -328,9 +388,11 @@ jobs:
           target: ${{ matrix.target }}
           platforms: linux/${{ matrix.arch }}
           build-args: ${{ matrix.image == 'buzz-relay' && env.RELAY_BUILD_ARGS || '' }}
+          build-contexts: engineering-skills=${{ runner.temp }}/engineering-skills
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
+            cloud.voltage.engineering-skills.revision=${{ steps.skills.outputs.revision }}
           outputs: type=image,name=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-west-2.amazonaws.com/${{ matrix.repository }},push-by-digest=true,name-canonical=true,push=true
       - name: Export digest
         env:

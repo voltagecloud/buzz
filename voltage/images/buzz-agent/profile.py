@@ -347,6 +347,42 @@ def install_subagent_guide(env):
             handle.write(guide)
 
 
+SKILLS = Path('/opt/engineering-skills/skills')
+
+
+def skill_directories(env):
+    """Where Claude Code, Codex, and Buzz's own agent discover user skills."""
+    return (Path('/home/agent/.claude/skills'),
+            Path(env.get('CODEX_HOME', '/home/agent/.codex')) / 'skills',
+            Path('/home/agent/.agents/skills'))
+
+
+def install_skills(env, source=SKILLS, targets=None):
+    """Link the image's engineering skills into each harness; never block the session.
+
+    Only links into `source` are managed: a skill the agent wrote, or one a
+    checkpoint restored, keeps its name. Links left by an older image whose
+    skill is gone are removed.
+    """
+    try:
+        shipped = {path.name: path for path in source.iterdir()
+                   if (path / 'SKILL.md').is_file()} if source.is_dir() else {}
+        for directory in targets or skill_directories(env):
+            directory.mkdir(parents=True, exist_ok=True)
+            for link in directory.iterdir():
+                if (link.is_symlink() and Path(os.readlink(link)).parent == source
+                        and link.name not in shipped):
+                    link.unlink()
+            for name, path in shipped.items():
+                link = directory / name
+                if link.is_symlink() and Path(os.readlink(link)).parent == source:
+                    link.unlink()
+                if not os.path.lexists(link):
+                    link.symlink_to(path, target_is_directory=True)
+    except OSError as error:
+        print('Engineering skills not installed: '+type(error).__name__, file=sys.stderr)
+
+
 def main():
     """Load the owner profile and cluster access before starting a session or worker."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -359,6 +395,8 @@ def main():
         env = bootstrap()
         step('configuring staging cluster diagnostics')
         install_cluster_access(env)
+        step('installing engineering skills')
+        install_skills(env)
         step('starting the worker')
         worker = ['/usr/local/bin/buzz-agent-cache', '/usr/local/bin/buzz-agent-worker']
         os.execvpe(worker[0], worker, env)
@@ -370,6 +408,8 @@ def main():
         install_cluster_access(env)
         step('installing the sub-agent guide')
         install_subagent_guide(env)
+        step('installing engineering skills')
+        install_skills(env)
         step('starting the harness')
         arguments = args.arguments[1:] if args.arguments[:1] == ['--'] else args.arguments
         harness = ['/usr/local/bin/buzz-agent-cache', '/usr/local/bin/buzz-acp', *arguments]

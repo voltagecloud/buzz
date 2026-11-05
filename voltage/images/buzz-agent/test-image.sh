@@ -22,7 +22,24 @@ docker run --rm --entrypoint /bin/bash "$IMAGE" -ceu '
   test -r /etc/buzz-agent/cluster.md
   ! test -e /home/agent/.codex/auth.json
   ! test -e /home/agent/.claude/.credentials.json
+  # Engineering skills (select-skills.sh): read-only, each with SKILL.md, none
+  # of the excluded ones. Empty in pull request and local builds.
+  test -r /opt/engineering-skills/REVISION
+  ! test -w /opt/engineering-skills/skills
+  for skill in /opt/engineering-skills/skills/*/; do
+    [ -d "$skill" ] || continue
+    test -r "$skill/SKILL.md"
+  done
+  ! test -e /opt/engineering-skills/skills/walkthrough-video
+  ! test -e /opt/engineering-skills/skills/cli-demo-video
 '
+# Published images must carry skills (the publish job sets REQUIRE_SKILLS=1).
+if [ "${REQUIRE_SKILLS:-0}" = 1 ]; then
+  docker run --rm --entrypoint /bin/sh "$IMAGE" -ceu '
+    grep -qE "^[0-9a-f]{40}$" /opt/engineering-skills/REVISION
+    ls /opt/engineering-skills/skills/*/SKILL.md >/dev/null
+  '
+fi
 for adapter in codex-acp claude-agent-acp; do
   docker run --rm "$IMAGE" auth-methods --agent-command "$adapter" --agent-args '' --json
 done
