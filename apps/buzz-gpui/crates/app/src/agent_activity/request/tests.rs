@@ -207,3 +207,34 @@ fn a_bubble_represents_its_agents_in_the_thread_summary() {
     assert_eq!(bubbled_agents(&s, "channel", None), vec![agent.clone()]);
     assert_eq!(bubbled_agents(&s, "channel", Some(&root)), vec![agent]);
 }
+
+#[test]
+fn a_recovered_session_shows_working_over_the_failure_it_replaced() {
+    let (agent, root, mention) = (key('a'), key('b'), key('c'));
+    let local = LocalActivity::default();
+    // The start for this mention was refused (say, session_ended).
+    local
+        .begin(
+            Begin {
+                scope: SCOPE.into(),
+                agent: agent.clone(),
+                channel_id: "channel".into(),
+                message_id: mention.clone(),
+                thread_root_id: root.clone(),
+            },
+            NOW,
+        )
+        .finish(WorkOutcome::failed("session_ended"));
+    let mut f = Fixture::new();
+    f.message(&mention, &root);
+    f.activity.set_local(local.work(), NOW);
+    assert_eq!(f.bubble(&mention)[0].state, WorkState::Error);
+
+    // Recover works; the recovered turn replays the same mention.
+    local.resolve_thread(&agent, "channel", Some(&root));
+    f.activity.set_local(local.work(), NOW);
+    f.send("turn_started", "recovered", &mention);
+    f.send("turn_liveness", "recovered", &mention);
+    assert!(f.bubble(&mention)[0].working);
+    assert_eq!(f.thread(&[&agent]), vec![agent.clone()]);
+}

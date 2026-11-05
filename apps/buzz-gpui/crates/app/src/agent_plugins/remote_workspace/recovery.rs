@@ -53,8 +53,10 @@ impl Action {
                 "Starting a fresh session. Starting a machine can take a few minutes. \
                  Nothing else to do: the agent replies here when it is ready."
             }
-            Self::End | Self::Check => "Ending the session and saving its checkpoint.",
-            Self::Dismiss => "",
+            // Dismiss is never in flight: it sends nothing.
+            Self::End | Self::Check | Self::Dismiss => {
+                "Ending the session and saving its checkpoint."
+            }
         }
     }
 }
@@ -313,14 +315,16 @@ pub fn started(sent: &Sent, name: &str, cx: &mut App) {
 /// A session that works in a thread replaces the attempts that failed
 /// there, so their "Could not finish" no longer hides its activity.
 fn resolve(session: &SandboxSession, cx: &mut App) {
-    if let SandboxScope::Thread {
-        channel_id,
-        thread_root,
-    } = &session.scope
-    {
-        cx.default_global::<crate::agent_activity::local::LocalActivity>()
-            .resolve_thread(&session.pubkey, channel_id, thread_root);
-    }
+    let (channel, root) = match &session.scope {
+        SandboxScope::Thread {
+            channel_id,
+            thread_root,
+        } => (channel_id, Some(thread_root.as_str())),
+        // One session serves the whole conversation.
+        SandboxScope::DirectMessage { dm_channel_id } => (dm_channel_id, None),
+    };
+    cx.default_global::<crate::agent_activity::local::LocalActivity>()
+        .resolve_thread(&session.pubkey, channel, root);
 }
 
 fn check_lifecycle(session: &SandboxSession, cx: &mut App) {
@@ -427,7 +431,7 @@ fn act(key: &RecoveryPromptKey, action: Action, cx: &mut App) {
             .unwrap_or_else(|_| Err("The request was cancelled".into()));
         cx.update(|cx| {
             if matches!(action, Action::Recover(_))
-                && matches!(&answer, Ok(response) if !matches!(response, SandboxResponse::Ended { .. }))
+                && matches!(&answer, Ok(SandboxResponse::Started))
             {
                 resolve(&session, cx);
             }

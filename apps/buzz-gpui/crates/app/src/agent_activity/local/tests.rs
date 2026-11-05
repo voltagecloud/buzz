@@ -149,10 +149,13 @@ fn a_working_session_hides_the_failed_attempts_it_replaced() {
     };
     assert_eq!(shown(&root), Some(LocalWorkState::Error));
 
-    store.resolve_thread(&agent, "channel", &root);
+    store.resolve_thread(&agent, "channel", Some(&root));
     // Nothing left to outrank live evidence of the recovered session.
     assert_eq!(shown(&root), None);
     // The outcomes stay, hidden; the other thread's failure still shows.
     assert_eq!(store.work().iter().filter(|row| row.dismissed).count(), 2);
     assert_eq!(shown(&"c".repeat(64)), Some(LocalWorkState::Error));
+    // A DM session serves the whole conversation: no thread to match.
+    store.resolve_thread(&agent, "channel", None);
+    assert_eq!(shown(&"c".repeat(64)), None);
 }
