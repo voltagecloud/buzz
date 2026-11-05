@@ -45,6 +45,7 @@ python3 test-cache.py buzz-agent:local
 python3 -O test-profile.py buzz-agent:local
 python3 test-cluster.py buzz-agent:local
 python3 test-skills.py buzz-agent:local
+python3 test-environment.py buzz-agent:local
 ```
 
 To build with the engineering skills, replace `--none` with a local checkout:
@@ -150,6 +151,8 @@ Kubelet rotates the 600-second token.
 The bootstrap exports `KUBECONFIG` and appends [the diagnostic guide](cluster.md) to Claude Code and Codex instructions.
 It skips configuration when neither token is mounted, and rejects credentials for another developer namespace.
 It performs no cluster API calls during startup.
+
+Every session and worker also gets [the environment guide](environment.md), appended to the same instructions whether or not cluster credentials are mounted. It covers how to find enrolled services with `via capabilities`, how to detect a Sandbox, whose identity a `via` service uses, running untrusted code in a credentialed Pod, and where to report vulnerabilities.
 
 The staging Terraform root owns the observer RBAC, worker projection, and API egress policy.
 Diagnostic permissions cover reads across staging namespaces, including logs, events, metrics, routing, and Argo CD state.

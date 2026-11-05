@@ -112,7 +112,7 @@ for key, expected in EXPECTED.items():
 # Exactly the configured model credentials reach the agent's tool shell.
 forwarded = set(filter(None, os.environ.get('BUZZ_ACP_MCP_FORWARD_ENV', '').split(',')))
 models = {k for k, v in EXPECTED.items() if v and k in INHERITED}
-if not models <= forwarded or forwarded - models - {'CODEX_HOME'}:
+if not models <= forwarded or forwarded - models - {'CODEX_HOME', 'KUBERNETES_SERVICE_HOST'}:
     raise RuntimeError('forwarded tool-shell variables differ from the profile credentials')
 if subprocess.check_output(['git','config','--global','user.email'], text=True).strip() != 'alice@example.invalid':
     raise RuntimeError('Git identity missing')
