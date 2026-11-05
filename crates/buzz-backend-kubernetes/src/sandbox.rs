@@ -841,6 +841,31 @@ fn container_started(pod: &Pod) -> bool {
         })
 }
 
+/// Why the controller has not created the Sandbox's Pod, from its `Ready`
+/// condition. A quota refusal is the usual cause: say which limit is full.
+fn pod_not_created(sandbox: &DynamicObject) -> String {
+    let message = sandbox.data["status"]["conditions"]
+        .as_array()
+        .and_then(|conditions| {
+            conditions
+                .iter()
+                .find(|c| c["type"] == "Ready" && c["status"] != "True")
+        })
+        .and_then(|ready| ready["message"].as_str())
+        .unwrap_or_default();
+    if message.contains("exceeded quota: primary-sessions") {
+        "All of your agent sessions are in use. End an idle session, or wait for one to finish, then retry".into()
+    } else if let Some(quota) = message
+        .split("exceeded quota: ")
+        .nth(1)
+        .and_then(|rest| rest.split(',').next())
+    {
+        format!("Your agent namespace quota `{quota}` is full. End an idle session, or wait for one to finish, then retry")
+    } else {
+        "Sandbox controller has not created its Pod; inspect the Sandbox and retry".into()
+    }
+}
+
 /// Bind credentials to the Sandbox's first Pod and wait for it to start.
 ///
 /// Resumable: a session bound to its first Pod whose Secret is missing and
@@ -873,10 +898,9 @@ async fn bind(
                 ));
             }
             if expired {
-                return Err(
-                    "Sandbox controller has not created its Pod; inspect the Sandbox and retry"
-                        .into(),
-                );
+                // The controller records why it could not create the Pod.
+                let current = session.sandboxes.get_opt(name).await.ok().flatten();
+                return Err(pod_not_created(current.as_ref().unwrap_or(&sandbox)).into());
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
             continue;
