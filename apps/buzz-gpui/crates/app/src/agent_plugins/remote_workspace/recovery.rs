@@ -218,6 +218,10 @@ impl Prompts {
             Err(error) => error,
         };
         let Some(view) = View::of(error) else {
+            // A failure without a lifecycle code asks for nothing new, but it
+            // is newer than any action in flight here: fence that action's
+            // answer off so it cannot hide this failure.
+            self.supersede(&key);
             return false;
         };
         self.prompts.record(RecoveryPrompt {
@@ -245,6 +249,17 @@ impl Prompts {
     pub fn clear(&mut self, key: &RecoveryPromptKey) {
         self.prompts.clear(key);
         self.entries.remove(key);
+    }
+
+    /// Moves `key`'s prompt to a new generation and ends its action in
+    /// flight, so that action's answer is dropped. The prompt and its
+    /// buttons stay, so the owner can act again.
+    fn supersede(&mut self, key: &RecoveryPromptKey) {
+        if let Some(entry) = self.entries.get_mut(key) {
+            self.generation += 1;
+            entry.generation = self.generation;
+            entry.busy = None;
+        }
     }
 
     /// Whether `key`'s prompt is still the failure an action of
@@ -714,6 +729,30 @@ mod tests {
         // The newer prompt's own answer still applies.
         prompts.answered(&key, newer, &Ok(SandboxResponse::Started));
         assert!(prompts.for_thread(&thread('c')).is_empty());
+    }
+
+    #[test]
+    fn an_uncoded_failure_fences_off_the_action_in_flight() {
+        let mut prompts = Prompts::default();
+        prompts.started(&sent('c', Err(coded("session_ended"))), "Ada");
+        let key = key_of(&session('c')).unwrap().0;
+        let older = prompts.entries[&key].generation;
+        prompts.entries.get_mut(&key).unwrap().busy = Some(Action::Recover(RecoveryMode::Fresh));
+        // While Recover runs, a later mention fails without a lifecycle code.
+        let transient = SessionError::from("The cluster is unreachable");
+        assert!(!prompts.started(&sent('c', Err(transient)), "Ada"));
+        assert!(!prompts.current(&key, older));
+        assert_eq!(prompts.entries[&key].busy, None, "the buttons return");
+
+        // The first Recover's Started answer arrives late: the prompt stays.
+        prompts.answered(&key, older, &Ok(SandboxResponse::Started));
+        assert_eq!(prompts.for_thread(&thread('c')).len(), 1);
+
+        // Without a prompt, an uncoded failure records nothing.
+        let mut empty = Prompts::default();
+        let transient = SessionError::from("The cluster is unreachable");
+        assert!(!empty.started(&sent('c', Err(transient)), "Ada"));
+        assert!(empty.entries.is_empty());
     }
 
     #[test]
