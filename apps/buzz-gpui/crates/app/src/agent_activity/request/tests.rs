@@ -300,3 +300,297 @@ fn a_memo_is_bounded_and_never_copied_or_compared() {
     assert!(copy.memo.work.lock().unwrap().is_empty());
     assert_eq!(&copy, s);
 }
+
+/// A record as `admit` builds it; plaintext that is not JSON keeps no
+/// events, as no read of it could parse it.
+fn record(n: u64, agent: &str, plaintext: &str) -> Arc<Record> {
+    let raw = serde_json::from_str(plaintext).unwrap_or(Value::Null);
+    let frame = Frame {
+        id: format!("{n:064x}"),
+        agent: agent.into(),
+        created_at: NOW / 1000,
+        plaintext: plaintext.into(),
+    };
+    Arc::new(Record::new(frame, &raw, NOW + n, false))
+}
+
+/// Kind, turn, seq, admitted and triggers, as read from the JSON.
+type Reread = (String, String, Option<i64>, bool, Vec<String>);
+
+/// `request_activity` as it read the JSON before records kept their
+/// events: the Raw view's entries, each parsed again.
+fn reread(records: &[Arc<Record>], agent: &str, channel: &str, ids: &[&str]) -> Selected {
+    let mut selected = Selected::default();
+    let wanted: HashSet<&str> = ids
+        .iter()
+        .copied()
+        .filter(|id| super::super::hex64(id))
+        .collect();
+    if wanted.is_empty() {
+        return selected;
+    }
+    let parsed: Vec<Reread> = super::super::raw_records(records, agent, Some(channel))
+        .into_iter()
+        .filter_map(|record| {
+            let value: Value = serde_json::from_str(&record.plaintext).ok()?;
+            let turn = value.get("turnId")?.as_str()?;
+            if turn.is_empty() || turn.len() > 256 {
+                return None;
+            }
+            let admitted = value
+                .get("timestamp")
+                .and_then(Value::as_str)
+                .and_then(parse_time)
+                .is_some_and(|at| at <= record.received_at + 5000);
+            let kind = value.get("kind").and_then(Value::as_str).unwrap_or("");
+            let seq = value
+                .get("seq")
+                .and_then(Value::as_i64)
+                .filter(|seq| *seq >= 0 && *seq < (1 << 53));
+            let triggers = value
+                .get("payload")
+                .and_then(|p| p.get("triggeringEventIds"))
+                .and_then(Value::as_array)
+                .map(|ids| {
+                    ids.iter()
+                        .filter_map(|id| id.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some((kind.into(), turn.into(), seq, admitted, triggers))
+        })
+        .collect();
+    for (kind, start, from, admitted, triggers) in &parsed {
+        if kind != "turn_started" || !triggers.iter().any(|id| wanted.contains(id.as_str())) {
+            continue;
+        }
+        let turn: Vec<_> = parsed.iter().filter(|p| p.1 == *start).collect();
+        if turn.iter().filter(|p| p.0 == "turn_started").count() != 1
+            || turn.iter().any(|p| p.2.is_none())
+        {
+            selected.uncertain = true;
+            continue;
+        }
+        let Some(from) = *from else { continue };
+        let after: Vec<i64> = turn
+            .iter()
+            .filter_map(|p| p.2)
+            .filter(|s| *s >= from)
+            .collect();
+        if after.iter().collect::<HashSet<_>>().len() != after.len() {
+            selected.uncertain = true;
+            continue;
+        }
+        selected.turn_ids.insert(start.clone());
+        if !admitted {
+            selected.uncertain = true;
+            continue;
+        }
+        let end = turn.iter().find(|p| {
+            matches!(
+                p.0.as_str(),
+                "turn_completed" | "turn_error" | "agent_panic"
+            ) && p.3
+        });
+        if let Some(end) = end
+            && end.2.is_some_and(|seq| seq >= from)
+        {
+            selected
+                .terminal
+                .insert(start.clone(), end.0 == "turn_completed");
+        }
+    }
+    selected
+}
+
+fn frame(kind: &str, turn: Value, seq: Value, channel: &str, at: &str, triggers: Value) -> Value {
+    json!({
+        "kind": kind, "turnId": turn, "seq": seq, "channelId": channel,
+        "timestamp": at, "payload": {"triggeringEventIds": triggers},
+    })
+}
+
+#[test]
+fn selection_reads_batch_children_in_their_own_channel() {
+    let (request, other) = (key('c'), key('d'));
+    let mut f = Fixture::new();
+    let batch = json!({"kind": "batch", "payload": {"events": [
+        frame("turn_started", json!("one"), json!(1), "channel", T0, json!([request])),
+        // The same turn elsewhere is another channel's business.
+        frame("turn_started", json!("one"), json!(1), "elsewhere", T0, json!([request])),
+        frame("turn_started", json!("two"), json!(1), "elsewhere", T0, json!([other])),
+        // Only a start's triggers are kept.
+        frame("turn_completed", json!("one"), json!(2), "channel", T0, json!([request])),
+    ]}});
+    f.activity.receive(
+        Frame {
+            id: key('9'),
+            agent: key('a'),
+            created_at: NOW / 1000,
+            plaintext: batch.to_string(),
+        },
+        NOW,
+        &|_| true,
+    );
+    let records = &f.snapshot().records;
+    let selected = request_activity(records, &key('a'), "channel", &[&request]);
+    assert_eq!(selected.turn_ids, ["one".to_string()].into());
+    assert_eq!(selected.terminal, [("one".to_string(), true)].into());
+    assert!(!selected.uncertain);
+    assert!(
+        request_activity(records, &key('a'), "channel", &[&other])
+            .turn_ids
+            .is_empty()
+    );
+    let elsewhere = request_activity(records, &key('a'), "elsewhere", &[&other]);
+    assert_eq!(elsewhere.turn_ids, ["two".to_string()].into());
+    assert!(elsewhere.terminal.is_empty());
+    assert_eq!(
+        &*f.snapshot().requested,
+        [
+            ("channel".to_string(), request.clone()),
+            ("elsewhere".to_string(), request.clone()),
+            ("elsewhere".to_string(), other.clone()),
+        ]
+    );
+    // Only events selection can read are kept.
+    assert_eq!(records[0].events.len(), 4);
+    assert!(records[0].events[3].triggers.is_empty());
+}
+
+#[test]
+fn selection_matches_reading_the_json_on_every_edge() {
+    let (a, b) = (key('a'), key('b'));
+    let (c, d, e) = (key('c'), key('d'), key('e'));
+    let (f, g, h) = (key('f'), key('7'), key('8'));
+    // The batch below arrives at NOW + 7: 12:00:10.007.
+    let late = "2026-10-10T12:00:16Z";
+    let timed = |turn: &str, at: &str, trigger: &str| {
+        [
+            frame(
+                "turn_started",
+                json!(turn),
+                json!(1),
+                "channel",
+                at,
+                json!([trigger]),
+            ),
+            frame(
+                "turn_completed",
+                json!(turn),
+                json!(2),
+                "channel",
+                T0,
+                json!([]),
+            ),
+        ]
+    };
+    let one = |kind: &str, turn: &str, seq: Value, triggers: Value| {
+        frame(kind, json!(turn), seq, "channel", T0, triggers)
+    };
+    let mut plaintexts = vec![
+        one("turn_started", "plain", json!(1), json!([c])).to_string(),
+        one("turn_completed", "plain", json!(2), json!([])).to_string(),
+        "not json".to_string(),
+        "[1, 2]".to_string(),
+        json!({"kind": "batch"}).to_string(),
+        json!({"kind": "batch", "payload": {"events": "no"}}).to_string(),
+        // A turn id on a batch envelope is not an event.
+        json!({"kind": "batch", "turnId": "plain", "channelId": "channel", "seq": 9}).to_string(),
+    ];
+    let mut children = vec![
+        one("turn_started", "batched", json!(1), json!([1, d, null])),
+        one("turn_error", "batched", json!(3), json!([])),
+        one("turn_completed", "batched", json!(4), json!([])),
+        json!({"kind": "turn_started", "turnId": "nochannel", "seq": 1, "payload": {"triggeringEventIds": [e]}}),
+        json!({"turnId": "nokind", "seq": 1, "channelId": "channel", "timestamp": T0}),
+        one("turn_started", "", json!(1), json!([e])),
+        one("turn_started", &"x".repeat(257), json!(1), json!([e])),
+        one("turn_started", &"y".repeat(256), json!(1), json!([e])),
+        one("turn_started", "negative", json!(-1), json!([e])),
+        one("turn_started", "huge", json!(1u64 << 53), json!([e])),
+        one("turn_started", "edge", json!((1u64 << 53) - 1), json!([e])),
+        one("turn_started", "fraction", json!(1.5), json!([e])),
+        one("turn_started", "repeat", json!(1), json!([e])),
+        one("turn_liveness", "repeat", json!(1), json!([])),
+        frame(
+            "turn_started",
+            json!("late"),
+            json!(1),
+            "channel",
+            late,
+            json!([g]),
+        ),
+        frame(
+            "turn_started",
+            json!("untimed"),
+            json!(1),
+            "channel",
+            "soon",
+            json!([e]),
+        ),
+        frame(
+            "turn_started",
+            json!(7),
+            json!(1),
+            "channel",
+            T0,
+            json!([e]),
+        ),
+        json!("not an object"),
+    ];
+    children.extend(timed("ontime", "2026-10-10T12:00:15.007Z", &f));
+    children.extend(timed("overdue", "2026-10-10T12:00:15.008Z", &h));
+    plaintexts.push(json!({"kind": "batch", "payload": {"events": children}}).to_string());
+    plaintexts.push(one("turn_started", "plain", json!(5), json!(c)).to_string());
+    let mut records: Vec<Arc<Record>> = plaintexts
+        .iter()
+        .enumerate()
+        .map(|(n, text)| record(n as u64, &a, text))
+        .collect();
+    records.push(record(
+        99,
+        &b,
+        &one("turn_started", "theirs", json!(1), json!([c])).to_string(),
+    ));
+    let id_sets: [&[&str]; 9] = [
+        &[&c],
+        &[&d],
+        &[&e],
+        &[&f],
+        &[&g],
+        &[&h],
+        &[&c, &d, &e, &f, &g, &h],
+        &["short"],
+        &[],
+    ];
+    let mut seen = Selected::default();
+    for agent in [&a, &b] {
+        for channel in ["channel", "elsewhere"] {
+            for ids in id_sets {
+                let selected = request_activity(&records, agent, channel, ids);
+                assert_eq!(
+                    selected,
+                    reread(&records, agent, channel, ids),
+                    "{channel} {ids:?}"
+                );
+                seen.turn_ids.extend(selected.turn_ids);
+                seen.terminal.extend(selected.terminal);
+                seen.uncertain |= selected.uncertain;
+            }
+        }
+    }
+    // The corpus reaches selections, ends and doubt.
+    assert!(seen.turn_ids.contains("batched") && seen.turn_ids.contains(&"y".repeat(256)));
+    assert!(seen.turn_ids.contains("edge") && seen.turn_ids.contains("late"));
+    assert_eq!(seen.terminal.get("batched"), Some(&false));
+    assert_eq!(seen.terminal.get("ontime"), Some(&true));
+    assert!(!seen.terminal.contains_key("overdue"));
+    assert!(seen.uncertain);
+    assert!(!seen.turn_ids.contains("huge") && !seen.turn_ids.contains("nochannel"));
+    // An empty channel names none.
+    assert_eq!(
+        request_activity(&records, &a, "", &[&c]),
+        Selected::default()
+    );
+}
