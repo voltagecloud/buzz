@@ -48,7 +48,7 @@ def kube_tls(cafile):
     Python 3.13 turns on VERIFY_X509_STRICT, which requires an Authority Key
     Identifier. EKS serves kube-apiserver certificates without one, so strict
     mode refuses every request. Chain and hostname verification stay on;
-    only that RFC 5280 profile check is dropped.
+    only the RFC 5280 strict-profile checks are dropped.
     """
     context = ssl.create_default_context(cafile=cafile)
     context.verify_flags &= ~ssl.VERIFY_X509_STRICT

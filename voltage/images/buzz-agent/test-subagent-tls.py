@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import urllib.error
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -76,14 +77,22 @@ def checks(root, client):
     serving.load_cert_chain(cluster / 'leaf.crt', cluster / 'leaf.key')
     server.socket = serving.wrap_socket(server.socket, server_side=True)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    os.environ['BUZZ_SUBAGENT_API'] = f'https://127.0.0.1:{server.server_address[1]}'
     credentials = Path(tempfile.mkdtemp())
     (credentials / 'token').write_text('synthetic-token\n')
     subagent.CREDENTIALS = credentials
 
-    def call(ca):
+    def call(ca, host='127.0.0.1'):
         (credentials / 'ca.crt').write_bytes((ca / 'ca.crt').read_bytes())
+        os.environ['BUZZ_SUBAGENT_API'] = f'https://{host}:{server.server_address[1]}'
         return subagent.api('GET', 'api/v1/namespaces/n/pods')
+
+    def refused(ca, host, reason):
+        try:
+            call(ca, host)
+        except urllib.error.URLError as error:
+            assert reason in str(error), error
+        else:
+            raise AssertionError(f'{host} via {ca.name} was accepted')
 
     # Strict verification, Python 3.13's default, refuses this certificate.
     strict = ssl.create_default_context(cafile=str(cluster / 'ca.crt'))
@@ -98,15 +107,13 @@ def checks(root, client):
     # The client reaches the API server through its cluster CA.
     assert call(cluster) == {'kind': 'PodList', 'items': []}
 
-    # Verification stays on: a different CA with the same name is refused.
-    try:
-        call(stranger)
-        raise AssertionError('an untrusted CA was accepted')
-    except Exception as error:
-        assert 'CERTIFICATE_VERIFY_FAILED' in str(error), error
+    # Verification stays on: a different CA with the same name is refused,
+    # and so is a name the certificate does not cover (its SAN is 127.0.0.1).
+    refused(stranger, '127.0.0.1', 'CERTIFICATE_VERIFY_FAILED')
+    refused(cluster, 'localhost', 'Hostname mismatch')
     server.shutdown()
     print(f'PASS: buzz-subagent ({sys.version.split()[0]}) verifies an EKS-style API server '
-          'certificate without an AKI, and still refuses an untrusted CA')
+          'certificate without an AKI, and still refuses an untrusted CA or another hostname')
 
 
 if __name__ == '__main__':
@@ -117,9 +124,8 @@ if __name__ == '__main__':
         root = Path(temporary)
         authority(root / 'cluster', 'kubernetes')
         authority(root / 'stranger', 'kubernetes')
-        os.chmod(root, 0o755)
-        for key in root.glob('*/*.key'):
-            key.chmod(0o644)  # synthetic keys, readable by the image's user
+        # Synthetic keys: readable by the image's user, whatever the umask.
+        subprocess.run(['chmod', '-R', 'a+rX', str(root)], check=True)
         if len(sys.argv) > 1:
             command = ['docker', 'run', '--rm', '--network', 'none',
                        '-v', f'{root}:/fixtures:ro', '-v', f'{HERE}:/test:ro',
