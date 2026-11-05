@@ -367,7 +367,12 @@ def install_skills(env, source=SKILLS, targets=None):
     try:
         shipped = {path.name: path for path in source.iterdir()
                    if (path / 'SKILL.md').is_file()} if source.is_dir() else {}
-        for directory in targets or skill_directories(env):
+    except OSError as error:
+        print('Engineering skills not installed: '+type(error).__name__, file=sys.stderr)
+        return
+    # Each harness directory on its own: one failure leaves the others linked.
+    for directory in targets or skill_directories(env):
+        try:
             directory.mkdir(parents=True, exist_ok=True)
             for link in directory.iterdir():
                 if (link.is_symlink() and Path(os.readlink(link)).parent == source
@@ -379,8 +384,9 @@ def install_skills(env, source=SKILLS, targets=None):
                     link.unlink()
                 if not os.path.lexists(link):
                     link.symlink_to(path, target_is_directory=True)
-    except OSError as error:
-        print('Engineering skills not installed: '+type(error).__name__, file=sys.stderr)
+        except OSError as error:
+            print('Engineering skills not installed in '+directory.name+' of '+directory.parent.name
+                  +': '+type(error).__name__, file=sys.stderr)
 
 
 def main():

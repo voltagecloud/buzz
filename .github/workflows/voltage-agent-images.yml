@@ -284,14 +284,47 @@ jobs:
           python3 test-cluster.py "$IMAGE"
           python3 test-skills.py "$IMAGE"
 
+  # main: resolve engineering-skills master once, so every platform image of
+  # this run carries the same skills commit.
+  skills:
+    name: Resolve engineering skills
+    needs: changes
+    if: needs.changes.outputs.any == 'true' && github.repository == 'voltagecloud/buzz' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: engineering-skills
+    outputs:
+      revision: ${{ steps.resolve.outputs.revision }}
+    steps:
+      - name: Engineering skills token
+        id: token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ secrets.AGENT_IMAGE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.AGENT_IMAGE_APP_PRIVATE_KEY }}
+          owner: voltagecloud
+          repositories: engineering-skills
+          permission-contents: read
+      - name: Resolve master
+        id: resolve
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          set -euo pipefail
+          revision=$(gh api repos/voltagecloud/engineering-skills/commits/master --jq .sha)
+          [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+          echo "engineering skills: master is $revision"
+
   # main: build each platform on its native runner and push it by digest.
   publish:
     name: Publish ${{ matrix.image }} (${{ matrix.arch }})
-    needs: [changes, lint]
+    needs: [changes, lint, skills]
     if: needs.changes.outputs.any == 'true' && github.repository == 'voltagecloud/buzz' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
-    # Holds the engineering-skills app secrets; restricted to main.
+    # Holds the engineering-skills app secrets; restricted to main. The
+    # github-buzz-ecr-push role trusts this environment's OIDC subject.
     environment: engineering-skills
     permissions:
       contents: read
@@ -330,7 +363,7 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: voltagecloud/engineering-skills
-          ref: master
+          ref: ${{ needs.skills.outputs.revision }}
           token: ${{ steps.skills-token.outputs.token }}
           path: .engineering-skills
           persist-credentials: false
@@ -338,12 +371,14 @@ jobs:
         id: skills
         env:
           AGENT: ${{ matrix.image == 'buzz-agent' }}
+          EXPECTED: ${{ needs.skills.outputs.revision }}
         run: |
           set -euo pipefail
           out="$RUNNER_TEMP/engineering-skills"
           if [ "$AGENT" = true ]; then
             sh voltage/images/buzz-agent/select-skills.sh .engineering-skills "$out"
             rm -rf .engineering-skills
+            [ "$(cat "$out/REVISION")" = "$EXPECTED" ]
           else
             sh voltage/images/buzz-agent/select-skills.sh --none "$out"
           fi
@@ -415,7 +450,7 @@ jobs:
   # A failed platform build fails only its own image's merge.
   merge:
     name: Merge ${{ matrix.image }} manifest
-    needs: [changes, publish]
+    needs: [changes, skills, publish]
     if: ${{ !cancelled() && needs.publish.result != 'skipped' && needs.changes.outputs.any == 'true' && github.repository == 'voltagecloud/buzz' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -445,7 +480,9 @@ jobs:
           IMAGE: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-west-2.amazonaws.com/${{ matrix.repository }}
           NAME: ${{ matrix.image }}
           REPOSITORY: ${{ matrix.repository }}
-          TAG: ${{ github.sha }}
+          # An agent_only run republishes a commit that already has an image,
+          # so it tags the result with the skills commit as well.
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.agent_only && format('{0}-skills-{1}', github.sha, needs.skills.outputs.revision) || github.sha }}
         run: |
           set -euo pipefail
           if digest=$(aws ecr describe-images --repository-name "$REPOSITORY" \

@@ -68,7 +68,8 @@ That repository is internal and this one is public, so the skills reach the buil
 
 The publish job reads the repository with a short-lived token from the `voltage-agent-images` GitHub App: read-only contents, limited to engineering-skills.
 The app's client ID and private key are the `AGENT_IMAGE_APP_CLIENT_ID` and `AGENT_IMAGE_APP_PRIVATE_KEY` secrets of the `engineering-skills` environment, which only `main` may use.
-A skills change reaches agents with the next published agent image. To publish one without a code change, run the `Voltage images` workflow on `main` with `agent_only`.
+A skills change reaches agents with the next published agent image. To publish one without a code change, run the `Voltage images` workflow on `main` with `agent_only`. That image is tagged `<buzz commit>-skills-<engineering-skills commit>`, because the Buzz commit already has an image.
+Each run resolves `master` once (the `skills` job), so both platform images carry the same skills commit.
 
 At each session and worker start, `buzz-agent-profile` links every skill into `~/.claude/skills`, `$CODEX_HOME/skills`, and `~/.agents/skills`.
 It manages only its own links: a skill the agent wrote keeps its name, and links to skills a newer image dropped are removed.

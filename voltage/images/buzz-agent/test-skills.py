@@ -46,13 +46,15 @@ for directory in (claude, codex):
     require(not os.path.lexists(directory/'commit-policy'), 'stale skill link kept')
 require((claude/'pr-review'/'SKILL.md').read_text() == 'agent-owned\n', 'agent-owned skill changed')
 
-# A failure warns and returns: skills are optional.
+# A failing directory warns and the next one is still linked: skills are optional.
 blocked = root/'blocked'
 blocked.write_text('a file, not a directory\n')
+after = root/'after'/'skills'
 stderr = io.StringIO()
 with redirect_stderr(stderr):
-    profile.install_skills({}, source=source, targets=(blocked/'skills',))
-require('Engineering skills not installed' in stderr.getvalue(), 'failure not reported')
+    profile.install_skills({}, source=source, targets=(blocked/'skills', after))
+require('Engineering skills not installed in skills of blocked' in stderr.getvalue(), 'failure not reported')
+require((after/'pr-review').is_symlink(), 'one failing directory stopped the others')
 
 # Default locations: Claude Code, CODEX_HOME, and Buzz's own .agents directory.
 require(profile.skill_directories({'CODEX_HOME': '/home/agent/.codex-x'}) == (

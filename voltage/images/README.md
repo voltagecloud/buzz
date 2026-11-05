@@ -53,13 +53,13 @@ The voltage-terraform admission policy admits only digest-pinned images from `vo
 Run from the repository root. The Rust build takes a long time; the Dockerfiles set `CARGO_BUILD_JOBS=2`.
 
 ```bash
+sh voltage/images/buzz-agent/select-skills.sh --none /tmp/engineering-skills
 docker buildx build --check --build-context engineering-skills=/tmp/engineering-skills -f voltage/images/buzz-agent/Dockerfile .
 docker buildx build --check -f voltage/images/buzz-sandbox-reaper/Dockerfile .
 
 docker build --platform linux/amd64 -f voltage/images/buzz-sandbox-reaper/Dockerfile -t buzz-sandbox-reaper:local .
 docker run --rm buzz-sandbox-reaper:local --help
 
-sh voltage/images/buzz-agent/select-skills.sh --none /tmp/engineering-skills
 docker build --platform linux/amd64 -f voltage/images/buzz-agent/Dockerfile \
   --build-context engineering-skills=/tmp/engineering-skills -t buzz-agent:local .
 bash voltage/images/buzz-agent/test-image.sh buzz-agent:local
