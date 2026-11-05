@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Builds an ad-hoc signed Buzz.app and wraps it in a .dmg. Runs on macOS,
-# for the architecture of the machine it runs on. The app carries the
+# for the machine's architecture or BUZZ_GPUI_MACOS_ARCH (arm64 or x86_64),
+# which it cross-compiles; the checks then run an x86_64 build under Rosetta. The app carries the
 # GStreamer it plays media with, copied from the official GStreamer
 # framework (the runtime and development .pkg installers from
 # gstreamer.freedesktop.org), so users need not install GStreamer.
@@ -31,15 +32,29 @@ export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-Wl,-headerpad_max_install_names"
 
 version="$(cargo metadata --no-deps --format-version 1 \
   | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "buzz-gpui"))')"
-arch="$(uname -m)"
+host_arch="$(uname -m)"
+arch="${BUZZ_GPUI_MACOS_ARCH:-$host_arch}"
+out=release
+if [ "$arch" != "$host_arch" ]; then
+  case "$arch" in
+    arm64) triple=aarch64-apple-darwin ;;
+    x86_64) triple=x86_64-apple-darwin ;;
+    *) echo "Cannot build for $arch." >&2; exit 1 ;;
+  esac
+  export CARGO_BUILD_TARGET="$triple"
+  # pkg-config refuses a cross build unless told; the universal framework
+  # carries this architecture's libraries.
+  export PKG_CONFIG_ALLOW_CROSS=1
+  out="$triple/release"
+fi
 bash scripts/build-package.sh
 
 work="$(mktemp -d)"
 app="$work/Buzz.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" dist
-cp target/release/buzz-gpui "$app/Contents/MacOS/"
+cp "target/$out/buzz-gpui" "$app/Contents/MacOS/"
 if [ "${BUZZ_GPUI_VOLTAGE:-0}" = 1 ]; then
-  cp target/release/buzz-backend-relay "$app/Contents/MacOS/"
+  cp "target/$out/buzz-backend-relay" "$app/Contents/MacOS/"
 fi
 
 iconset="$work/buzz.iconset"

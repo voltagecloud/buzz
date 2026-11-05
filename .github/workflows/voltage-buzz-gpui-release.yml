@@ -130,10 +130,14 @@ jobs:
         include:
           - runner: macos-14
             arch: arm64
-          - runner: macos-15-intel
+          # Cross-compiled on Apple Silicon: the Intel runner took about
+          # 51 minutes to build what macos-14 builds in 17.
+          - runner: macos-14
             arch: x86_64
+            rust-target: x86_64-apple-darwin
     env:
       BUZZ_GPUI_RELEASE_VERSION: ${{ needs.version.outputs.version }}
+      BUZZ_GPUI_MACOS_ARCH: ${{ matrix.arch }}
       # The root rust-toolchain.toml pins block/buzz's Rust, and rustup reads
       # it from apps/buzz-gpui too, so name the GPUI toolchain explicitly.
       RUSTUP_TOOLCHAIN: 1.98.1
@@ -149,9 +153,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: 1.98.1
+          targets: ${{ matrix.rust-target }}
+      # The x86_64 checks run the bundled Node and provider under Rosetta.
+      - if: matrix.arch == 'x86_64'
+        run: sudo softwareupdate --install-rosetta --agree-to-license
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
         with:
           workspaces: apps/buzz-gpui
+          # Both architectures now share a runner image; keep their caches apart.
+          key: ${{ matrix.arch }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
           # Keep the release build when packaging fails after it.
           cache-on-failure: true
