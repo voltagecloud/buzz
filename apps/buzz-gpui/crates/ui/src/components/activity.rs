@@ -10,6 +10,19 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::time::Duration;
 
+/// How often a looping activity indicator redraws: below the display's
+/// rate, which is plenty for a slow fade on a few pixels.
+pub const INDICATOR_FPS: f32 = 30.;
+
+/// A loop of `period` for an indicator that runs as long as an agent
+/// works. Each of its frames redraws every view above it, up to the whole
+/// workspace (GPUI marks a notified view's ancestors dirty), so it redraws
+/// at [`INDICATOR_FPS`] instead of every frame, leaving the main thread free
+/// for typing.
+pub fn indicator_loop(period: Duration) -> Animation {
+    Animation::new(period).repeat().with_max_fps(INDICATOR_FPS)
+}
+
 /// Three dots: all breathing together over 2.4 s while `waiting`, or
 /// fading in turn over 1.4 s, 0.2 s apart, while working. Both rest at
 /// the breath's dim level, so waiting → working rises instead of flashing.
@@ -34,7 +47,7 @@ pub fn typing_dots(id: impl Into<ElementId>, waiting: bool, color: Hsla, cx: &Ap
     };
     row.with_animation(
         id,
-        Animation::new(Duration::from_secs_f32(period)).repeat(),
+        indicator_loop(Duration::from_secs_f32(period)),
         move |row, delta| {
             row.children((0..3).map(|n| {
                 if waiting {
@@ -72,7 +85,7 @@ pub fn shimmer_text(
         .truncate()
         .with_animation(
             id,
-            Animation::new(Duration::from_millis(2400)).repeat(),
+            indicator_loop(Duration::from_millis(2400)),
             move |line, delta| {
                 // A 240%-wide gradient sliding from 100% to -100%.
                 let position = 1. - 2. * delta;
@@ -205,4 +218,18 @@ pub fn arrive<E: IntoElement + Styled + 'static>(
             |element, delta| element.opacity(delta),
         )
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{INDICATOR_FPS, indicator_loop};
+    use std::time::Duration;
+
+    #[test]
+    fn indicators_loop_below_the_display_rate() {
+        let animation = indicator_loop(Duration::from_millis(1400));
+        assert!(!animation.oneshot);
+        assert_eq!(animation.duration, Duration::from_millis(1400));
+        assert_eq!(animation.max_fps, Some(INDICATOR_FPS));
+    }
 }

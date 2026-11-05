@@ -141,7 +141,7 @@ impl Dots for gpui_kit::Div {
         if opacity <= 0.01 {
             return self;
         }
-        use gpui_kit::{Animation, AnimationExt};
+        use gpui_kit::AnimationExt;
         let row = div()
             .flex()
             .items_center()
@@ -166,7 +166,7 @@ impl Dots for gpui_kit::Div {
         };
         self.child(row.with_animation(
             "thinking-dots",
-            Animation::new(Duration::from_millis(1200)).repeat(),
+            super::indicator_loop(Duration::from_millis(1200)),
             dots,
         ))
     }

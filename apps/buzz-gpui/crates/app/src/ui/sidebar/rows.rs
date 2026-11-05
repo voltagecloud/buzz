@@ -141,7 +141,7 @@ fn pulsing_dots(
     let seconds = period.as_secs_f32();
     div().flex().items_center().gap(px(2.)).with_animation(
         id,
-        Animation::new(period).repeat(),
+        buzz_ui::indicator_loop(period),
         move |row, delta| {
             row.children((0..3).map(|n| {
                 let phase = (delta - n as f32 * delay / seconds).rem_euclid(1.);

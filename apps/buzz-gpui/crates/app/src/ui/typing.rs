@@ -198,7 +198,7 @@ pub fn dots(color: Hsla, cx: &App) -> AnyElement {
     }
     row.with_animation(
         "typing-dots",
-        Animation::new(Duration::from_millis(1400)).repeat(),
+        buzz_ui::indicator_loop(Duration::from_millis(1400)),
         move |row, delta| {
             row.children((0..3).map(|n| {
                 let phase = (delta - n as f32 * 0.2 / PERIOD).rem_euclid(1.);
