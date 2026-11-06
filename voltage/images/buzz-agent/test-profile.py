@@ -112,7 +112,9 @@ for key, expected in EXPECTED.items():
 # Exactly the configured model credentials reach the agent's tool shell.
 forwarded = set(filter(None, os.environ.get('BUZZ_ACP_MCP_FORWARD_ENV', '').split(',')))
 models = {k for k, v in EXPECTED.items() if v and k in INHERITED}
-if not models <= forwarded or forwarded - models - {'CODEX_HOME'}:
+if 'KUBERNETES_SERVICE_HOST' not in forwarded:
+    raise RuntimeError('Kubernetes host is not forwarded to the tool shell')
+if not models <= forwarded or forwarded - models - {'CODEX_HOME', 'KUBERNETES_SERVICE_HOST'}:
     raise RuntimeError('forwarded tool-shell variables differ from the profile credentials')
 if subprocess.check_output(['git','config','--global','user.email'], text=True).strip() != 'alice@example.invalid':
     raise RuntimeError('Git identity missing')
@@ -177,6 +179,7 @@ def main():
                 '--tmpfs', '/tmp:uid=10001,gid=10001,mode=0700,size=128m,exec',
                 '-e', 'AWS_ACCESS_KEY_ID=testing', '-e', 'AWS_SECRET_ACCESS_KEY=testing',
                 '-e', 'AWS_DEFAULT_REGION=us-west-2', '-e', 'AWS_EC2_METADATA_DISABLED=true',
+                '-e', 'KUBERNETES_SERVICE_HOST=192.0.2.1',
                 '-e', 'AWS_ENDPOINT_URL=http://'+server+':5000', '--entrypoint', 'python3']
         result = subprocess.run([*base, '-e', 'FIXTURE_PROFILE='+json.dumps(PROFILE), image, '-'],
                                 input=SEED, text=True, capture_output=True, timeout=180)

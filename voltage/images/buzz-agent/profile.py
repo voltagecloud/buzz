@@ -279,9 +279,10 @@ def bootstrap():
         env['CLAUDE_CODE_OAUTH_TOKEN'] = profile['models']['claude_oauth_token']
     # The agent's tool shell starts from a cleared environment. Forward the model
     # credentials so tools it runs, such as buzz-agent-review, reach the runtime;
-    # they stay in process environments and are never written to files.
+    # they stay in process environments and are never written to files. The
+    # Kubernetes host is not secret; the environment guide tells agents to check it.
     env['BUZZ_ACP_MCP_FORWARD_ENV'] = ','.join(
-        name for name in (*INHERITED_MODEL_VARIABLES, 'CODEX_HOME') if env.get(name))
+        name for name in (*INHERITED_MODEL_VARIABLES, 'CODEX_HOME', 'KUBERNETES_SERVICE_HOST') if env.get(name))
     step('configuring Git commit signing')
     command('/usr/local/bin/buzz-agent-account', 'init', env=env)
     return env
@@ -304,6 +305,7 @@ SUBAGENT_CREDENTIALS = Path('/var/run/secrets/buzz-subagents')
 SUBAGENT_GUIDE = Path('/etc/buzz-agent/subagents.md')
 CLUSTER_CREDENTIALS = Path('/var/run/secrets/buzz-cluster')
 CLUSTER_GUIDE = Path('/etc/buzz-agent/cluster.md')
+ENVIRONMENT_GUIDE = Path('/etc/buzz-agent/environment.md')
 
 
 def install_cluster_access(env):
@@ -330,6 +332,15 @@ def install_cluster_access(env):
     write_file(path, json.dumps(config))
     env['KUBECONFIG'] = str(path)
     guide = CLUSTER_GUIDE.read_text()
+    for target in (Path('/home/agent/.claude/CLAUDE.md'), Path(env.get('CODEX_HOME', '/home/agent/.codex')) / 'AGENTS.md'):
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with open(target, 'a') as handle:
+            handle.write(guide)
+
+
+def install_environment_guide(env):
+    """Give every Sandbox session the same rules for the services and credentials in its Pod."""
+    guide = ENVIRONMENT_GUIDE.read_text()
     for target in (Path('/home/agent/.claude/CLAUDE.md'), Path(env.get('CODEX_HOME', '/home/agent/.codex')) / 'AGENTS.md'):
         target.parent.mkdir(parents=True, exist_ok=True)
         with open(target, 'a') as handle:
@@ -403,6 +414,8 @@ def main():
         install_cluster_access(env)
         step('installing engineering skills')
         install_skills(env)
+        step('installing the environment guide')
+        install_environment_guide(env)
         step('starting the worker')
         worker = ['/usr/local/bin/buzz-agent-cache', '/usr/local/bin/buzz-agent-worker']
         os.execvpe(worker[0], worker, env)
@@ -412,6 +425,8 @@ def main():
         restore_checkpoint()
         step('configuring staging cluster diagnostics')
         install_cluster_access(env)
+        step('installing the environment guide')
+        install_environment_guide(env)
         step('installing the sub-agent guide')
         install_subagent_guide(env)
         step('installing engineering skills')
