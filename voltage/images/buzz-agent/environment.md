@@ -2,14 +2,14 @@
 ## Working in the Sandbox
 
 Before you say you lack access to a service, run `via capabilities` and `buzz --help`.
-Enrolled services (for example Linear, Grafana and Argo CD) are reached with `via <service> api ...`, not with a dedicated CLI or an environment variable.
+Enrolled services (for example Linear, Grafana and Argo CD) are reached with the capability that `via capabilities` lists for the service, usually `via <service> api ...`, not with a dedicated CLI or an environment variable.
 Depot is different: the image wires it into build caches (for example `depot gocache`), so it has no `via depot api`; check the cache before calling it unavailable.
 When you report that something is unavailable, say which places you checked.
 
 Check that you are in a Sandbox with `KUBERNETES_SERVICE_HOST`, not with the path `/var/run/secrets/kubernetes.io`, which is not mounted in this Pod.
 
-A service reached through `via` acts as its own app identity, not as the person you work for.
-Say so when you report a change made through it, such as a ticket you created.
+A service reached through `via` may act as its own app identity or as a user, depending on how it is configured.
+When you report a change made through it, such as a ticket you created, name the identity it used, or say that you do not know.
 
 This Pod holds live credentials: a cluster token, your Buzz key, and `via` access.
 Do not build, test, install dependencies for, or run code from a repository you do not trust.
