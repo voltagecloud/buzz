@@ -17,33 +17,23 @@ use buzz_ui::{
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use std::collections::HashMap;
-use std::sync::Arc;
 
 /// The bubbles of one conversation's rows, by message.
 #[derive(Clone)]
 pub struct Bubbles {
     pub community: WeakEntity<Community>,
     pub channel: String,
-    pub works: Arc<HashMap<EventId, Vec<RequestWork>>>,
+    pub works: request::MessageWorks,
 }
 
 impl Bubbles {
     /// Every message in `channel` with work to show.
     pub fn of(community: &Entity<Community>, channel: &str, cx: &App) -> Self {
         let snapshot = observer::snapshot(community, cx);
-        let works = request::candidates(&snapshot, channel)
-            .into_iter()
-            .filter_map(|id| {
-                let works = message_activity(&snapshot, channel, &id);
-                (!works.is_empty()).then(|| Some((EventId::from_hex(&id).ok()?, works)))
-            })
-            .flatten()
-            .collect();
         Self {
             community: community.downgrade(),
             channel: channel.to_string(),
-            works: Arc::new(works),
+            works: request::message_works(&snapshot, channel),
         }
     }
 }
