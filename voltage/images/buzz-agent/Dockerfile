@@ -23,7 +23,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends bash ca-certificates curl git gh gnupg openssh-client socat tini \
         build-essential clang cmake pkg-config libssl-dev protobuf-compiler \
         python3 python3-venv python3-pip golang-go postgresql-client sqlite3 \
-        jq unzip time procps just awscli \
+        jq unzip time procps just awscli ffmpeg \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 agent \
     && useradd --uid 10001 --gid 10001 --create-home --home-dir /home/agent agent
@@ -71,6 +71,29 @@ RUN case "$TARGETARCH" in \
     && echo "$kubectl_sha  /usr/local/bin/kubectl" | sha256sum -c - \
     && chmod 0755 /usr/local/bin/kubectl \
     && rm /tmp/via.tar.gz /tmp/op.zip /tmp/gitleaks.tar.gz /tmp/depot.tar.gz /tmp/sccache.tar.gz
+# Browser recording and narration for the walkthrough-video skill.
+# Each Playwright version has its own browser build, so the image carries only
+# the system libraries Chromium needs; the agent installs the browser that
+# matches the target repository's Playwright at runtime. Piper and its voices
+# live outside the /home/agent volume. The skill's setup script finds them
+# through WALKTHROUGH_CACHE and skips its own setup.
+ENV WALKTHROUGH_CACHE=/opt/walkthrough-video
+RUN npx --yes playwright@1.64.1 install-deps chromium \
+    && rm -rf /var/lib/apt/lists/* /root/.npm \
+    && python3 -m venv "$WALKTHROUGH_CACHE/venv" \
+    && "$WALKTHROUGH_CACHE/venv/bin/pip" install --no-cache-dir piper-tts==1.8.0 \
+    && mkdir -p "$WALKTHROUGH_CACHE/voices" \
+    && cd "$WALKTHROUGH_CACHE/voices" \
+    && voices=https://huggingface.co/rhasspy/piper-voices/resolve/e7229f7d33a10e145e109b886d661984201ac3c4/en \
+    && for voice in en_GB/alan/medium/en_GB-alan-medium en_US/lessac/medium/en_US-lessac-medium; do \
+        curl -fsSLO "$voices/$voice.onnx" && curl -fsSLO "$voices/$voice.onnx.json"; \
+    done \
+    && printf '%s  %s\n' \
+        0a309668932205e762801f1efc2736cd4b0120329622adf62be09e56339d3330 en_GB-alan-medium.onnx \
+        c0f0d124e5895c00e7c03b35dcc8287f319a6998a365b182deb5c8e752ee8c1e en_GB-alan-medium.onnx.json \
+        5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f en_US-lessac-medium.onnx \
+        efe19c417bed055f2d69908248c6ba650fa135bc868b0e6abb3da181dab690a0 en_US-lessac-medium.onnx.json \
+        | sha256sum -c -
 COPY voltage/images/buzz-agent/checkpoint-gitleaks.toml /opt/agent-tools/checkpoint-gitleaks.toml
 WORKDIR /opt/buzz-runtimes
 COPY voltage/images/buzz-agent/package.json voltage/images/buzz-agent/package-lock.json ./

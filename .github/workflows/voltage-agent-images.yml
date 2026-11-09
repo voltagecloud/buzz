@@ -269,6 +269,7 @@ jobs:
         run: |
           bash voltage/images/buzz-agent/test-image.sh "$IMAGE"
           bash voltage/images/buzz-agent/test-harness.sh "$IMAGE"
+          bash voltage/images/buzz-agent/test-walkthrough.sh "$IMAGE"
       # Synthetic accounts and local emulators only. test-depot.py needs real
       # Depot credentials, so it runs only by hand.
       - name: Packaged tool tests

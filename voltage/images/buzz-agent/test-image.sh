@@ -30,8 +30,16 @@ docker run --rm --entrypoint /bin/bash "$IMAGE" -ceu '
     [ -d "$skill" ] || continue
     test -r "$skill/SKILL.md"
   done
-  ! test -e /opt/engineering-skills/skills/walkthrough-video
   ! test -e /opt/engineering-skills/skills/cli-demo-video
+  # walkthrough-video tools, outside HOME and read-only for the agent.
+  ffmpeg -version >/dev/null
+  test "$WALKTHROUGH_CACHE" = /opt/walkthrough-video
+  test -x "$WALKTHROUGH_CACHE/venv/bin/piper"
+  ! test -w "$WALKTHROUGH_CACHE/voices"
+  for voice in en_GB-alan-medium en_US-lessac-medium; do
+    test -r "$WALKTHROUGH_CACHE/voices/$voice.onnx"
+    test -r "$WALKTHROUGH_CACHE/voices/$voice.onnx.json"
+  done
 '
 # Published images must carry skills (the publish job sets REQUIRE_SKILLS=1).
 if [ "${REQUIRE_SKILLS:-0}" = 1 ]; then
