@@ -23,7 +23,13 @@ exec cat >/dev/null
 "#;
 
 // Records what had already happened when the harness started the checkpoint.
+// A quarantine (after a failed save) records only that it ran.
 const HELPER: &str = r#"#!/bin/sh
+if [ "$1" = quarantine ]; then
+  echo quarantine >> "$PROBE_DIR/checkpoint-runs"
+  printf '{"version":1,"key":"developer/session/quarantine/id.tar.gz","sha256":"%064d","repositories":0,"bytes":0}' 0
+  exit 0
+fi
 test "$1" = save || exit 64
 echo save >> "$PROBE_DIR/checkpoint-runs"
 {
@@ -85,6 +91,11 @@ async fn failed_checkpoint_fails_either_shutdown_path() {
         assert!(stopped.checkpoint.is_some(), "{}", stopped.logs);
         assert!(!stopped.status.success(), "{}", stopped.logs);
         assert!(stopped.logs.contains("exit_status"), "{}", stopped.logs);
+        assert!(
+            stopped.logs.contains("checkpoint_quarantined"),
+            "{}",
+            stopped.logs
+        );
     }
 }
 
@@ -210,10 +221,11 @@ async fn stop(path: Stop, fail: bool) -> Stopped {
         .unwrap_or_else(|_| panic!("harness did not exit: {}", logs(dir)))
         .unwrap();
     relay.abort();
+    // The stop hook runs exactly once; only a failed save is quarantined.
     assert_eq!(
         std::fs::read_to_string(dir.join("checkpoint-runs")).unwrap_or_default(),
-        "save\n",
-        "the stop hook must run exactly once: {}",
+        if fail { "save\nquarantine\n" } else { "save\n" },
+        "{}",
         logs(dir)
     );
     Stopped {

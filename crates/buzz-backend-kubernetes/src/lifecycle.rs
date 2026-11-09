@@ -49,8 +49,9 @@ pub const ENDED_AT: &str = "buzz.block.xyz/ended-at";
 /// `<s3 key>` | `missing` | `unconfigured`.
 pub const CHECKPOINT: &str = "buzz.block.xyz/checkpoint";
 /// Where the tombstone's [`CHECKPOINT`] key came from:
-/// [`CHECKPOINT_SOURCE_RECEIPT`] | [`CHECKPOINT_SOURCE_LISTED`] |
-/// [`CHECKPOINT_SOURCE_INHERITED`]. Absent when [`CHECKPOINT`] is not a key.
+/// [`CHECKPOINT_SOURCE_RECEIPT`] | [`CHECKPOINT_SOURCE_QUARANTINE`] |
+/// [`CHECKPOINT_SOURCE_LISTED`] | [`CHECKPOINT_SOURCE_INHERITED`]. Absent when
+/// [`CHECKPOINT`] is not a key.
 pub const CHECKPOINT_SOURCE: &str = "buzz.block.xyz/checkpoint-source";
 /// Generation of the tombstone a recovered session replaced.
 pub const RECOVERED_FROM: &str = "buzz.block.xyz/recovered-from";
@@ -71,6 +72,15 @@ pub const CHECKPOINT_SOURCE_RECEIPT: &str = "receipt";
 pub const CHECKPOINT_SOURCE_LISTED: &str = "listed";
 /// [`CHECKPOINT_SOURCE`]: the checkpoint a recovered session was restored from.
 pub const CHECKPOINT_SOURCE_INHERITED: &str = "inherited";
+/// [`CHECKPOINT_SOURCE`]: the archive the harness stored under the session's
+/// [`QUARANTINE_DIR`] after its final verified save failed. It holds the final
+/// workspace without the secret scan; excluded credential paths stay out.
+pub const CHECKPOINT_SOURCE_QUARANTINE: &str = "quarantine";
+/// Subdirectory of a session prefix (`<developer prefix><generation>/`) that
+/// holds quarantine archives. Its objects are not session keys
+/// ([`is_session_key`]), so a listing of the session prefix never picks one.
+/// Matches `QUARANTINE` in `voltage/images/buzz-agent/checkpoint.py`.
+pub const QUARANTINE_DIR: &str = "quarantine/";
 /// [`CHECKPOINTING`] value written when checkpoint-on-stop is configured.
 pub const CHECKPOINTING_ENABLED: &str = "enabled";
 /// [`CHECKPOINTING`] value written when checkpoint-on-stop is not configured.
@@ -508,6 +518,14 @@ pub fn is_session_key(key: &str, session_prefix: &str) -> bool {
         && key
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"-/._".contains(&b))
+}
+
+/// Is `key` one checkpoint object of the session: a session key
+/// ([`is_session_key`]) or a quarantine archive directly under
+/// `<session_prefix>quarantine/`?
+pub fn is_restorable_key(key: &str, session_prefix: &str) -> bool {
+    is_session_key(key, session_prefix)
+        || is_session_key(key, &format!("{session_prefix}{QUARANTINE_DIR}"))
 }
 
 /// Is a tombstone `checkpoint` value an actual key?

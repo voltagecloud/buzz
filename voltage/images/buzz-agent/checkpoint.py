@@ -21,6 +21,8 @@ import uuid
 from urllib.parse import urlsplit, urlunsplit
 
 MAX_BYTES = 256 * 1024 * 1024
+# Session subdirectory for unscanned archives (lifecycle::QUARANTINE_DIR).
+QUARANTINE = 'quarantine/'
 MAX_FILES = 50000
 # All origins are asked at once; this bounds the whole save's network wait.
 ORIGIN_SECONDS = 20
@@ -318,7 +320,33 @@ def local_refs(repo, origin_refs):
     return refs, tags
 
 
-def pack(workspace, output):
+def has_commit(repo):
+    return subprocess.run(['git', '-c', 'core.hooksPath=/dev/null', '-C', str(repo),
+                           'rev-parse', '--verify', '--quiet', 'HEAD'],
+                          capture_output=True, timeout=60).returncode == 0
+
+
+def quarantine_origin(repo):
+    """The repository's origin for a quarantine, or '' where it has none usable.
+
+    A verified save refuses such a repository; a quarantine keeps its history
+    in a self-contained bundle instead."""
+    try:
+        return public_origin(repo)
+    except ValueError:
+        return ''
+
+
+def pack(workspace, output, *, scanned=True):
+    """Pack the workspace's repositories into a checkpoint archive.
+
+    With `scanned=False` (a quarantine, after a verified save failed) nothing
+    is scanned for secrets and no bundle is integrity-checked: the archive
+    holds the agent's work as found. Excluded paths stay excluded, so private
+    runtime files and credential files are never packed. A repository with no
+    usable origin is bundled whole. One whose HEAD has no commit (a new
+    `git init`, an orphan checkout) keeps its branches and every file as
+    base `unborn`, so a quarantine never drops a repository."""
     workspace = workspace.resolve(strict=True)
     manifest = {'version': 1, 'repositories': []}
     total = 0
@@ -331,17 +359,21 @@ def pack(workspace, output):
         repos = repositories(workspace)
         if any(repo == workspace for repo in repos):
             raise ValueError('Use a workspace directory containing repositories')
-        origins = [public_origin(repo) for repo in repos]
+        origins = [public_origin(repo) if scanned else quarantine_origin(repo) for repo in repos]
         listings = origin_listings(origins)
         for index, (repo, origin, listing) in enumerate(zip(repos, origins, listings)):
             relative = repo.relative_to(workspace).as_posix()
             tips, origin_refs = origin_base(repo, listing)
-            base = 'origin' if tips else 'bundle'
+            # A verified save refuses an unborn HEAD at rev-parse below.
+            unborn = not scanned and not has_commit(repo)
+            base = 'unborn' if unborn else 'origin' if tips else 'bundle'
             record = {'path': relative, 'origin': origin, 'base': base,
-                      'head': git(repo, 'rev-parse', 'HEAD').decode().strip(),
+                      'head': None if unborn else git(repo, 'rev-parse', 'HEAD').decode().strip(),
                       'branch': git(repo, 'branch', '--show-current').decode().strip(),
                       'shallow': shallow_commits(repo),
                       'excluded': [], 'files': [], 'deleted': []}
+            if unborn:
+                record['object_format'] = git(repo, 'rev-parse', '--show-object-format').decode().strip()
             if base == 'origin':
                 # Older images refuse version 2, so it marks only what needs it.
                 manifest['version'] = 2
@@ -361,7 +393,7 @@ def pack(workspace, output):
                 beyond = [name for name in owned if git(
                     repo, 'rev-list', '--max-count=1', '--stdin', input=(name + '\n').encode() + tips).strip()]
                 revisions = ''.join(name + '\n' for name in beyond).encode() + tips
-                if beyond:
+                if beyond and scanned:
                     # The same commits as the bundle, bounded by their boundary
                     # rather than by every origin tip, which can exceed one
                     # argument's size limit.
@@ -369,13 +401,19 @@ def pack(workspace, output):
                                                          input=revisions).decode().splitlines()
                                 if line.startswith('-')]
                     scan(repo, history=True, revisions=beyond + ['^' + value for value in boundary])
-            else:
+            elif scanned:
                 scan(repo, history=True)
-            review_changes(repo, review / str(index))
+            if scanned:
+                review_changes(repo, review / str(index))
             bundle = destination / 'history.bundle'
             if base == 'bundle':
                 # The whole history, and every file: restore needs nothing else.
                 git(repo, 'bundle', 'create', str(bundle), '--all', 'HEAD')
+                names = git(repo, 'ls-files', '-z', '--cached', '--others', '--exclude-standard')
+            elif base == 'unborn':
+                # Branches other than the unborn HEAD, if any, and every file.
+                if git(repo, 'for-each-ref', '--count=1', '--format=%(refname)').strip():
+                    git(repo, 'bundle', 'create', str(bundle), '--all')
                 names = git(repo, 'ls-files', '-z', '--cached', '--others', '--exclude-standard')
             else:
                 # Only commits origin lacks, and only files that differ from HEAD.
@@ -388,9 +426,13 @@ def pack(workspace, output):
                 total += bundle.stat().st_size
             if total > MAX_BYTES:
                 raise ValueError('Checkpoint history exceeds the 256 MiB source budget')
-            if base == 'bundle':
+            if base == 'bundle' and scanned:
                 # Preserve independent validation of self-contained bundles.
                 # Origin deltas depend on prerequisites supplied by the forge.
+                # A quarantine skips it to stay inside its deadline. Restore
+                # validates the bundle again; for a quarantine, a bundle it
+                # refuses falls back to this repository's files (every file,
+                # for base `bundle`), so one bad history never voids the archive.
                 with tempfile.TemporaryDirectory(prefix='agent-checkpoint-history-') as history_temp:
                     restore_history(bundle, record, Path(history_temp) / 'repo')
             for raw in sorted(set(names.split(b'\0')) - {b''}):
@@ -440,8 +482,9 @@ def pack(workspace, output):
         if total > MAX_BYTES:
             raise ValueError('Checkpoint history exceeds the 256 MiB source budget')
         (stage / 'manifest.json').write_text(json.dumps(manifest))
-        shutil.copyfile(stage / 'manifest.json', review / 'manifest.json')
-        scan(review)
+        if scanned:
+            shutil.copyfile(stage / 'manifest.json', review / 'manifest.json')
+            scan(review)
         with tarfile.open(output, 'w:gz', dereference=False) as archive:
             archive.add(stage, arcname='snapshot')
     os.chmod(output, 0o600)
@@ -453,7 +496,11 @@ def digest(path):
         return hashlib.file_digest(stream, 'sha256').digest()
 
 
-def restore(archive_path, destination):
+def restore(archive_path, destination, *, scanned=True):
+    """Restore an archive into a new destination.
+
+    `scanned=False` restores a quarantine, which pack() saved without the
+    secret scan; it skips the restore-time scan, which would refuse it again."""
     if destination.exists():
         raise ValueError('Restore requires a new destination; existing work is never overwritten')
     with tempfile.TemporaryDirectory(prefix='agent-restore-') as temp:
@@ -472,7 +519,7 @@ def restore(archive_path, destination):
             raise ValueError('Unsupported checkpoint version')
         destination.mkdir(mode=0o700, parents=True)
         try:
-            restore_repositories(stage, manifest, destination)
+            restore_repositories(stage, manifest, destination, scanned=scanned)
         except BaseException:
             # The destination is new, so a refused restore leaves nothing behind.
             shutil.rmtree(destination, ignore_errors=True)
@@ -480,7 +527,7 @@ def restore(archive_path, destination):
         return manifest
 
 
-def restore_repositories(stage, manifest, destination):
+def restore_repositories(stage, manifest, destination, *, scanned=True):
     with tempfile.TemporaryDirectory(prefix='agent-restore-review-') as review_temp:
         # The same scope as pack(): what each repository adds to its HEAD.
         review = Path(review_temp)
@@ -491,12 +538,24 @@ def restore_repositories(stage, manifest, destination):
                 raise ValueError('Checkpoint repository path is reserved')
             source = stage / 'repositories' / str(index)
             repo = destination / relative
-            if not re.fullmatch('[0-9a-f]{40,64}', record['head']):
-                raise ValueError('Invalid checkpoint revision')
             # Version 1 checkpoints are all bundle snapshots.
             base = record.get('base', 'bundle')
+            if base == 'unborn' and not scanned:
+                restore_unborn(source, record, repo)
+                continue
+            # A scanned restore never accepts `unborn`: it has no head.
+            if not isinstance(record['head'], str) or not re.fullmatch('[0-9a-f]{40,64}', record['head']):
+                raise ValueError('Invalid checkpoint revision')
             if base == 'bundle':
-                restore_history(source / 'history.bundle', record, repo)
+                try:
+                    restore_history(source / 'history.bundle', record, repo)
+                except (ValueError, subprocess.SubprocessError):
+                    if scanned:
+                        raise
+                    # The quarantine packed this bundle unvalidated, and the
+                    # archive may be the only copy of the work: keep the files.
+                    restore_without_history(source, record, repo)
+                    continue
             elif base == 'origin':
                 validate_origin_record(record)
                 clone_origin(record['origin'], repo)
@@ -515,7 +574,14 @@ def restore_repositories(stage, manifest, destination):
             if record['branch']:
                 git(repo, 'check-ref-format', '--branch', record['branch'])
                 git(repo, 'checkout', '-B', record['branch'], timeout=600)
-            git(repo, 'remote', 'set-url', 'origin', record['origin'])
+            if record['origin']:
+                git(repo, 'remote', 'set-url', 'origin', record['origin'])
+            elif scanned:
+                raise ValueError('Checkpoint repository has no origin')
+            else:
+                # A quarantined repository without a usable origin: drop the
+                # temporary bundle URL, but keep its remote-tracking refs.
+                git(repo, 'config', '--unset', 'remote.origin.url')
             if base == 'bundle':
                 # Absence from the snapshot means deletion, except for excluded
                 # paths: they were never saved, so they keep their committed content.
@@ -531,8 +597,61 @@ def restore_repositories(stage, manifest, destination):
                 if excluded(path):
                     raise ValueError('Checkpoint file path is reserved')
                 place(repo, source / 'files', path)
-            review_changes(repo, review / str(index))
-        scan(review)
+            if scanned:
+                review_changes(repo, review / str(index))
+        if scanned:
+            scan(review)
+
+
+def restore_without_history(source, record, repo):
+    """Restore a quarantined `bundle` repository whose history restore refused.
+
+    A `bundle` record lists every file, so the working tree returns in full on
+    the saved branch, with no commits. The refused bundle is kept unchanged at
+    `.git/quarantined-history.bundle` for manual inspection."""
+    shutil.rmtree(repo, ignore_errors=True)
+    record['object_format'] = 'sha256' if len(record['head']) == 64 else 'sha1'
+    restore_unborn(source, record, repo, history=False)
+    shutil.copyfile(source / 'history.bundle', repo / '.git' / 'quarantined-history.bundle')
+    record['history'] = 'refused'
+
+
+def restore_unborn(source, record, repo, *, history=True):
+    """Restore a quarantined repository whose HEAD had no commit.
+
+    Its saved branches and latest stash come from the bundle, if it has one
+    and `history` is set; HEAD names the unborn branch again, and the saved
+    files return to the working tree."""
+    if record.get('object_format') not in ('sha1', 'sha256') or not isinstance(record.get('files'), list):
+        raise ValueError('Invalid checkpoint repository record')
+    run('git', '-c', 'core.hooksPath=/dev/null', 'init',
+        '--object-format=' + record['object_format'], str(repo))
+    bundle = source / 'history.bundle'
+    if history and bundle.exists():
+        # A stash made before an orphan checkout is bundled with the branches.
+        stash = git(repo, 'bundle', 'list-heads', str(bundle), 'refs/stash').decode().split()[:1]
+        if stash and not re.fullmatch('[0-9a-f]{40,64}', stash[0]):
+            raise ValueError('Invalid checkpoint reference')
+        # Branches, tags, and remote-tracking refs, and the stash's objects;
+        # never replacements. --update-head-ok: the new repository's default
+        # branch can share a saved branch's name; HEAD is pointed at the
+        # unborn branch below.
+        git(repo, 'fetch', '--no-tags', '--update-head-ok', str(bundle), '+refs/heads/*:refs/heads/*',
+            '+refs/tags/*:refs/tags/*', '+refs/remotes/*:refs/remotes/*',
+            *(['refs/stash'] if stash else []), timeout=600)
+        if stash:
+            # `git stash` reads the reflog, which a bundle does not carry.
+            git(repo, 'update-ref', '--create-reflog', '-m', 'Restored from checkpoint', 'refs/stash', stash[0])
+    if record['branch']:
+        git(repo, 'check-ref-format', '--branch', record['branch'])
+        git(repo, 'symbolic-ref', 'HEAD', 'refs/heads/' + record['branch'])
+    if record['origin']:
+        git(repo, 'remote', 'add', 'origin', record['origin'])
+    for value in record['files']:
+        path = safe_path(value)
+        if excluded(path):
+            raise ValueError('Checkpoint file path is reserved')
+        place(repo, source / 'files', path)
 
 
 def clone_origin(origin, repo):
@@ -691,16 +810,17 @@ def storage():
     return bucket, prefix + session + '/'
 
 
-def save(workspace):
+def upload(workspace, prefix, *, scanned):
+    """Pack the workspace, store it under `prefix`, and return its receipt."""
     step('reading the checkpoint settings')
-    bucket, prefix = storage()
+    bucket, session = storage()
     with tempfile.TemporaryDirectory(prefix='agent-upload-') as temp:
         artifact = Path(temp) / 'checkpoint.tar.gz'
         step('packing the workspace')
-        manifest = pack(workspace, artifact)
+        manifest = pack(workspace, artifact, scanned=scanned)
         step('uploading the checkpoint')
         checksum = base64.b64encode(digest(artifact)).decode()
-        key = prefix + str(uuid.uuid4()) + '.tar.gz'
+        key = session + prefix + str(uuid.uuid4()) + '.tar.gz'
         run('aws', 's3api', 'put-object', '--bucket', bucket, '--key', key,
             '--body', str(artifact), '--if-none-match', '*', '--server-side-encryption', 'AES256',
             '--checksum-algorithm', 'SHA256', '--checksum-sha256', checksum)
@@ -708,22 +828,40 @@ def save(workspace):
                               '--key', key, '--checksum-mode', 'ENABLED'))
         if head.get('ChecksumSHA256') != checksum or head.get('ContentLength') != artifact.stat().st_size:
             raise ValueError('Checkpoint upload could not be verified')
-        receipt = {'version': 1, 'key': key, 'sha256': digest(artifact).hex(),
-                   'repositories': len(manifest['repositories']), 'bytes': artifact.stat().st_size}
-        private = workspace / '.config/buzz-agent'
-        private.mkdir(parents=True, exist_ok=True, mode=0o700)
-        receipt_path = private / 'checkpoint.json'
-        fd = os.open(receipt_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(fd, 'w') as stream:
-            json.dump(receipt, stream)
-        return receipt
+        return {'version': 1, 'key': key, 'sha256': digest(artifact).hex(),
+                'repositories': len(manifest['repositories']), 'bytes': artifact.stat().st_size}
+
+
+def quarantine(workspace):
+    """Store the workspace without the secret scan, after a verified save failed.
+
+    The archive goes to the session's `quarantine/` prefix, which the reaper
+    reads separately and restore accepts only through explicit recovery. It
+    writes no verified receipt."""
+    return upload(workspace, QUARANTINE, scanned=False)
+
+
+def save(workspace):
+    receipt = upload(workspace, '', scanned=True)
+    private = workspace / '.config/buzz-agent'
+    private.mkdir(parents=True, exist_ok=True, mode=0o700)
+    receipt_path = private / 'checkpoint.json'
+    fd = os.open(receipt_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, 'w') as stream:
+        json.dump(receipt, stream)
+    return receipt
 
 
 def recover(key, destination):
     bucket, _ = storage()
-    if not key.startswith(os.environ['BUZZ_CHECKPOINT_PREFIX']) or not re.fullmatch(
-            '[a-z0-9-]+/[a-z0-9-]{8,64}/[a-f0-9-]{36}\\.tar\\.gz', key):
+    match = re.fullmatch('[a-z0-9-]+/[a-z0-9-]{8,64}/(' + QUARANTINE + ')?[a-f0-9-]{36}\\.tar\\.gz', key)
+    if not key.startswith(os.environ['BUZZ_CHECKPOINT_PREFIX']) or not match:
         raise ValueError('Checkpoint does not belong to the configured developer prefix')
+    # The key, not the archive's manifest, selects the unscanned restore. The
+    # reaper records quarantine keys from its own listing, but every session
+    # of the developer can write under the prefix, so the listing is only as
+    # trustworthy as that developer's Sandboxes (as for `listed` keys).
+    scanned = match.group(1) is None
     head = json.loads(run('aws', 's3api', 'head-object', '--bucket', bucket,
                           '--key', key, '--checksum-mode', 'ENABLED'))
     if not 0 < head.get('ContentLength', 0) <= MAX_BYTES * 2 or not head.get('ChecksumSHA256'):
@@ -736,7 +874,7 @@ def recover(key, destination):
             '--bucket', bucket, '--key', key, str(artifact), timeout=None)
         if artifact.stat().st_size != head['ContentLength'] or base64.b64encode(digest(artifact)).decode() != head['ChecksumSHA256']:
             raise ValueError('Downloaded checkpoint checksum differs')
-        return restore(artifact, destination)
+        return restore(artifact, destination, scanned=scanned)
 
 
 def restore_once(key, workspace):
@@ -777,12 +915,13 @@ def restore_once(key, workspace):
     with os.fdopen(fd, 'w') as stream:
         json.dump({'version': 1, 'key': key}, stream)
     # The manifest lists file names; report only counts.
-    return {'version': 1, 'restored': key, 'repositories': len(manifest['repositories'])}
+    return {'version': 1, 'restored': key, 'repositories': len(manifest['repositories']),
+            'history_refused': sum(record.get('history') == 'refused' for record in manifest['repositories'])}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['save', 'pack', 'restore', 'recover', 'restore-once'])
+    parser.add_argument('action', choices=['save', 'quarantine', 'pack', 'restore', 'recover', 'restore-once'])
     parser.add_argument('--workspace', type=Path, default=Path('/home/agent'))
     parser.add_argument('--archive', type=Path)
     parser.add_argument('--destination', type=Path)
@@ -792,6 +931,8 @@ def main():
         step('restoring the checkpoint')
     if args.action == 'save':
         result = save(args.workspace)
+    elif args.action == 'quarantine':
+        result = quarantine(args.workspace)
     elif args.action == 'pack' and args.archive:
         result = pack(args.workspace, args.archive)
     elif args.action == 'restore' and args.archive and args.destination:

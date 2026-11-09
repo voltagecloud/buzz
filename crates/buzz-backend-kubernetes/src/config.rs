@@ -57,7 +57,10 @@ pub const WORKSPACE_PATH: &str = "/home/agent";
 
 /// Declared shutdown budget, including the 120s checkpoint timeout. The up to
 /// 60s wait for a running background turn checkpoint counts from the start of
-/// the stop path, so it overlaps the drains instead of adding to them.
+/// the stop path, so it overlaps the drains instead of adding to them. After a
+/// failed checkpoint, `buzz-acp` quarantines the workspace only within what
+/// remains of a 290s deadline from the start of the stop path
+/// (`checkpoint::STOP_BUDGET`), so the quarantine adds no term here.
 /// Child reaping is variable; this is operational margin, not a proven bound
 /// on the harness's whole shutdown path (§K8s Grace).
 pub const TERMINATION_GRACE_SECONDS: i64 = 300;

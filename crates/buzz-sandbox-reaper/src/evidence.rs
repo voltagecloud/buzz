@@ -8,6 +8,9 @@
 //!
 //! - [`from_receipt`]: the harness's termination-message receipt. The receipt
 //!   alone is written by the (untrusted) Pod, so S3 must also list it.
+//! - [`quarantined`]: the newest archive under the session's `quarantine/`
+//!   prefix, which the harness writes without the secret scan after its
+//!   final verified save fails. It holds the final workspace.
 //! - [`latest`]: the newest object in the session prefix, for a session
 //!   without a verified receipt (the reconcile engine decides when). It may be
 //!   a turn checkpoint older than the final workspace.
@@ -22,7 +25,9 @@ use std::future::Future;
 use std::time::Duration;
 
 use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
-use buzz_backend_kubernetes::lifecycle::{is_session_key, receipt_key};
+use buzz_backend_kubernetes::lifecycle::{
+    is_restorable_key, is_session_key, receipt_key, QUARANTINE_DIR,
+};
 
 use crate::plan::Evidence;
 
@@ -254,9 +259,23 @@ pub async fn latest<S: CheckpointStore>(store: &S, session_prefix: &str) -> Evid
     }
 }
 
+/// Evidence for a session whose final verified save failed: the newest
+/// quarantine archive directly under `<session_prefix>quarantine/`, as
+/// [`Evidence::Quarantined`]. Nothing listed is [`Evidence::Missing`]; a
+/// failed listing is [`Evidence::Unavailable`], never `Missing`.
+pub async fn quarantined<S: CheckpointStore>(store: &S, session_prefix: &str) -> Evidence {
+    let prefix = format!("{session_prefix}{QUARANTINE_DIR}");
+    match store.newest(&prefix).await {
+        Ok(Some(key)) if is_session_key(&key, &prefix) => Evidence::Quarantined(key),
+        Ok(_) => Evidence::Missing,
+        Err(error) => unavailable(&error),
+    }
+}
+
 /// Evidence for a recovered session that left no verified checkpoint of its
 /// own: the checkpoint it was restored from, if that object still exists
-/// directly under `<developer prefix><generation>/` for a valid generation.
+/// directly under `<developer prefix><generation>/` (or its quarantine
+/// subdirectory, after a recovery from a quarantine) for a valid generation.
 /// The generation can be an older ancestor than `recovered-from` after
 /// repeated failed recovery. `restore` comes from the provider-written
 /// Sandbox annotation, never the Pod, so carrying it forward keeps the
@@ -271,7 +290,7 @@ pub async fn inherited<S: CheckpointStore>(
         .and_then(|rest| rest.split_once('/'))
         .and_then(|(generation, _)| session_prefix(developer_prefix, generation));
     match prefix {
-        Some(prefix) if is_session_key(restore, &prefix) => {
+        Some(prefix) if is_restorable_key(restore, &prefix) => {
             probe(store, restore.to_string(), Evidence::Inherited).await
         }
         _ => Evidence::Missing,
@@ -425,6 +444,41 @@ pub mod tests {
         );
     }
 
+    /// Quarantine archives live one level below the session prefix: a
+    /// listing of the session never picks one, and the quarantine probe
+    /// picks only its newest direct child.
+    #[tokio::test]
+    async fn quarantine_archives_are_listed_apart_from_session_checkpoints() {
+        let turn = format!("{PREFIX}00000000-0000-0000-0000-000000000001.tar.gz");
+        let older = format!("{PREFIX}quarantine/00000000-0000-0000-0000-000000000002.tar.gz");
+        let newer = format!("{PREFIX}quarantine/00000000-0000-0000-0000-000000000003.tar.gz");
+        let store = FakeStore {
+            keys: vec![
+                turn.clone(),
+                older,
+                newer.clone(),
+                format!("{PREFIX}quarantine/nested/x.tar.gz"),
+                "dev/ffffffffffffffffffffffffffffffff/quarantine/x.tar.gz".into(),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(latest(&store, PREFIX).await, Evidence::Listed(turn.clone()));
+        assert_eq!(
+            quarantined(&store, PREFIX).await,
+            Evidence::Quarantined(newer)
+        );
+        let none = FakeStore {
+            keys: vec![turn],
+            ..Default::default()
+        };
+        assert_eq!(quarantined(&none, PREFIX).await, Evidence::Missing);
+        let outage = FakeStore {
+            fail: true,
+            ..Default::default()
+        };
+        assert_eq!(quarantined(&outage, PREFIX).await, Evidence::Unavailable);
+    }
+
     #[test]
     fn session_prefixes_require_a_provider_generation() {
         let generation = "0123456789abcdef0123456789abcdef";
@@ -453,6 +507,16 @@ pub mod tests {
             inherited(&store, &key, "dev/").await,
             Evidence::Inherited(key.clone())
         );
+        // A recovery from a quarantine archive carries that archive forward.
+        let quarantine = format!("{PREFIX}quarantine/6f9619ff-8b86-d011-b42d-00cf4fc964ff.tar.gz");
+        let quarantined_store = FakeStore {
+            keys: vec![quarantine.clone()],
+            ..Default::default()
+        };
+        assert_eq!(
+            inherited(&quarantined_store, &quarantine, "dev/").await,
+            Evidence::Inherited(quarantine)
+        );
         // Expired or deleted since the recovery.
         let gone = format!("{PREFIX}00000000-0000-0000-0000-000000000000.tar.gz");
         assert_eq!(inherited(&store, &gone, "dev/").await, Evidence::Missing);
@@ -466,6 +530,7 @@ pub mod tests {
         for bad in [
             "dev/NOT-A-GENERATION/x.tar.gz",
             &format!("{PREFIX}a/x.tar.gz"),
+            &format!("{PREFIX}quarantine/a/x.tar.gz"),
         ] {
             let store = FakeStore {
                 keys: vec![bad.to_string()],

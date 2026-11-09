@@ -97,7 +97,16 @@ For older full snapshots without boundary metadata, restore reconstructs missing
 Missing trees, missing blobs, and other integrity failures stop recovery and remove the staged destination.
 Full snapshots retain manifest version 1. Older images restore complete histories, but cannot restore shallow bundles.
 Publish and promote the updated agent image before recovering a session with shallow repositories.
-A failed save retains the Sandbox for recovery; do not delete its workspace.
+A failed final save is quarantined (below). Only if the quarantine also fails does the reaper hold the Sandbox for 24 hours; do not delete its workspace then.
+
+**Quarantine.** When the final save on stop fails, the harness runs `buzz-agent-checkpoint quarantine` (90-second limit).
+It packs the workspace like a save, but runs no secret scan and validates no bundle, and stores it as `<prefix><session>/quarantine/<uuid>.tar.gz`.
+Excluded paths (private runtime files, `.env*`, and the credential names in `PRIVATE_NAMES`) stay out. A credential the agent wrote into other files is kept.
+A repository without a usable origin is saved whole. One whose HEAD has no commit (a new `git init`, an orphan checkout) keeps its other branches, its latest stash, and every file, unstaged.
+Restoring a repository without a usable origin clears the origin URL but keeps its remote-tracking refs.
+If restore refuses a quarantined repository's saved history (for example a replace ref or a commit that fails `git fsck`), it restores that repository's files on its branch with no commits and keeps the history at `.git/quarantined-history.bundle`. The other repositories restore normally, and `restore-once` reports the count as `history_refused`.
+The harness still exits non-zero, writes no termination receipt, and reports `checkpoint_quarantined` or `checkpoint_quarantine_failed` in activity.
+The Pod's `emptyDir` lives only as long as its node: spot interruptions and autoscaler scale-down remove it within minutes. The quarantine archive is the copy that survives.
 A checkpoint holds at most 256 MiB of source and 50,000 files.
 A repository whose HTTPS `origin` shares a branch tip with it, as `git ls-remote` reports at save time, is saved against origin: only commits beyond origin's branches, changed and untracked files, deletions, local branches, and tags origin lacks (annotated tag objects by content).
 The save asks every origin at once, using the normalized URL and global Git configuration that restore uses, with one 20-second deadline for all of them.
@@ -111,6 +120,7 @@ Origin-based snapshots do not save Git notes (`refs/notes`) or stash entries oth
 Explicit checkpoint recovery sets `BUZZ_CHECKPOINT_RESTORE_KEY` in the launch Secret; it is empty otherwise.
 After the developer profile bootstrap and before the harness starts, the entrypoint runs `buzz-agent-checkpoint restore-once`.
 The key must be under the developer's `BUZZ_CHECKPOINT_PREFIX`. A failed restore stops startup; the harness never starts with an empty workspace.
+A key under a session's `quarantine/` prefix restores without the restore-time secret scan, which would refuse it again. The key decides this, not the archive's manifest.
 The restore moves repositories into `/home/agent` without overwriting existing paths, then writes `.config/buzz-agent/checkpoint-restored.json`.
 A container restart with that marker skips the restore and keeps newer edits.
 After a successful save, the harness writes `{"version":1,"checkpoint":"<key>"}` to `/dev/termination-log` for the reaper.
@@ -174,7 +184,7 @@ The manager sets `BUZZ_DEVELOPER_ID`, `BUZZ_DEVELOPER_PROFILE_ARN`, `BUZZ_CHECKP
 
 The bootstrap checks the profile against Buzz's verified owner, then writes Git identity, GitHub, via, the agent signing key, and the vault's Depot credential to private workspace files.
 Missing profiles, owner mismatches, and unsafe paths refuse startup. A new enrollment takes effect for new sessions; running sessions keep their credentials, so revoke upstream tokens when required.
-Credentials are excluded from checkpoints. The image test uses a Secrets Manager emulator.
+Credential files are excluded from checkpoints, including quarantines. The image test uses a Secrets Manager emulator.
 
 `models` accepts these optional credentials:
 

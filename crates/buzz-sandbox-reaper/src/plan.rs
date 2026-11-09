@@ -8,8 +8,8 @@
 
 use buzz_backend_kubernetes::lifecycle::{
     EndedReason, Ignored, State, CHECKPOINT_MISSING, CHECKPOINT_SOURCE_INHERITED,
-    CHECKPOINT_SOURCE_LISTED, CHECKPOINT_SOURCE_RECEIPT, CHECKPOINT_UNCONFIGURED,
-    MISSING_CHECKPOINT_HOLD_SECS,
+    CHECKPOINT_SOURCE_LISTED, CHECKPOINT_SOURCE_QUARANTINE, CHECKPOINT_SOURCE_RECEIPT,
+    CHECKPOINT_UNCONFIGURED, MISSING_CHECKPOINT_HOLD_SECS,
 };
 use chrono::{DateTime, Duration, Utc};
 
@@ -22,6 +22,12 @@ pub enum Evidence {
     Unconfigured,
     /// No receipt, or the receipt and S3 disagree.
     Missing,
+    /// The final verified save failed, and the harness stored the final
+    /// workspace without the secret scan under the session's quarantine
+    /// prefix. S3 lists this newest archive there. It is durable, so a
+    /// Completed session records it at once instead of holding a workspace
+    /// that only lives on the Pod's node.
+    Quarantined(String),
     /// No verified receipt (none observed, or a failed final save), but S3
     /// lists this newest object in the session's own prefix. Not attested
     /// by the harness and possibly an older turn checkpoint, so a Completed
@@ -40,6 +46,7 @@ impl Evidence {
     fn annotation(&self) -> Option<(String, Option<&'static str>)> {
         match self {
             Self::Verified(key) => Some((key.clone(), Some(CHECKPOINT_SOURCE_RECEIPT))),
+            Self::Quarantined(key) => Some((key.clone(), Some(CHECKPOINT_SOURCE_QUARANTINE))),
             Self::Listed(key) => Some((key.clone(), Some(CHECKPOINT_SOURCE_LISTED))),
             Self::Inherited(key) => Some((key.clone(), Some(CHECKPOINT_SOURCE_INHERITED))),
             Self::Unconfigured => Some((CHECKPOINT_UNCONFIGURED.into(), None)),
@@ -56,7 +63,8 @@ pub enum Action {
     None,
     /// Leave it alone and say why (Event).
     Ignore(Ignored),
-    /// Completed without a checkpoint: hold until `until` (Event + metric).
+    /// Completed without a durable copy of its final workspace: hold until
+    /// `until` (Event + metric).
     Hold { until: DateTime<Utc> },
     /// One CAS merge patch: Suspended + lifecycle annotations.
     Tombstone {
@@ -124,7 +132,13 @@ pub fn plan(
                     Action::Hold { until }
                 }
             }
-            _ => tombstone(EndedReason::Completed, evidence),
+            // A quarantine archive is a durable copy of the final workspace,
+            // so nothing is gained by holding the Pod. `Unavailable` plans
+            // nothing (see `tombstone`).
+            Evidence::Verified(_)
+            | Evidence::Quarantined(_)
+            | Evidence::Unconfigured
+            | Evidence::Unavailable => tombstone(EndedReason::Completed, evidence),
         },
         State::Ended { expired: true } => Action::Delete,
         State::Binding { abandoned: false }
@@ -206,6 +220,22 @@ mod tests {
                 reason: EndedReason::Completed,
                 checkpoint: "dev/g/x.tar.gz".into(),
                 source: Some(CHECKPOINT_SOURCE_RECEIPT),
+            }
+        );
+        // A failed final save that left a quarantine archive does not hold:
+        // the archive is the durable copy of the final workspace, while the
+        // Pod's emptyDir dies with a spot interruption or a scale-down.
+        assert_eq!(
+            plan(
+                &completed,
+                &Evidence::Quarantined("dev/g/quarantine/x.tar.gz".into()),
+                t(1),
+                t(1)
+            ),
+            Action::Tombstone {
+                reason: EndedReason::Completed,
+                checkpoint: "dev/g/quarantine/x.tar.gz".into(),
+                source: Some(CHECKPOINT_SOURCE_QUARANTINE),
             }
         );
         assert_eq!(
@@ -349,6 +379,7 @@ mod tests {
     fn any_evidence() -> impl Strategy<Value = Evidence> {
         prop_oneof![
             "[a-z]{1,8}".prop_map(Evidence::Verified),
+            "[a-z]{1,8}".prop_map(Evidence::Quarantined),
             "[a-z]{1,8}".prop_map(Evidence::Inherited),
             "[a-z]{1,8}".prop_map(Evidence::Listed),
             Just(Evidence::Unconfigured),
@@ -386,10 +417,17 @@ mod tests {
                     matches!(evidence, Evidence::Verified(_))
                 );
                 prop_assert_eq!(
+                    *source == Some(CHECKPOINT_SOURCE_QUARANTINE),
+                    matches!(evidence, Evidence::Quarantined(_))
+                );
+                prop_assert_eq!(
                     source.is_some(),
                     matches!(
                         evidence,
-                        Evidence::Verified(_) | Evidence::Listed(_) | Evidence::Inherited(_)
+                        Evidence::Verified(_)
+                            | Evidence::Quarantined(_)
+                            | Evidence::Listed(_)
+                            | Evidence::Inherited(_)
                     )
                 );
             }

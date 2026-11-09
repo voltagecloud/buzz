@@ -1491,10 +1491,10 @@ Deleting a Sandbox removes its Pod and any workspace that remains. Recover or ch
 
 Sandbox ingress accepts only its owner's signed messages for the assigned channel thread.
 The provider enables JSONL activity and disables autonomous heartbeat work.
-The agent environment must set `BUZZ_CHECKPOINT_BUCKET` and `BUZZ_CHECKPOINT_PREFIX`; the deployment's launch environment supplies them. Shutdown then invokes `buzz-agent-checkpoint save` after sessions drain, and a failed save makes the harness exit non-zero.
+The agent environment must set `BUZZ_CHECKPOINT_BUCKET` and `BUZZ_CHECKPOINT_PREFIX`; the deployment's launch environment supplies them. Shutdown then invokes `buzz-agent-checkpoint save` after sessions drain, and a failed save makes the harness exit non-zero. A failed final save is followed by `buzz-agent-checkpoint quarantine`, which stores the workspace without the secret scan (see **Quarantine** under §Sandbox lifecycle).
 Deploy refuses Sandbox mode when either value is missing.
 To launch without a stop checkpoint, for example in a disposable test cluster, set `BUZZ_SANDBOX_CHECKPOINT=disabled`. Such a workspace is lost when its process exits.
-Sandbox Pods use the same `terminationGracePeriodSeconds` as bare Pods (300s), which covers the drain and the 120s checkpoint.
+Sandbox Pods use the same `terminationGracePeriodSeconds` as bare Pods (300s), which covers the drain and the 120s checkpoint. The quarantine after a failed checkpoint gets at most 90s and must end within 290s of the stop's start. When the drains leave less than 10s, it is skipped (`checkpoint_quarantine_failed`, reason `deadline`) and the session holds as before.
 The image supplies that helper and account setup. Infrastructure supplies storage, resource quotas, and log collection.
 
 Use channel thread mentions to launch these workspaces. A generic Start action has no thread binding and is refused.
@@ -1525,7 +1525,7 @@ keys (`buzz-backend-kubernetes` library, `lifecycle.rs`):
 | `buzz.block.xyz/lifecycle` | `ending` (a stop is draining), `ended` (a tombstone) |
 | `buzz.block.xyz/ended-reason` | `stopped`, `completed`, `replaced`, `lost`, `binding-failed`, `bind-abandoned` |
 | `buzz.block.xyz/ended-at` | RFC 3339 apiserver time at which the tombstone was written |
-| `buzz.block.xyz/checkpoint` | a verified S3 key, `missing`, or `unconfigured` |
+| `buzz.block.xyz/checkpoint` | an S3 key that the reaper confirmed exists (see `checkpoint-source`), `missing`, or `unconfigured` |
 | `buzz.block.xyz/recovered-from` | the generation of the tombstone that a recovered session replaced |
 
 The reaper classifies each Sandbox on every pass. All timers use the
@@ -1542,7 +1542,7 @@ starts the hold again; this only delays the tombstone.
 | Active | bound to this Pod, container running | none |
 | Draining | Pod deleting, or `lifecycle=ending` with the Pod present | none |
 | Ending | `lifecycle=ending`, Pod gone | tombstone with the recorded reason (`stopped`) |
-| Completed | bound to this Pod, container terminated | checkpoint verified or unconfigured: tombstone `completed`. No verified receipt: Warning Event, hold 24h, then tombstone with the `listed` or `inherited` key, or `checkpoint=missing` |
+| Completed | bound to this Pod, container terminated | checkpoint verified, quarantined, or unconfigured: tombstone `completed`. No verified receipt and no quarantine: Warning Event, hold 24h, then tombstone with the `listed` or `inherited` key, or `checkpoint=missing` |
 | Replaced | Pod UID differs from the binding | tombstone `replaced` |
 | Lost | bound, no Pod for 60s or more | tombstone `lost` |
 | Ended | Suspended and `lifecycle=ended` | delete the Sandbox 30 days after `ended-at` (the checkpoint object expiry); before that, none |
@@ -1575,10 +1575,11 @@ records `missing` because S3 failed. `buzz_sandbox_reaper_s3_errors_total{kind}`
 counts these failures by kind: `timeout` or `other` for an outage,
 `access_denied` or `not_found_bucket` for a misconfigured role or bucket.
 
-Without a verified receipt, the reaper records the newest object directly
-under the session's own `<developer prefix><generation>/` prefix, by S3
-`LastModified` (the greater key breaks a tie), and records `missing` only when
-that listing is empty. A session can lack a verified receipt for these
+Without a verified receipt, the reaper first lists the session's
+`quarantine/` prefix (see **Quarantine**). Without a quarantine archive, it
+records the newest object directly under the session's own
+`<developer prefix><generation>/` prefix, by S3 `LastModified` (the greater
+key breaks a tie), and records `missing` only when both listings are empty. A session can lack a verified receipt for these
 reasons:
 
 - The reaper keeps observed receipts in memory only. A reaper restart, or a
@@ -1601,12 +1602,54 @@ repeats it. The annotation is absent when `checkpoint` is `missing` or
 | `checkpoint-source` | Key | What it holds |
 | --- | --- | --- |
 | `receipt` | the final save's receipt, confirmed by S3 | the final workspace |
+| `quarantine` | the newest object directly under `<developer prefix><generation>/quarantine/` | the final workspace, not secret-scanned |
 | `listed` | the newest object in the session's own prefix | possibly an older background save: work after it is not included |
 | `inherited` | the key the recovered session was restored from | the workspace at the earlier tombstone |
 
-A session's own key (`receipt`, then `listed`) has precedence over the
-inherited one. The image restores the inherited checkpoint before the harness
+A session's own key (`receipt`, then `quarantine`, then `listed`) has
+precedence over the inherited one. The image restores the inherited checkpoint before the harness
 starts, so a background save of a recovered session already contains that work.
+
+**Quarantine.** When the final save fails (the secret scan refuses the
+workspace, the helper times out, or anything else), the harness runs
+`buzz-agent-checkpoint quarantine` with a 90s limit. It packs the workspace
+like a save but without the secret scan or bundle validation, and uploads it
+to `<developer prefix><generation>/quarantine/<uuid>.tar.gz`. It drops no
+repository: one whose HEAD has no commit keeps its branches, latest stash, and files. The
+quarantine does not validate a whole-history bundle at stop time, so restore
+does: if it refuses one (a replace ref, a commit that fails `git fsck`), that
+repository comes back as its files on its branch with no commits, the bundle
+kept at `.git/quarantined-history.bundle`, and the rest of the archive restores.
+It still
+fails on a special file, an external symlink, or the size and file budgets;
+the session then holds as before. Excluded paths
+(private runtime files, `.env*`, and named credential files) stay out; a
+credential the agent wrote into other files does not. The harness still exits
+non-zero and writes no receipt. Quarantine keys contain one more `/` than
+session keys, so the session listing never picks one; the reaper lists the
+quarantine prefix separately, before the session prefix. A Completed session
+with a quarantine archive is tombstoned at once: the 24-hour hold exists to
+keep the Pod's workspace for recovery, but an `emptyDir` lives only as long as
+its node, and spot interruptions and autoscaler scale-down (which ignores
+terminated Pods) remove it within minutes. Only a session with neither a
+receipt nor a quarantine still holds.
+
+A quarantine key is trusted as far as a `listed` key: every session of the
+developer shares one IAM role, so a compromised session of that developer
+could plant an object under another of their sessions' `quarantine/` prefix.
+Such an object would outrank `listed`, end that session without the hold, and
+restore without the scan; it cannot reach another developer's prefix.
+
+A session recovered from a quarantine still contains what the scan refused,
+so its own saves keep failing until the agent or developer removes it. Each
+later stop then quarantines again, but turn checkpoints add nothing, and a
+node lost without SIGTERM loses the work since the recovery.
+
+The quarantine prefix needs no infrastructure change (voltage-terraform
+`v2/environments/staging-agent`): the Sandbox role may put and get any object
+under `<developer>/`, the reaper may list the bucket, and the bucket's 30-day
+expiration rule has no filter, so quarantine archives expire with the
+session's other checkpoints.
 
 **Checkpoints after turns.** With `BUZZ_ACP_CHECKPOINT_ON_STOP`, the harness
 also saves in the background after completed turns, without a termination
@@ -1652,7 +1695,9 @@ click only; the desktop never stores it:
   refused with `no_checkpoint` when the tombstone has no checkpoint key, and
   with `no_ended_session` when the thread has no Sandbox. With
   `checkpoint-source=listed`, that key can be a background save older than
-  the session's last work (see **Checkpoints after turns**).
+  the session's last work (see **Checkpoints after turns**). With
+  `checkpoint-source=quarantine`, it restores the unscanned final workspace;
+  the image skips its restore-time secret scan for quarantine keys only.
 - `{"mode":"fresh"}` starts with an empty workspace. It is also accepted when
   the thread has no Sandbox.
 

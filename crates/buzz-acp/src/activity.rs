@@ -33,12 +33,12 @@ impl ActivityRecorder {
         let mut details = json!({});
         let kind = match event.kind.as_str() {
             "checkpoint_started" | "checkpoint_receipt_failed" => event.kind.as_str(),
-            "checkpoint_failed" => {
+            "checkpoint_failed" | "checkpoint_quarantine_failed" => {
                 details["reason"] = event.payload["reason"].as_str().into();
                 details["exit_code"] = event.payload["exit_code"].as_i64().into();
                 event.kind.as_str()
             }
-            "checkpoint_saved" => {
+            "checkpoint_saved" | "checkpoint_quarantined" => {
                 details = event.payload.clone();
                 event.kind.as_str()
             }
@@ -273,15 +273,18 @@ mod tests {
 
     #[test]
     fn checkpoint_failure_records_only_its_reason_and_exit_code() {
-        let mut recorder = ActivityRecorder::new();
-        let mut e = event(json!({"reason":"exit_status","exit_code":3,"stderr":"SECRET"}));
-        e.kind = "checkpoint_failed".into();
-        let record = recorder.record(&e).unwrap();
-        assert_eq!(record["event"], "checkpoint_failed");
-        assert_eq!(
-            record["details"],
-            json!({"reason":"exit_status","exit_code":3})
-        );
+        for kind in ["checkpoint_failed", "checkpoint_quarantine_failed"] {
+            let mut recorder = ActivityRecorder::new();
+            let mut e = event(json!({"reason":"exit_status","exit_code":3,"stderr":"SECRET"}));
+            e.kind = kind.into();
+            let record = recorder.record(&e).unwrap();
+            assert_eq!(record["event"], kind);
+            assert_eq!(
+                record["details"],
+                json!({"reason":"exit_status","exit_code":3}),
+                "{kind}"
+            );
+        }
     }
 
     #[test]
