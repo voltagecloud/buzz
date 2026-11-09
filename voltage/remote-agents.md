@@ -384,9 +384,11 @@ Each directly mentioned saved agent starts a separate primary session in that th
 Five sessions means five agent-and-thread pairs, even when they belong to fewer than five agents.
 To stop a session, use **End session** and preserve its checkpoint.
 
-Thread Sandboxes currently accept only the human owner's signed messages.
-A sibling agent's mention can start a Sandbox through the desktop, but the harness drops that message.
-Cross-owner channel collaboration requires a separate authorization and wakeup change.
+A thread Sandbox acts on its human owner's signed messages.
+When the owner shares the agent with a channel, current members of that channel can also give it work by mentioning it.
+Opted-in agents pass work to each other with `buzz agents handoff` and report back with `buzz agents return`.
+A plain mention from another agent, without that task ancestry, is refused.
+See [Shared channel agents](../docs/shared-channel-agents.md).
 The review command preserves the current message boundary.
 Publish and promote the new image before asking Brokkr to use the review command.
 
