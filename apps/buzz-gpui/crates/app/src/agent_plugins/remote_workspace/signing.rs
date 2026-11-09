@@ -152,9 +152,9 @@ async fn gh(args: &[&str]) -> Result<std::process::Output, &'static str> {
 /// Why a failed `gh` call could not add the key, from its error output.
 pub fn gh_failure(stderr: &str) -> &'static str {
     if stderr.contains("admin:ssh_signing_key") {
-        "gh needs the admin:ssh_signing_key scope: run gh auth refresh -h github.com -s admin:ssh_signing_key, then enroll again"
+        "gh needs the admin:ssh_signing_key scope: run gh auth refresh -h github.com -s admin:ssh_signing_key, then enroll again with Replace the signing key selected"
     } else if stderr.contains("gh auth login") || stderr.contains("not logged") {
-        "gh is not signed in: run gh auth login"
+        "gh is not signed in: run gh auth login -s admin:ssh_signing_key, then enroll again with Replace the signing key selected"
     } else if stderr.contains("key is already in use") {
         "this key is already on a GitHub account"
     } else {
