@@ -52,4 +52,5 @@ docker run --rm --tmpfs /home/agent:uid=10001,gid=10001,mode=0700 \
     command -v codex-acp claude-agent-acp buzz-dev-mcp >/dev/null
   '
 python3 "$(dirname "$0")/test-review.py" "$IMAGE"
+python3 "$(dirname "$0")/test-snapshot.py" "$IMAGE"
 printf 'PASS: agent adapter packaging and unauthenticated ACP initialization (%s)\n' "$IMAGE"
