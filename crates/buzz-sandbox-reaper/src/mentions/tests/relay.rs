@@ -143,12 +143,30 @@ fn matches(filter: &Value, event: &Event) -> bool {
 }
 
 async fn connection(
-    socket: tokio::net::TcpStream,
+    mut socket: tokio::net::TcpStream,
     stored: Arc<Mutex<Vec<Event>>>,
     hub: broadcast::Sender<Event>,
     subscriptions: watch::Sender<BTreeMap<String, usize>>,
     lose_next_ack: Arc<AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // The authority lookup reads NIP-11 from the same authenticated community
+    // origin. Peek without consuming the WebSocket handshake.
+    let mut prefix = [0_u8; 16_384];
+    for _ in 0..64 {
+        let n = tokio::time::timeout(std::time::Duration::from_secs(1), socket.peek(&mut prefix))
+            .await??;
+        let text = String::from_utf8_lossy(&prefix[..n]);
+        if text.contains("\r\n\r\n") {
+            if !text.to_ascii_lowercase().contains("sec-websocket-key:") {
+                let body = json!({"self":keys("11").public_key()}).to_string();
+                let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/nostr+json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                tokio::io::AsyncWriteExt::write_all(&mut socket, response.as_bytes()).await?;
+                return Ok(());
+            }
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
     let mut ws = tokio_tungstenite::accept_async(socket).await?;
     let frame = |value: Value| Message::Text(value.to_string().into());
     ws.send(frame(json!(["AUTH", "challenge"]))).await?;
@@ -175,7 +193,10 @@ async fn connection(
                         assert!(author.is_some());
                         let id = input[1].as_str().unwrap().to_string();
                         let filter = input[2].clone();
-                        let allowed = |event: &Event| matches!(event.kind.as_u16(), 24210 | 30177) || event.tags.iter().any(|tag| tag.as_slice() == ["h", CHANNEL] || tag.as_slice() == ["d", CHANNEL]);
+                        if matches!(id.as_str(), "mention-gateways" | "mention-gateway-profiles" | "mention-gateway-channel") {
+                            assert_eq!(filter["consistency"], json!("strong"));
+                        }
+                        let allowed = |event: &Event| matches!(event.kind.as_u16(), 0 | 24210 | 30177 | 30181) || event.tags.iter().any(|tag| tag.as_slice() == ["h", CHANNEL] || tag.as_slice() == ["d", CHANNEL]);
                         let mut history: Vec<_> = stored.lock().unwrap().iter().filter(|e| matches(&filter,e) && allowed(e)).cloned().collect();
                         history.sort_by_key(|e| std::cmp::Reverse((e.created_at, e.id)));
                         history.truncate(filter["limit"].as_u64().unwrap_or(1000) as usize);

@@ -263,6 +263,9 @@ enum Cmd {
     /// Draft owner-reviewed agent creation and updates
     #[command(subcommand)]
     Agents(AgentsCmd),
+    /// Delegate a separate key to drive your remote agents
+    #[command(subcommand)]
+    Gateway(GatewayCmd),
     /// Send, read, search, and manage messages
     #[command(subcommand)]
     Messages(MessagesCmd),
@@ -347,6 +350,26 @@ impl RespondToArg {
         }
         .to_string()
     }
+}
+
+/// Manage owner-signed, expiring gateway delegations.
+#[derive(Subcommand)]
+pub enum GatewayCmd {
+    /// Delegate a gateway key (membership must be granted separately)
+    Grant {
+        /// Gateway public key (hex or npub)
+        pubkey: String,
+        /// Lifetime, such as 24h or 90d (maximum 90d)
+        #[arg(long, default_value = "90d")]
+        expires: String,
+    },
+    /// Read your delegation heads, including revocations and expired heads
+    List,
+    /// Revoke a gateway with a durable replacement head
+    Revoke {
+        /// Gateway public key (hex or npub)
+        pubkey: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2316,6 +2339,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
 
     match cli.command {
         Cmd::Agents(sub) => commands::agents::dispatch(sub, &client).await,
+        Cmd::Gateway(sub) => commands::gateway::dispatch(sub, &client).await,
         Cmd::Messages(sub) => commands::messages::dispatch(sub, &client, &cli.format).await,
         Cmd::Channels(sub) => commands::channels::dispatch(sub, &client, &cli.format).await,
         Cmd::Canvas(sub) => commands::channels::dispatch_canvas(sub, &client).await,
@@ -2512,6 +2536,7 @@ mod tests {
             "dms",
             "emoji",
             "feed",
+            "gateway",
             "gifs",
             "issues",
             "media",
@@ -2731,6 +2756,7 @@ mod tests {
             ("dms", 4),
             ("emoji", 5),
             ("feed", 1),
+            ("gateway", 3),
             ("issues", 6),
             ("media", 1),
             ("messages", 8),

@@ -22,6 +22,8 @@ pub mod community_provisioning;
 pub mod count;
 #[cfg(test)]
 mod create_with_members_postgres_tests;
+/// Canonical membership authority behind strong Nostr reads.
+pub(crate) mod current_members;
 #[cfg(test)]
 mod deletion_postgres_tests;
 #[cfg(test)]

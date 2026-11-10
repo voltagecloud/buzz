@@ -1,8 +1,10 @@
-//! Launch registered remote workspaces from ordinary, owner-signed mentions.
+//! Launch registered remote workspaces from ordinary mentions signed by the
+//! owner or by a gateway key the owner has live-delegated (kind 30181).
 //! Clients need no control protocol. Agent-authenticated subscriptions retain
 //! the relay's channel access checks; credentials never leave the manager.
 
 mod channels;
+mod gateways;
 mod journal;
 mod registry;
 pub(crate) use registry::Identity;

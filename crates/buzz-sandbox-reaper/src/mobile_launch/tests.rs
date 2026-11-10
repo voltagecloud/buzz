@@ -83,6 +83,61 @@ fn rejects_forged_wrong_owner_unaddressed_ambiguous_and_future_triggers() {
     assert!(Start::admit(value, owner().public_key(), event.created_at.as_secs() - 61).is_err());
 }
 
+/// A delegated start binds exactly like the owner's mention, but only for the
+/// live gateway's own signature, never for an expired delegation, and never
+/// with the gateway or the owner addressed as the agent.
+/// Mutations: drop the `is_live_at` check → "expired" admits; check the
+/// owner instead of the signer → "gateway" refuses and "owner signed" admits.
+#[test]
+fn delegated_start_requires_the_live_gateway_signature() {
+    let gateway = Keys::parse(&"44".repeat(32)).unwrap();
+    let at = 1_800_000_000;
+    let head = |created_at: u64, expires_at: u64| {
+        buzz_sdk::gateway::Delegation::grant(gateway.public_key(), expires_at, created_at)
+            .unwrap()
+            .sign_with_keys(&owner())
+            .unwrap()
+    };
+    let live = buzz_sdk::gateway::live(
+        &head(at - 10, at + 3_600),
+        owner().public_key(),
+        gateway.public_key(),
+        at,
+    )
+    .unwrap();
+    let signed = |signer: &Keys, agent_key: nostr::PublicKey| {
+        let event = EventBuilder::new(Kind::Custom(9), "@agent investigate this")
+            .tags([
+                Tag::parse(["h", CHANNEL]).unwrap(),
+                Tag::public_key(agent_key),
+            ])
+            .custom_created_at(Timestamp::from(at))
+            .sign_with_keys(signer)
+            .unwrap();
+        json!({"agent_pubkey": agent_key, "relay_url": RELAY, "trigger": event})
+    };
+    let started = Start::delegated(signed(&gateway, agent().public_key()), &live, at).unwrap();
+    assert_eq!(started.owner, owner().public_key());
+    assert_eq!(started.agent(), agent().public_key());
+    assert_eq!(started.scope["channel_id"], CHANNEL);
+    assert!(
+        Start::delegated(signed(&owner(), agent().public_key()), &live, at).is_err(),
+        "owner signed"
+    );
+    assert!(
+        Start::delegated(signed(&Keys::generate(), agent().public_key()), &live, at).is_err(),
+        "stranger signed"
+    );
+    assert!(
+        Start::delegated(signed(&gateway, gateway.public_key()), &live, at).is_err(),
+        "gateway addressed as the agent"
+    );
+    assert!(
+        Start::delegated(signed(&gateway, agent().public_key()), &live, at + 3_600).is_err(),
+        "expired"
+    );
+}
+
 #[tokio::test]
 async fn durable_registration_survives_manager_restart_and_rebinds_each_thread() {
     let state: sandbox_fake::Shared = Arc::new(Mutex::new(Default::default()));

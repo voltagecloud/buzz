@@ -4936,6 +4936,136 @@ mod tests {
             .expect("signing should succeed")
     }
 
+    #[tokio::test]
+    async fn bound_gateway_transcripts_without_mentions_cannot_wake_the_agent() {
+        use base64::Engine;
+        use buzz_backend_kubernetes::{provider, sandbox_fake};
+        use clap::Parser;
+        use nostr::nips::nip19::ToBech32;
+
+        let owner = Keys::generate();
+        let agent = Keys::generate();
+        let gateway = Keys::generate();
+        let channel = Uuid::new_v4();
+        let cluster = sandbox_fake::Shared::default();
+        let request = provider::parse(serde_json::json!({
+            "op":"deploy",
+            "agent":{
+                "relay_url":"wss://relay.example.invalid",
+                "private_key_nsec":agent.secret_key().to_bech32().unwrap(),
+                "auth_tag":buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "").unwrap(),
+                "launch":{"owner_pubkey":owner.public_key()}
+            },
+            "provider_config":{"sandbox":{"channel_id":channel,"thread_root":"a".repeat(64)}}
+        })).unwrap();
+        // The manager uses this confined production provider. Read the actual
+        // launch Secret it builds, rather than reconstructing its filter.
+        let response = provider::run(
+            request,
+            &provider::Target::Managed {
+                client: sandbox_fake::client(&cluster),
+                namespace: "no-wake-fixture".into(),
+                agent: agent.public_key(),
+                owner: owner.public_key(),
+                defaults: serde_json::json!({
+                    "image":format!("example.invalid/agent@sha256:{}", "a".repeat(64)),
+                    "pod_options":{"active_deadline_seconds":3600}
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+                env: std::collections::BTreeMap::from([(
+                    "BUZZ_SANDBOX_CHECKPOINT".into(),
+                    "disabled".into(),
+                )]),
+            },
+        )
+        .await;
+        assert_eq!(serde_json::to_value(response).unwrap()["ok"], true);
+        let env: std::collections::BTreeMap<String, String> = {
+            let state = cluster.lock().unwrap();
+            let data = state
+                .secrets
+                .values()
+                .find_map(|secret| {
+                    secret["data"]
+                        .as_object()
+                        .filter(|data| data.contains_key("BUZZ_ACP_BOUND_SESSION"))
+                })
+                .unwrap();
+            data.iter()
+                .map(|(key, value)| {
+                    (
+                        key.clone(),
+                        String::from_utf8(
+                            base64::engine::general_purpose::STANDARD
+                                .decode(value.as_str().unwrap())
+                                .unwrap(),
+                        )
+                        .unwrap(),
+                    )
+                })
+                .collect()
+        };
+        let mut arguments = vec!["buzz-acp".to_owned()];
+        for (flag, name) in [
+            ("--private-key", "BUZZ_PRIVATE_KEY"),
+            ("--relay-url", "BUZZ_RELAY_URL"),
+            ("--agent-owner", "BUZZ_ACP_AGENT_OWNER"),
+            ("--respond-to", "BUZZ_ACP_RESPOND_TO"),
+            ("--bound-session", "BUZZ_ACP_BOUND_SESSION"),
+            ("--session-policy", "BUZZ_ACP_SESSION_POLICY"),
+            ("--subscribe", "BUZZ_ACP_SUBSCRIBE"),
+            ("--channels", "BUZZ_ACP_CHANNELS"),
+            ("--heartbeat-interval", "BUZZ_ACP_HEARTBEAT_INTERVAL"),
+        ] {
+            arguments.extend([flag.to_owned(), env[name].clone()]);
+        }
+        let config = crate::config::Config::from_args(
+            crate::config::CliArgs::try_parse_from(arguments).unwrap(),
+        )
+        .unwrap();
+        let filters = crate::config::resolve_channel_filters(&config, &[channel], &[]);
+        let (mut client, mut server) = test_ws_pair().await;
+        let mut state = BgState::new();
+        assert!(
+            send_subscribe(
+                &mut client,
+                &mut state,
+                channel,
+                &agent.public_key().to_hex(),
+                None,
+                &filters[&channel]
+            )
+            .await
+        );
+        let frame = next_test_frame(&mut server).await;
+        let filter: nostr::Filter = serde_json::from_value(frame[2].clone()).unwrap();
+        for mentioned in [false, true] {
+            let mut tags = vec![
+                Tag::parse(["h", &channel.to_string()]).unwrap(),
+                Tag::parse(["t", "paseo:developer"]).unwrap(),
+            ];
+            if mentioned {
+                tags.push(Tag::public_key(agent.public_key()));
+            }
+            let event = EventBuilder::new(
+                Kind::Custom(9),
+                format!("ask @{} to fix this", agent.public_key()),
+            )
+            .tags(tags)
+            .sign_with_keys(&gateway)
+            .unwrap();
+            assert_eq!(
+                buzz_core::filter::filters_match(
+                    std::slice::from_ref(&filter),
+                    &buzz_core::event::StoredEvent::new(event, Some(channel))
+                ),
+                mentioned
+            );
+        }
+    }
+
     pub(super) async fn test_ws_pair() -> (WsStream, WebSocketStream<tokio::net::TcpStream>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await

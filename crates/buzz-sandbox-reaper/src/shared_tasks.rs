@@ -52,7 +52,7 @@ pub(crate) async fn verify(
     .await
 }
 
-async fn relay_key(relay: &str) -> Result<PublicKey, policy::Error> {
+pub(crate) async fn relay_key(relay: &str) -> Result<PublicKey, policy::Error> {
     let mut url = url::Url::parse(relay).map_err(|_| policy::Error::Unavailable)?;
     let scheme = match url.scheme() {
         "wss" => "https",
