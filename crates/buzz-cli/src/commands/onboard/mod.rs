@@ -196,8 +196,6 @@ pub struct Wizard<P, R, T, X> {
     relay: R,
     transport: T,
     tools: X,
-    /// Signs gateway grants; [`gateway::Unreleased`] until the SDK lands.
-    grants: Box<dyn gateway::GatewayGrants + Send + Sync>,
     /// `--gateway-expires`: its canonical text and seconds.
     gateway_lifetime: (String, u64),
     /// Things the developer must still do; reported, never silent.
@@ -243,7 +241,6 @@ impl<P: Prompter, R: Relay, T: ControlTransport, X: Tools> Wizard<P, R, T, X> {
             relay,
             transport,
             tools,
-            grants: Box::new(gateway::Unreleased),
             gateway_lifetime,
             actions: Vec::new(),
             available_models: Vec::new(),

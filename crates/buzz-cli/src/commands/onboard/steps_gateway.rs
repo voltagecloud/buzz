@@ -1,6 +1,8 @@
 //! Step 7: grant the Paseo daemon's gateway key.
 
-use nostr::Keys;
+use buzz_sdk::gateway::{Delegation, MAX_FUTURE_SKEW_SECS};
+use nostr::{Event, Keys};
+use serde_json::json;
 
 use super::gateway;
 use super::io::Prompter;
@@ -13,18 +15,16 @@ use super::Wizard;
 use crate::error::CliError;
 
 impl<P: Prompter, R: Relay, T: ControlTransport, X: Tools> Wizard<P, R, T, X> {
-    /// Step 7. When the manager gave the Paseo daemon a gateway key, the
-    /// owner grants it for `--gateway-expires` (default 90 days), so the
-    /// daemon can drive the owner's remote agents. A saved grant for the same
-    /// key is renewed only near its expiry. When this build cannot sign the
-    /// grant, it prints the `buzz gateway grant` command and lists it under
-    /// "Action needed" without asking; nothing is recorded as granted. A
-    /// refused or failed publish fails the run and is retried on the next.
+    /// Reconcile the current relay grant before reporting authority. Local
+    /// onboarding state is a summary, never proof of an unrevoked delegation.
     pub async fn gateway_grant(
         &mut self,
         keys: &Keys,
         pairing: Option<&Pairing>,
     ) -> Result<(), CliError> {
+        if self.state.gateway_grant.take().is_some() {
+            self.save()?;
+        }
         let Some(pairing) = pairing else {
             self.say("  No Paseo daemon yet, so there is no gateway key to grant.");
             return Ok(());
@@ -42,43 +42,84 @@ impl<P: Prompter, R: Relay, T: ControlTransport, X: Tools> Wizard<P, R, T, X> {
         }
         let (lifetime, lifetime_secs) = self.gateway_lifetime.clone();
         let now = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default();
-        if let Some(saved) = &self.state.gateway_grant {
-            if saved.gateway == hex && !gateway::needs_renewal(saved.expires_at, now, lifetime_secs)
-            {
-                self.say(&format!(
-                    "  Your Paseo daemon's gateway key is granted until {}.",
-                    date(saved.expires_at)
-                ));
-                return Ok(());
-            }
-        }
         let command = gateway::command(&gateway, &lifetime);
         if self.args.skip_gateway_grant {
             self.say(&format!("  Skipped. To grant it later, run: {command}"));
             return Ok(());
         }
-        let expires_at = now.saturating_add(lifetime_secs);
-        let event = self
-            .grants
-            .grant(keys, &gateway, expires_at, now)
-            .map_err(|reason| {
-                CliError::Other(format!(
-                    "Could not grant the gateway key: {reason}. To grant it by hand, run: {command}"
-                ))
+        self.actions.push(format!(
+            "Gateway membership is separate: ask a relay administrator to admit {hex} with buzz-admin add-member --pubkey {hex} --role member, then add it to the workspace with buzz channels add-member --channel {} --pubkey {hex}.",
+            self.state.channel.as_ref().map_or("<channel id>", |channel| channel.id.as_str())
+        ));
+        let profiles = self
+            .relay
+            .query(keys, json!({"kinds":[0], "authors":[hex], "limit":1}))
+            .await?;
+        if profiles.iter().any(|profile| {
+            profile["tags"]
+                .as_array()
+                .is_some_and(|tags| tags.iter().any(|tag| tag[0] == "auth"))
+        }) {
+            return Err(CliError::Auth("the daemon gateway key belongs to an agent; ask an administrator to repair its Secret".into()));
+        }
+        let values = self
+            .relay
+            .query(
+                keys,
+                json!({
+                    "kinds":[buzz_sdk::kind::KIND_AGENT_GATEWAY_DELEGATION],
+                    "authors":[keys.public_key()], "#d":[hex], "limit":1
+                }),
+            )
+            .await?;
+        let heads: Vec<Event> = values
+            .into_iter()
+            .map(serde_json::from_value)
+            .collect::<Result<_, _>>()
+            .map_err(|_| CliError::Other("relay returned an invalid gateway grant".into()))?;
+        if heads.len() > 1 {
+            return Err(CliError::Other(
+                "relay returned multiple gateway heads".into(),
+            ));
+        }
+        let mut created_at = now;
+        if let Some(head) = heads.first() {
+            let (delegation, _) = Delegation::parse(head).map_err(|error| {
+                CliError::Other(format!("invalid current gateway head: {error}"))
             })?;
-        let Some(event) = event else {
-            self.say(
-                "  Granting a gateway key (buzz gateway grant) is not available in this build yet.",
-            );
-            self.actions.push(format!(
-                "Before granting, ask a relay administrator to admit gateway key {hex}: buzz-admin add-member --pubkey {hex} --role member. Add it to your workspace channel with buzz channels add-member --channel {} --pubkey {hex}. The grant does not add membership.",
-                self.state.channel.as_ref().map_or("<channel id>", |channel| channel.id.as_str())
-            ));
-            self.actions.push(format!(
-                "Grant your Paseo daemon's gateway key once buzz gateway grant is available (not in this build yet): {command}"
-            ));
-            return Ok(());
-        };
+            if head.pubkey != keys.public_key() || delegation.gateway != gateway {
+                return Err(CliError::Other(
+                    "relay returned an unrelated gateway head".into(),
+                ));
+            }
+            if let Some(live) = buzz_sdk::gateway::live(head, keys.public_key(), gateway, now) {
+                if !gateway::needs_renewal(live.expires_at(), now, lifetime_secs) {
+                    self.state.gateway_grant = Some(GatewayGrant {
+                        gateway: hex,
+                        expires_at: live.expires_at(),
+                    });
+                    self.save()?;
+                    self.say(&format!(
+                        "  Your Paseo daemon's gateway key is granted until {}.",
+                        date(live.expires_at())
+                    ));
+                    return Ok(());
+                }
+            }
+            created_at = now.max(head.created_at.as_secs().saturating_add(1));
+            if created_at > now.saturating_add(MAX_FUTURE_SKEW_SECS) {
+                return Err(CliError::Conflict(
+                    "the current gateway head is too far in the future; check the owner's clock"
+                        .into(),
+                ));
+            }
+        }
+        let expires_at = now.saturating_add(lifetime_secs);
+        let builder = Delegation::grant(gateway, expires_at, created_at)
+            .map_err(|error| CliError::Other(format!("could not build gateway grant: {error}")))?;
+        let event = builder
+            .sign_with_keys(keys)
+            .map_err(|error| CliError::Other(format!("could not sign gateway grant: {error}")))?;
         let question = format!(
             "  Let your Paseo daemon (gateway key {}…) drive your remote agents for {lifetime}?",
             hex.get(..12).unwrap_or(&hex)

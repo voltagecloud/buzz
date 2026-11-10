@@ -2,14 +2,7 @@
 //! gateway key with an owner-signed, expiring event, so the daemon can drive
 //! the owner's own remote agents and nothing else.
 //!
-//! The grant event belongs to `buzz_sdk::gateway` (branch
-//! `tee8z/agent-gateway-key`, with `buzz gateway grant`), which is not in
-//! this build. [`Unreleased`] says so, and the wizard prints the exact
-//! command to run instead of pretending it granted anything. When the SDK
-//! lands, implement [`GatewayGrants`] over it and make it the default in
-//! [`super::run`].
-
-use nostr::{Event, Keys, PublicKey};
+use nostr::PublicKey;
 
 /// The default grant lifetime.
 pub const DEFAULT_LIFETIME: &str = "90d";
@@ -22,35 +15,6 @@ pub const RENEW_WITHIN_SECS: u64 = 7 * DAY;
 
 const HOUR: u64 = 60 * 60;
 const DAY: u64 = 24 * HOUR;
-
-/// Builds owner-signed gateway grants.
-pub trait GatewayGrants {
-    /// The owner-signed grant of `gateway` that expires at `expires_at`
-    /// (unix seconds), created at `created_at`, ready to publish. `Ok(None)`
-    /// when this build cannot sign one; `Err` when the grant is refused.
-    fn grant(
-        &self,
-        owner: &Keys,
-        gateway: &PublicKey,
-        expires_at: u64,
-        created_at: u64,
-    ) -> Result<Option<Event>, String>;
-}
-
-/// This build: `buzz gateway grant` is not available yet.
-pub struct Unreleased;
-
-impl GatewayGrants for Unreleased {
-    fn grant(
-        &self,
-        _owner: &Keys,
-        _gateway: &PublicKey,
-        _expires_at: u64,
-        _created_at: u64,
-    ) -> Result<Option<Event>, String> {
-        Ok(None)
-    }
-}
 
 /// A grant lifetime: `<n>h`, `<n>d` or `<n>w`, at least one hour and at most
 /// [`MAX_LIFETIME_SECS`]. Returns the canonical text and the seconds.

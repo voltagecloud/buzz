@@ -12,13 +12,13 @@ use nostr::{Keys, ToBech32};
 use serde_json::{json, Value};
 use zeroize::Zeroizing;
 
-use super::gateway::{self, GatewayGrants};
+use super::gateway;
 use super::profile::{self, GitHubIdentity};
 use super::state::{Secret, Store};
 use super::steps_credentials::SHARED_VIA_PROFILE;
 use super::{agents, canonical_relay, paseo, steps_identity, EnvSecrets, OnboardArgs, Wizard};
 use crate::error::CliError;
-use fakes::{strings, Answer, FakeGrants, FakeManager, FakeRelay, FakeTools, ScriptPrompter};
+use fakes::{strings, Answer, FakeManager, FakeRelay, FakeTools, ScriptPrompter};
 
 const GITHUB: &str = "ghp_SECRETGITHUBTOKEN";
 const GH_CLI: &str = "gho_SECRETGHCLITOKEN";
@@ -93,24 +93,8 @@ async fn onboard(
     manager: &FakeManager,
     tools: &FakeTools,
 ) -> Result<Value, CliError> {
-    onboard_with(None, args, env, prompter, relay, manager, tools).await
-}
-
-/// [`onboard`] with `grants` in place of this build's [`gateway::Unreleased`].
-async fn onboard_with(
-    grants: Option<Box<dyn GatewayGrants + Send + Sync>>,
-    args: OnboardArgs,
-    env: EnvSecrets,
-    prompter: &mut ScriptPrompter,
-    relay: &FakeRelay,
-    manager: &FakeManager,
-    tools: &FakeTools,
-) -> Result<Value, CliError> {
     let store = Store::new(args.state_dir.clone().unwrap());
     let mut wizard = Wizard::new(args, env, store, prompter, relay, manager, tools)?;
-    if let Some(grants) = grants {
-        wizard.grants = grants;
-    }
     wizard.run().await
 }
 
@@ -179,8 +163,7 @@ async fn first_run_sets_up_like_the_app_and_a_rerun_is_a_no_op() {
         "brokkr,bifrost",
     ];
     let mut prompter = ScriptPrompter::quiet();
-    let summary = onboard_with(
-        Some(Box::new(FakeGrants)),
+    let summary = onboard(
         args(&state_dir, &manager, &extra),
         env(&owner),
         &mut prompter,
@@ -323,8 +306,7 @@ async fn first_run_sets_up_like_the_app_and_a_rerun_is_a_no_op() {
     // Re-run with no secrets and no flags: nothing is sent again.
     let published = relay.state().published;
     let mut prompter = ScriptPrompter::quiet();
-    let again = onboard_with(
-        Some(Box::new(FakeGrants)),
+    let again = onboard(
         args(&state_dir, &manager, &["--yes"]),
         EnvSecrets::default(),
         &mut prompter,
@@ -344,14 +326,19 @@ async fn first_run_sets_up_like_the_app_and_a_rerun_is_a_no_op() {
     assert!(prompter.transcript.join("\n").contains("is granted until"));
 
     // A grant near its expiry is renewed, once.
-    let store = Store::new(state_dir.clone());
-    let mut state = store.load().unwrap();
-    state.gateway_grant.as_mut().unwrap().expires_at = now() + 86_400;
-    store.save(&state).unwrap();
+    let current =
+        buzz_sdk::gateway::Delegation::grant(gateway.parse().unwrap(), now() + 86_400, now())
+            .unwrap()
+            .sign_with_keys(&owner)
+            .unwrap();
+    relay.state().events.retain(|event| event["kind"] != 30181);
+    relay
+        .state()
+        .events
+        .push(serde_json::to_value(current).unwrap());
     for _ in 0..2 {
         let mut prompter = ScriptPrompter::quiet();
-        onboard_with(
-            Some(Box::new(FakeGrants)),
+        onboard(
             args(&state_dir, &manager, &["--yes", "--gateway-expires", "2w"]),
             EnvSecrets::default(),
             &mut prompter,
@@ -366,6 +353,57 @@ async fn first_run_sets_up_like_the_app_and_a_rerun_is_a_no_op() {
     assert_eq!(grants.len(), 2);
     let renewed: u64 = tag(&grants[1], "expiration")[0].parse().unwrap();
     assert!(renewed.abs_diff(now() + 14 * 86_400) < 120, "{renewed}");
+
+    // A remotely revoked grant overrides the long-lived local summary. A
+    // refused renewal clears that summary; a retry publishes a newer head,
+    // including when revoke and grant occur within the same wall-clock second.
+    let revoked_at = grants[1]["created_at"].as_u64().unwrap() + 1;
+    let revoked = buzz_sdk::gateway::Delegation::revoke(gateway.parse().unwrap(), revoked_at)
+        .unwrap()
+        .sign_with_keys(&owner)
+        .unwrap();
+    relay
+        .state()
+        .events
+        .push(serde_json::to_value(revoked).unwrap());
+    relay.state().fail_kind = Some(30181);
+    let mut prompter = ScriptPrompter::quiet();
+    assert!(onboard(
+        args(&state_dir, &manager, &["--yes"]),
+        EnvSecrets::default(),
+        &mut prompter,
+        &relay,
+        &manager,
+        &tools
+    )
+    .await
+    .is_err());
+    assert!(Store::new(state_dir.clone())
+        .load()
+        .unwrap()
+        .gateway_grant
+        .is_none());
+    let mut prompter = ScriptPrompter::quiet();
+    onboard(
+        args(&state_dir, &manager, &["--yes"]),
+        EnvSecrets::default(),
+        &mut prompter,
+        &relay,
+        &manager,
+        &tools,
+    )
+    .await
+    .unwrap();
+    let current: nostr::Event =
+        serde_json::from_value(relay.of_kind(30181).pop().unwrap()).unwrap();
+    assert!(current.created_at.as_secs() > revoked_at);
+    assert!(buzz_sdk::gateway::live(
+        &current,
+        owner.public_key(),
+        gateway.parse().unwrap(),
+        now()
+    )
+    .is_some());
 }
 
 /// The interactive path: a generated key, gh's token, prompts for every
@@ -706,11 +744,10 @@ async fn app_agents_are_kept_and_exclusive_credentials_refused() {
     assert_eq!(summary["paseo"]["provisioned"], false);
 }
 
-/// Without the gateway SDK the grant is never faked: the exact command is
-/// printed and listed, nothing is published or saved as granted, and a
-/// daemon key that is the owner's own is refused.
+/// Real SDK grants never authorize the owner's key or an agent key, and
+/// declining the interactive confirmation leaves no grant on the relay.
 #[tokio::test]
-async fn the_gateway_grant_is_never_faked_before_the_sdk_lands() {
+async fn gateway_grants_require_a_separate_key_and_explicit_confirmation() {
     let dir = tempfile::tempdir().unwrap();
     let state_dir = dir.path().join("buzz");
     let owner = Keys::generate();
@@ -718,60 +755,36 @@ async fn the_gateway_grant_is_never_faked_before_the_sdk_lands() {
     let relay = FakeRelay::with_invite(INVITE);
     let manager = FakeManager::for_developer(&owner_hex);
     let gateway = Keys::generate().public_key().to_hex();
-    manager.state().paseo = Some(paseo(&gateway));
     let tools = tools();
-    let extra = [
-        "--yes",
-        "--import-key",
-        "--invite",
-        INVITE,
-        "--name",
-        "O",
-        "--agents",
-        "brokkr",
-        "--gateway-expires",
-        "30D",
-    ];
-    for _ in 0..2 {
-        let mut prompter = ScriptPrompter::quiet();
-        let summary = onboard(
-            args(&state_dir, &manager, &extra),
-            env(&owner),
-            &mut prompter,
-            &relay,
+    let mut prompter = ScriptPrompter::quiet();
+    onboard(
+        args(
+            &state_dir,
             &manager,
-            &tools,
-        )
-        .await
-        .unwrap();
-        let command = format!("buzz gateway grant {gateway} --expires 30d");
-        let transcript = prompter.transcript.join("\n");
-        assert!(transcript.contains("not available in this build yet"));
-        assert!(transcript.contains(&command));
-        assert!(transcript.contains(&format!(
-            "buzz-admin add-member --pubkey {gateway} --role member"
-        )));
-        assert!(transcript.contains(&format!(
-            "--pubkey {gateway}. The grant does not add membership."
-        )));
-        let actions = summary["action_needed"].as_array().unwrap();
-        assert!(actions
-            .iter()
-            .any(|a| a.as_str().unwrap().ends_with(&command)));
-        assert!(summary["gateway_grant"].is_null());
-        assert!(relay.of_kind(30181).is_empty());
-        assert!(Store::new(state_dir.clone())
-            .load()
-            .unwrap()
-            .gateway_grant
-            .is_none());
-    }
+            &[
+                "--yes",
+                "--import-key",
+                "--invite",
+                INVITE,
+                "--name",
+                "O",
+                "--agents",
+                "brokkr",
+            ],
+        ),
+        env(&owner),
+        &mut prompter,
+        &relay,
+        &manager,
+        &tools,
+    )
+    .await
+    .unwrap();
 
     // A daemon key that is the owner's own is refused, even with the SDK.
     manager.state().paseo = Some(paseo(&owner_hex));
     let mut prompter = ScriptPrompter::quiet();
-    let summary = onboard_with(
-        Some(Box::new(FakeGrants)),
+    let summary = onboard(
         args(&state_dir, &manager, &["--yes"]),
         EnvSecrets::default(),
         &mut prompter,
@@ -795,8 +808,7 @@ async fn the_gateway_grant_is_never_faked_before_the_sdk_lands() {
         Answer::Secret(String::new()), // no OpenRouter key
         Answer::Text("n"),             // do not grant the gateway key
     ]);
-    onboard_with(
-        Some(Box::new(FakeGrants)),
+    onboard(
         args(&state_dir, &manager, &[]),
         EnvSecrets::default(),
         &mut prompter,

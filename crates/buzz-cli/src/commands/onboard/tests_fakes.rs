@@ -218,12 +218,22 @@ impl Relay for &FakeRelay {
                 body: "restricted".into(),
             });
         }
-        Ok(state
+        let mut events: Vec<_> = state
             .events
             .iter()
             .filter(|event| matches(&filter, event))
             .cloned()
-            .collect())
+            .collect();
+        events.sort_by(|a, b| {
+            b["created_at"]
+                .as_u64()
+                .cmp(&a["created_at"].as_u64())
+                .then_with(|| a["id"].as_str().cmp(&b["id"].as_str()))
+        });
+        if let Some(limit) = filter["limit"].as_u64() {
+            events.truncate(limit as usize);
+        }
+        Ok(events)
     }
 
     async fn publish(&self, signer: &Signer, event: Event) -> Result<(), CliError> {
@@ -589,32 +599,4 @@ pub fn strings(value: &Value, out: &mut Vec<String>) {
 #[allow(dead_code)]
 pub fn object(value: Value) -> Map<String, Value> {
     value.as_object().cloned().unwrap_or_default()
-}
-
-/// Gateway grants as `buzz_sdk::gateway::Delegation::grant` builds them on
-/// `tee8z/agent-gateway-key`: an owner-signed kind 30181 head with `d` and
-/// `p` naming the gateway and a NIP-40 expiration.
-pub struct FakeGrants;
-
-impl super::super::gateway::GatewayGrants for FakeGrants {
-    fn grant(
-        &self,
-        owner: &Keys,
-        gateway: &nostr::PublicKey,
-        expires_at: u64,
-        created_at: u64,
-    ) -> Result<Option<nostr::Event>, String> {
-        let content = json!({"version": 1, "gateway": gateway.to_hex(),
-            "scope": "remote-agents", "enabled": true});
-        nostr::EventBuilder::new(nostr::Kind::Custom(30181), content.to_string())
-            .tags([
-                nostr::Tag::parse(["d", &gateway.to_hex()]).map_err(|e| e.to_string())?,
-                nostr::Tag::parse(["p", &gateway.to_hex()]).map_err(|e| e.to_string())?,
-                nostr::Tag::expiration(nostr::Timestamp::from(expires_at)),
-            ])
-            .custom_created_at(nostr::Timestamp::from(created_at))
-            .sign_with_keys(owner)
-            .map(Some)
-            .map_err(|e| e.to_string())
-    }
 }

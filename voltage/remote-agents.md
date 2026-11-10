@@ -224,9 +224,12 @@ The other secret variables are `BUZZ_ONBOARD_CODEX_TOKEN`, `BUZZ_ONBOARD_OPENROU
 
 The manager returns the daemon's public gateway key with its pairing. The owner's private key stays on this computer.
 The wizard defaults to a 90-day grant lifetime; `--gateway-expires 2w` selects a shorter lifetime. The maximum is 90 days.
-Until the gateway SDK is included, this build prints `buzz gateway grant <pubkey> --expires 90d` under **Action needed**.
-It does not publish a grant or claim the daemon is authorized. Run that command after installing a build with gateway support.
-Use `--skip-gateway-grant` to defer this step explicitly.
+The wizard asks before publishing an owner-signed grant through the gateway SDK.
+Each run checks the current relay head, including revocation, before reporting a
+grant as live. A grant near expiry is renewed after confirmation; local state
+does not override the relay. `--yes` accepts the displayed grant step.
+Use `--skip-gateway-grant` to defer this step. The command prints the exact
+`buzz gateway grant <pubkey> --expires 90d` command for later use.
 
 The gateway is a separate community member. Before granting, ask an administrator to run:
 
