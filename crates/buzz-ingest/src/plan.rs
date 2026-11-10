@@ -203,6 +203,7 @@ pub(crate) async fn publish(relay: &Relay, item: &Occurrence, body_hash: &str) -
             let mut tags = vec![
                 tag("h", &item.channel.to_string())?,
                 Tag::parse(["e", &root.event.id.to_hex(), "", "root"])?,
+                Tag::parse(["e", &root.event.id.to_hex(), "", "reply"])?,
             ];
             for (key, val) in &item.fields {
                 tags.push(tag(&format!("ext-{key}"), val)?);
@@ -224,6 +225,7 @@ pub(crate) async fn publish(relay: &Relay, item: &Occurrence, body_hash: &str) -
         let mut tags = plan.event.tags.clone().to_vec();
         tags.retain(|tag| tag.as_slice().first().map(String::as_str) != Some("e"));
         tags.push(Tag::parse(["e", &root.event.id.to_hex(), "", "root"])?);
+        tags.push(Tag::parse(["e", &root.event.id.to_hex(), "", "reply"])?);
         plan.event = EventBuilder::new(Kind::Custom(9), plan.event.content.clone())
             .tags(tags)
             .sign_with_keys(&relay.keys)?;

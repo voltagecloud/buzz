@@ -36,8 +36,9 @@ Set `BUZZ_INGEST_CONFIG` to this JSON file:
 ```
 
 Every mapping is optional; configure between one and 256 total entries.
-Linear project mappings precede team mappings. Comments retain a previously saved
-issue route; a signed `webhookId` mapping supplies the fallback for unseen issues.
+Linear project mappings precede team mappings, then signed `webhookId` mappings.
+A previously saved issue route is used only when none of those mappings applies.
+Changing an explicit mapping redirects subsequent activity to the configured channel.
 Use `linear_webhooks` when comments on existing issues omit project/team fields.
 Previously mirrored issues also retain a relay-backed routing record.
 No Linear API credential or data mutation is required.
@@ -75,7 +76,8 @@ seconds; the complete delivery has a four-second deadline. Provider retries
 replay the stored plan. No background retry silently acknowledges failed work.
 
 Bodies are limited to 1 MiB. Each provider admits 20 requests per second, and
-one delivery runs at a time; excess requests receive 429. Message bodies retain
+one delivery publishes at a time. Up to 32 admitted requests can authenticate and
+wait within the four-second deadline; excess requests receive 429. Message bodies retain
 at most 6000 UTF-8 bytes. Payloads exceeding 16 labels are refused, so workflow metadata is never silently
 truncated. Other metadata has separate bounds.
 
@@ -86,8 +88,10 @@ Configure Linear issue/comment webhooks for mapped teams or webhook IDs.
 requests outside five minutes are refused. Slack needs `message.channels` event
 subscriptions, the `channels:history` bot scope, and membership in mapped public
 channels. [Slack signs the version, timestamp, and raw body](https://docs.slack.dev/authentication/verifying-requests-from-slack/).
-No DM/private-channel scopes are needed. Providers have finite retry policies;
-monitor delivery failures and manually redeliver after prolonged outages.
+No DM/private-channel scopes are needed. GitHub does not automatically redeliver
+failed webhooks; use its delivery history or an operator retry job to redeliver
+failures. Linear and Slack retries are finite. Monitor failures and redeliver
+after prolonged outages.
 
 ## Validation
 

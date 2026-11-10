@@ -7,7 +7,7 @@ thread-counter rules. The relay contains no provider-specific webhook handlers.
 | Event | Purpose |
 | --- | --- |
 | Kind 9 root | A stable external thread anchor with `h`, `ext-source`, and `ext-thread`. It has no `ext-action`. |
-| Kind 9 reply | One occurrence, with NIP-10 root reference and typed `ext-*` metadata. |
+| Kind 9 reply | One occurrence, with both NIP-10 root and reply references to the anchor, plus typed `ext-*` metadata. |
 | Kind 30623 | Parameterized replaceable write-ahead plan. `d` identifies the journal coordinate; `h` scopes access; `message` names the planned kind 9 event. |
 
 A record's content is standard-base64 JSON:

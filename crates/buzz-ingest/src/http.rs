@@ -39,6 +39,7 @@ struct App {
     secrets: Secrets,
     relay: Relay,
     pipeline: Semaphore,
+    admission: Semaphore,
     readiness: Semaphore,
     rates: Mutex<[Bucket; 3]>,
 }
@@ -50,6 +51,7 @@ pub(crate) fn router(config: Config, secrets: Secrets, relay: Relay) -> Router {
         secrets,
         relay,
         pipeline: Semaphore::new(1),
+        admission: Semaphore::new(32),
         readiness: Semaphore::new(1),
         rates: Mutex::new(std::array::from_fn(|_| Bucket {
             start: now,
@@ -125,7 +127,7 @@ async fn deliver(
     let Some(secret) = secret else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let Ok(_permit) = app.pipeline.try_acquire() else {
+    let Ok(_permit) = app.admission.try_acquire() else {
         return (StatusCode::TOO_MANY_REQUESTS, "ingestion busy; retry").into_response();
     };
     {
@@ -234,7 +236,11 @@ async fn process(app: &App, source: usize, secret: &str, request: Request) -> Re
                 || payload
                     .pointer("/data/projectId")
                     .and_then(Value::as_str)
-                    .is_some_and(|id| app.config.linear_projects.contains_key(id));
+                    .is_some_and(|id| app.config.linear_projects.contains_key(id))
+                || payload
+                    .get("webhookId")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| app.config.linear_webhooks.contains_key(id));
             let route = if !explicit {
                 if let Some(issue) = normalize::linear_issue(&payload) {
                     plan::linear_channel(&app.relay, issue, &app.config)
@@ -272,6 +278,13 @@ async fn process(app: &App, source: usize, secret: &str, request: Request) -> Re
     let identity = serde_json::to_vec(&identity_payload)
         .map_err(|_| (StatusCode::BAD_REQUEST, "invalid payload identity"))?;
     let body_hash = hex::encode(Sha256::digest(identity));
+    // Authenticate and normalize before waiting for the single plan writer.
+    // The outer deadline bounds both this wait and the complete publication.
+    let _pipeline = app
+        .pipeline
+        .acquire()
+        .await
+        .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "ingestion closing; retry"))?;
     for item in &items {
         plan::publish(&app.relay, item, &body_hash)
             .await
