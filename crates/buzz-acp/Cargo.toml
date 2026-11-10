@@ -86,7 +86,7 @@ nix = { version = "0.31", default-features = false, features = ["signal", "user"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 pty-process = { version = "=0.5.3", features = ["async"] }
-rustix = { version = "1.1.4", features = ["process"] }
+rustix = { version = "1.1.4", features = ["process", "fs"] }
 
 [dev-dependencies]
 axum = { workspace = true }

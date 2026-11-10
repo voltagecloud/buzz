@@ -3411,6 +3411,9 @@ async fn run_harness(
     //      `IN_FLIGHT_DEADLINE_SECS` expires.
     let (steer_ack_tx, mut steer_ack_rx) = mpsc::unbounded_channel::<SteerAckEvent>();
 
+    let mut terminal_task =
+        sandbox_terminal::spawn(config, relay.rest_client(), shutdown_rx.clone())?;
+
     // Startup is complete; the main loop now owns graceful shutdown.
     let _ = startup_ready.send(());
 
@@ -3615,6 +3618,25 @@ async fn run_harness(
                 _ = shutdown_rx.changed() => {
                     tracing::info!("shutting down");
                     break;
+                }
+                result = async {
+                    match terminal_task.as_mut() {
+                        Some(task) => task.await,
+                        None => std::future::pending().await,
+                    }
+                }, if terminal_task.is_some() => {
+                    terminal_task = None;
+                    match result {
+                        Ok(Ok(())) => {},
+                        Ok(Err(error)) if !sandbox_terminal::containment_failure(&error) => {
+                            tracing::warn!("terminal service unavailable; restart the sandbox to retry");
+                        }
+                        Ok(Err(error)) => return Err(error),
+                        Err(_) => {
+                            anyhow::bail!("terminal task failed without confirming containment");
+                        }
+                    }
+                    None
                 }
                 wake = recovery_wake::wait(&mut respawn_rx, retry_at, maintenance_at) => {
                     Some(PoolEvent::Recovery(wake))
@@ -4595,6 +4617,9 @@ async fn run_harness(
     // just as promptly. Timeout is a backstop for a slot stuck outside the
     // select (e.g. in spawn); only then do we fall back to aborting.
     let _ = shutdown_tx.send(());
+    // PTY teardown precedes checkpoint scans. A failed containment boundary is
+    // fatal even when ordinary model work could otherwise continue.
+    sandbox_terminal::stop(terminal_task).await?;
     let wake_drain = tokio::time::timeout(Duration::from_secs(30), async {
         while wake_tasks.join_next().await.is_some() {}
     })
