@@ -23,6 +23,7 @@ mod recovery_wake;
 mod relay;
 mod run_task;
 mod runtime;
+mod sandbox_terminal;
 /// Shared channel task admission through the existing encrypted control plane.
 pub mod sharing;
 use runtime::{AgentRuntime, PoolStartup, SessionMode};
@@ -2897,6 +2898,9 @@ pub fn run() -> Result<()> {
         Some("git-credential-nostr") => std::process::exit(git_credential_nostr::run()),
         Some("git-sign-nostr") => std::process::exit(git_sign_nostr::run()),
         _ => {}
+    }
+    if is_subcommand("sandbox-terminal-worker") {
+        std::process::exit(sandbox_terminal::worker_entry());
     }
     config::propagate_legacy_env_vars();
     if is_subcommand("run") {
