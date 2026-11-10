@@ -1,4 +1,4 @@
-//! Local-only bounded archive preflight. No identity, relay or Git process is used.
+//! Local snapshot preflight and cancellation-aware read-only restoration.
 use std::fs::OpenOptions;
 use std::io::Read;
 #[cfg(unix)]
@@ -10,9 +10,15 @@ use buzz_sdk::sandbox_attach::snapshot::{
 };
 use serde::{Deserialize, Serialize};
 
+mod format;
+pub use format::{inspect_archive, ArchivePlan};
+
 /// Local archive refusal; file contents and scanner diagnostics are never included.
 #[derive(Debug, thiserror::Error)]
 pub enum ArchiveError {
+    /// Cancellation completed after staging and child cleanup.
+    #[error("snapshot extraction cancelled")]
+    Cancelled,
     /// Filesystem access failed.
     #[error("archive file access failed: {0}")]
     Io(#[from] std::io::Error),
