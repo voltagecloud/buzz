@@ -161,6 +161,7 @@ impl BridgeRelay for ClientRelay {
         thread_root: Option<String>,
     ) -> Result<Event, CliError> {
         let params = SendMessageParams {
+            paseo_transcript: None,
             channel_id: self.scope.channel.to_string(),
             content,
             kind: Some(9),
