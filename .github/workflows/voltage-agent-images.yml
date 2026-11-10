@@ -205,8 +205,9 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
-      # The relay's root Dockerfile and the Paseo relay's are upstream's; they
-      # get only BuildKit checks.
+      # The relay's root Dockerfile is upstream's; it gets only BuildKit checks.
+      # The Paseo relay's is checked in its own build and publish jobs instead,
+      # so an unreachable upstream repository fails only that image.
       - name: Hadolint buzz-agent
         uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
         with:
@@ -227,8 +228,6 @@ jobs:
             echo "==> $file"
             docker buildx build --check --build-context engineering-skills="$RUNNER_TEMP/engineering-skills" -f "$file" .
           done
-          echo "==> $PASEO_RELAY_SOURCE"
-          docker buildx build --check "$PASEO_RELAY_SOURCE"
 
   # Pull requests, and runs on refs other than main: build and test, no push.
   build:
@@ -260,6 +259,9 @@ jobs:
       # Pull requests never read the internal skills repository.
       - name: Empty engineering skills context
         run: sh voltage/images/buzz-agent/select-skills.sh --none "$RUNNER_TEMP/engineering-skills"
+      - name: Paseo relay BuildKit check
+        if: matrix.image == 'paseo-relay'
+        run: docker buildx build --check "$PASEO_RELAY_SOURCE"
       - name: Build
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
@@ -415,6 +417,9 @@ jobs:
             sh voltage/images/buzz-agent/select-skills.sh --none "$out"
           fi
           echo "revision=$(cat "$out/REVISION")" >> "$GITHUB_OUTPUT"
+      - name: Paseo relay BuildKit check
+        if: matrix.image == 'paseo-relay'
+        run: docker buildx build --check "$PASEO_RELAY_SOURCE"
       # Build and smoke-test before credentials exist; the push build below
       # reuses this build's cache.
       - name: Build
