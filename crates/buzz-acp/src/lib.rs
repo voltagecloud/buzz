@@ -2902,6 +2902,9 @@ pub fn run() -> Result<()> {
     if is_subcommand("sandbox-terminal-worker") {
         std::process::exit(sandbox_terminal::worker_entry());
     }
+    if is_subcommand("sandbox-snapshot-worker") {
+        std::process::exit(sandbox_terminal::snapshot_worker_entry());
+    }
     config::propagate_legacy_env_vars();
     if is_subcommand("run") {
         let runtime = tokio::runtime::Runtime::new()?;

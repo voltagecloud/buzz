@@ -1,4 +1,4 @@
-//! Linux subreaper teardown scoped to a dedicated terminal worker.
+//! Linux subreaper teardown scoped to one dedicated sandbox worker.
 
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
@@ -21,8 +21,8 @@ struct Identity {
     zombie: bool,
 }
 
-/// Establish and verify containment before any shell can exist. This process
-/// owns only one terminal, so adopted children can never be harness siblings.
+/// Establish and verify containment before any job can exist. This process
+/// owns one bounded job, so adopted children can never be harness siblings.
 pub(super) fn establish() -> Result<()> {
     nix::sys::prctl::set_child_subreaper(true).context("terminal subreaper setup failed")?;
     ensure!(

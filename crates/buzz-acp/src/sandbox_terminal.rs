@@ -12,6 +12,8 @@ mod process_tree;
 #[cfg(target_os = "linux")]
 mod server;
 #[cfg(target_os = "linux")]
+mod snapshot_worker;
+#[cfg(target_os = "linux")]
 mod worker;
 
 /// Start terminal service only for a Linux owner-gated, immutable channel thread.
@@ -79,6 +81,20 @@ pub(crate) fn worker_entry() -> i32 {
     #[cfg(not(target_os = "linux"))]
     {
         eprintln!("sandbox terminals require Linux process containment");
+        2
+    }
+}
+
+/// Run a contained snapshot producer before the harness runtime or model pool.
+/// The parent supplies its fixed helper; no relay event selects executable paths.
+pub(crate) fn snapshot_worker_entry() -> i32 {
+    #[cfg(target_os = "linux")]
+    {
+        snapshot_worker::entry()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        eprintln!("sandbox snapshots require Linux process containment");
         2
     }
 }
