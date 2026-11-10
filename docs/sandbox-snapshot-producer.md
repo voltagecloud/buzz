@@ -6,10 +6,16 @@ The caller must hold a live owner-approved snapshot grant and run the helper und
 No terminal approval or global gateway delegation alone permits export.
 
 ```sh
-buzz-agent-snapshot --workspace /workspace --output /tmp/private-job/archive.tar.gz --work-bytes 536870912
+snapshot_job="$(mktemp -d /tmp/buzz-snapshot-job.XXXXXX)"
+buzz-agent-snapshot --workspace /workspace --output "$snapshot_job/archive.tar.gz" --work-bytes 536870912
 ```
 
-The output must be new. It is mode 0600 and is removed if creation fails.
+The output must be new. Its existing parent must be a private caller-owned job directory.
+Scratch is created explicitly inside that parent, independently of `TMPDIR` or Python's cached temporary directory.
+If the parent is inside the captured workspace, it must match checkpoint exclusions, such as `.local/state`.
+That private subtree is excluded before bounded Git file enumeration. Visible in-source output parents are refused.
+The output is mode 0600 and is removed if creation fails.
+After forced cancellation, the caller removes the entire job directory through its durable cleanup record.
 Stdout contains only version, scan status, repository count, and byte count.
 Failures report only `scan`, `budget`, or `archive`; scanner output and file names are suppressed.
 The helper never uploads, fetches from a forge, signs relay events, or falls back to quarantine.
@@ -59,3 +65,6 @@ The archive is validated and scanned after copying; source work can continue dur
 Run `python3 voltage/images/buzz-agent/test-snapshot.py <agent-image>` to exercise packaged code and the actual scanner with no network, a read-only root, UID 10001, dropped capabilities, and a 1 GiB memory cap.
 The tests cover SHA-1/SHA-256, local branches, nested repositories, dirty/deleted files, executable modes, relative links, long PAX names, shallow boundaries, source/capacity refusal, and current/deleted/merge/tag secret refusal with ignore bypass attempts.
 The shared policy fixture is checked against checkpoint constants and will also bind the Rust extractor.
+
+Run `python3 voltage/images/buzz-agent/test-snapshot-scratch.py <agent-image>` for the real SIGKILL and scratch-path regression.
+It covers a cached foreign temporary root, caller cleanup, visible-parent refusal, and private-subtree file-list limits.
