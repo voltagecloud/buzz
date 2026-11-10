@@ -17,6 +17,7 @@ Owner, agent, and requester must remain posting members in a strongly fetched re
 A gateway requester must remain a live delegate throughout creation and retrieval.
 Consumers fail closed on failed reads, expiry, deletion, replacement, or lost membership.
 The same atomic acceptance burn as terminal attachment makes each approval single-use.
+Consumers require the relay's [atomic first-claim receipt](../sandbox-attachment-claims.md) before starting work.
 
 Only metadata is stored in plaintext: the approval, acceptance/end status, byte count, and optional failure category.
 Failure categories are `scan`, `budget`, `archive`, `upload`, or `authority`.

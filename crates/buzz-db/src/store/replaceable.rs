@@ -31,6 +31,9 @@ pub enum ParameterizedReplaceStatus {
 pub enum ParameterizedReplacePrecondition<'a> {
     /// Apply normal NIP-33 ordering without a revision precondition.
     Unconditional,
+    /// Insert only when this coordinate has never been accepted, including
+    /// after deletion of its event body. A watermark durably retains the burn.
+    ExpectNoHead,
     /// Require the live head to match this validated event ID.
     ExpectedRevision(&'a [u8]),
     /// Accept only an exact live-head replay and perform no mutation otherwise.
@@ -111,6 +114,22 @@ async fn replace_parameterized_event_in_transaction_impl(
 ) -> Result<ParameterizedReplaceResult> {
     let community_id = tx.community();
     let kind_i32 = buzz_core::kind::event_kind_i32(event);
+    let acceptance = buzz_core::sandbox_attach::acceptance_coordinate(event);
+    if acceptance.is_some_and(|(mode, session)| d_tag != format!("{mode}:{session}:accepted")) {
+        return Err(DbError::InvalidData(
+            "attachment acceptance coordinate mismatch".into(),
+        ));
+    }
+    let acceptance = acceptance.is_some();
+    // This kind's acceptance cannot opt out through another caller or an
+    // omitted client tag. Requests and approvals use ordinary NIP-33 ordering.
+    let precondition = if acceptance {
+        ParameterizedReplacePrecondition::ExpectNoHead
+    } else {
+        precondition
+    };
+    let retain_watermark =
+        acceptance || precondition == ParameterizedReplacePrecondition::ExpectNoHead;
     let pubkey_bytes = event.pubkey.to_bytes();
     let created_at_secs = event.created_at.as_secs() as i64;
     let created_at = DateTime::from_timestamp(created_at_secs, 0)
@@ -177,7 +196,7 @@ async fn replace_parameterized_event_in_transaction_impl(
     .bind(d_tag)
     .fetch_optional(tx.conn())
     .await?;
-    let watermark: Option<(DateTime<Utc>, Vec<u8>)> = if is_nip_rs {
+    let watermark: Option<(DateTime<Utc>, Vec<u8>)> = if is_nip_rs || retain_watermark {
         sqlx::query_as(
             "SELECT created_at, event_id FROM parameterized_event_watermarks \
              WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4",
@@ -214,6 +233,17 @@ async fn replace_parameterized_event_in_transaction_impl(
             received_at,
             channel_id,
             ParameterizedReplaceStatus::ReplayOnlyMiss,
+        ));
+    }
+
+    if precondition == ParameterizedReplacePrecondition::ExpectNoHead
+        && (existing.is_some() || watermark.is_some())
+    {
+        return Ok(ParameterizedReplaceResult::new(
+            event,
+            received_at,
+            channel_id,
+            ParameterizedReplaceStatus::RevisionMismatch,
         ));
     }
 
@@ -330,7 +360,7 @@ async fn replace_parameterized_event_in_transaction_impl(
             return Ok(false);
         }
 
-        if is_nip_rs {
+        if is_nip_rs || retain_watermark {
             sqlx::query(
                 "INSERT INTO parameterized_event_watermarks \
                      (community_id, kind, pubkey, d_tag, created_at, event_id) \

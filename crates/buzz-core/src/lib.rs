@@ -86,3 +86,5 @@ pub mod test_helpers {
 pub mod artifact;
 /// NIP-AR sync filter parsing and limits.
 pub mod artifact_sync;
+/// Canonical single-use sandbox attachment acceptance coordinates.
+pub mod sandbox_attach;

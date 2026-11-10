@@ -2660,6 +2660,10 @@ async fn plan_group_deletion_target(
         }
         _ => {} // Same channel — OK
     }
+    if buzz_core::sandbox_attach::acceptance_coordinate(&target.event).is_some() {
+        tracing::debug!("NIP-29 deletion ignored for attachment acceptance");
+        return Ok(Vec::new());
+    }
     Ok(vec![
         PlannedDeletionTarget::load(tenant, state, target_id, target).await?,
     ])
@@ -3356,6 +3360,11 @@ async fn handle_a_tag_deletion(
         buzz_core::kind::KIND_AGENT_GATEWAY_DELEGATION => {
             tracing::debug!(d_tag, "NIP-09 deletion ignored for gateway delegation");
         }
+        buzz_core::kind::KIND_SANDBOX_ATTACH
+            if buzz_core::sandbox_attach::parse_acceptance_coordinate(d_tag).is_some() =>
+        {
+            tracing::debug!("NIP-09 deletion ignored for attachment acceptance");
+        }
         buzz_core::kind::KIND_WORKFLOW_DEF => {
             // Workflow deletion belongs to the atomic persistence path in ingest.
             return Err(anyhow::anyhow!(
@@ -3558,6 +3567,10 @@ async fn plan_standard_deletion_targets(
                 target_id = %hex::encode(&target_id),
                 "NIP-09 deletion ignored for gateway delegation"
             );
+            continue;
+        }
+        if buzz_core::sandbox_attach::acceptance_coordinate(&target.event).is_some() {
+            tracing::debug!("NIP-09 deletion ignored for attachment acceptance");
             continue;
         }
         planned.push(PlannedDeletionTarget::load(tenant, state, target_id, target).await?);

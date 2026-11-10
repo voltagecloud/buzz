@@ -7,6 +7,8 @@ mod agent_grant;
 pub mod artifact_sync;
 #[cfg(test)]
 mod artifact_sync_postgres_tests;
+/// Atomic owner-approved terminal/snapshot acceptance.
+mod attach_claim;
 pub mod auth;
 /// Pure NIP-29 channel membership-authority decisions (kinds 9000/9001/9022).
 pub mod channel_authz;

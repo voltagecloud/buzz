@@ -290,3 +290,24 @@ fn terminal_frame_rate_is_bounded_including_acknowledgements() {
     assert!(!rate.allow(999));
     assert!(rate.allow(1000));
 }
+
+#[test]
+fn accepted_audits_have_unique_claims_without_expiration() {
+    let (owner, agent) = (Keys::generate(), Keys::generate());
+    let scope = scope(&agent);
+    let now = Timestamp::now().as_secs();
+    let pending = Pending::parse(
+        &request(&owner, scope, Uuid::new_v4(), now + 60).unwrap(),
+        now,
+    )
+    .unwrap();
+    let grant = Grant::parse(&approve(&owner, &pending, now + 60).unwrap(), scope, now).unwrap();
+    let first = audit(&agent, &grant, "accepted", 0, 0).unwrap();
+    let second = audit(&agent, &grant, "accepted", 0, 0).unwrap();
+    let a = tag(&first, "buzz:attach-claim").unwrap();
+    let b = tag(&second, "buzz:attach-claim").unwrap();
+    assert_ne!(a, b);
+    assert_eq!(Uuid::parse_str(a).unwrap().to_string(), a);
+    assert_ne!(first.id, second.id);
+    assert!(tag(&first, "expiration").is_none());
+}

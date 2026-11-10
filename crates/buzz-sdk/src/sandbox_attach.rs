@@ -33,6 +33,9 @@ pub const RETRY_MS: u64 = 1000;
 pub const MAX_RETRIES: u8 = 5;
 /// Largest frame rate, including retries and acknowledgements, per direction.
 pub const MAX_FRAMES_PER_SECOND: u16 = 64;
+/// Only a relay transaction that inserted the first durable acceptance emits
+/// this receipt. Generic success or duplicate receipts never authorize Open.
+pub const CLAIM_OK_MESSAGE: &str = "sandbox-attach: first-claim-v1";
 
 /// Frame admission budget. Apply before cryptography; backpressure sends and drop excess input.
 #[derive(Default)]
@@ -375,6 +378,9 @@ pub fn audit(
         "d".into(),
         format!("terminal:{}:{status}", grant.session),
     ]);
+    if status == "accepted" {
+        values.push(vec!["buzz:attach-claim".into(), Uuid::new_v4().to_string()]);
+    }
     EventBuilder::new(Kind::from(kind::KIND_SANDBOX_ATTACH as u16), content)
         .tags(tags(values)?)
         .sign_with_keys(keys)

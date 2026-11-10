@@ -29,6 +29,7 @@ Missing, replaced, deleted, expired, or malformed records and read failures deny
 Consumers repeat those checks during attachment and close when authorization ends.
 The owner revokes an individual approval through NIP-09 deletion; the requester may delete its pending request.
 Durable acceptance makes each approval single-use; a new PTY requires a new request and owner approval.
+Consumers require the relay's [atomic first-claim receipt](../sandbox-attachment-claims.md) before starting work.
 The acceptance and end records contain the signed metadata-only owner approval and byte counters.
 No keystrokes or file bytes belong in stored events.
 

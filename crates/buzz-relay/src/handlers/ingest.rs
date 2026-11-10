@@ -2830,6 +2830,7 @@ async fn ingest_event_inner(
     // Consumers verify every head themselves; ingest only refuses heads that
     // could never be live or revoke, so a coordinate always holds a parseable
     // head.
+    super::attach_claim::validate(tenant, &event, state).await?;
     if kind_u32 == buzz_core::kind::KIND_AGENT_GATEWAY_DELEGATION {
         let (delegation, _) = buzz_sdk::gateway::Delegation::parse(&event)
             .map_err(|_| IngestError::Rejected("invalid: malformed gateway delegation".into()))?;
@@ -3775,6 +3776,10 @@ async fn ingest_event_inner(
             accepted: true,
             message: "duplicate:".into(),
         });
+    }
+
+    if buzz_core::sandbox_attach::acceptance_coordinate(&event).is_some() {
+        message = buzz_sdk::sandbox_attach::CLAIM_OK_MESSAGE.into();
     }
 
     // Fence observer gateway verdicts computed before this committed head.
