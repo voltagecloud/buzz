@@ -4,6 +4,8 @@ mod commands;
 mod error;
 mod help_tree;
 mod links;
+/// Safe local snapshot archive inspection and restoration.
+pub mod sandbox_archive;
 mod validate;
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
@@ -2301,6 +2303,10 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             PackCmd::Validate { path } => commands::pack::cmd_validate(path),
             PackCmd::Inspect { path } => commands::pack::cmd_inspect(path),
         };
+    }
+
+    if let Cmd::Sandbox(commands::sandbox::SandboxCmd::InspectBundle { ref file }) = cli.command {
+        return commands::sandbox::inspect_bundle_cmd(file);
     }
 
     // Auth: private key is required for all relay operations.

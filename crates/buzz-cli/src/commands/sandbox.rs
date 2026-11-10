@@ -21,6 +21,12 @@ mod tests;
 /// Owner approvals and interactive sandbox terminals.
 #[derive(Subcommand)]
 pub enum SandboxCmd {
+    /// Validate a local captured bundle before any Git import (internal worker seam)
+    #[command(hide = true)]
+    InspectBundle {
+        /// Captured bundle file
+        file: std::path::PathBuf,
+    },
     /// Attach a local TTY; omitted targets are selected from BUZZ_PASEO_AGENTS
     Attach {
         /// Channel UUID containing the sandbox thread
@@ -54,6 +60,17 @@ pub enum SandboxCmd {
         #[arg(long)]
         grant: EventId,
     },
+}
+
+/// Print bounded local preflight metadata, without reading credentials or connecting.
+pub(crate) fn inspect_bundle_cmd(file: &std::path::Path) -> Result<(), CliError> {
+    let summary = crate::sandbox_archive::inspect_bundle_file(file).map_err(failure)?;
+    let encoded = serde_json::to_string(&summary).map_err(failure)?;
+    if encoded.len() > 16 * 1024 * 1024 {
+        return Err(failure("bundle metadata exceeded budget"));
+    }
+    println!("{encoded}");
+    Ok(())
 }
 
 fn failure(message: impl ToString) -> CliError {
@@ -168,6 +185,7 @@ pub async fn dispatch(command: SandboxCmd, client: &BuzzClient) -> Result<(), Cl
         ));
     }
     match command {
+        SandboxCmd::InspectBundle { file } => inspect_bundle_cmd(&file),
         SandboxCmd::Authorize { request, minutes } => {
             let event = one(client, json!({"ids":[request],"kinds":[30624],"limit":1})).await?;
             if event.id != request {

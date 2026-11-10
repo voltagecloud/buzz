@@ -124,6 +124,54 @@ with tempfile.TemporaryDirectory() as temp:
         assert package.extractfile('snapshot/repositories/1/files/inner.txt').read()==b'inner\n'
     print('PASS: real outer plus untracked nested Git repository have separate complete bundles')
 
+    # Real commits between source preflight and capture must be charged BEFORE import.
+    for succeeds,budget in ((False,20*1024*1024),(True,128*1024*1024)):
+        case=root/('racing-control' if succeeds else 'racing-refusal');repo=repository(case)
+        (repo/'safe').write_text('safe\n');git(repo,'add','.');git(repo,'commit','-m','initial')
+        cp=snapshot.checkpoint();original_git=cp.git;original_restore=cp.restore_history
+        seen={'changed':False,'imported':False}
+        def racing(directory,*args,**options):
+            if not seen['changed'] and args==('rev-parse','--verify','HEAD'):
+                seen['changed']=True
+                with (repo/'late-history').open('wb') as stream: stream.truncate(8*1024*1024)
+                git(repo,'add','late-history');git(repo,'commit','-m','concurrent source')
+                (repo/'late-history').unlink()
+            return original_git(directory,*args,**options)
+        def restoring(*args,**options):
+            seen['imported']=True
+            return original_restore(*args,**options)
+        cp.git=racing;cp.restore_history=restoring
+        factory=snapshot.checkpoint;snapshot.checkpoint=lambda:cp
+        output=case/'snapshot.tar.gz'
+        try:
+            if succeeds:
+                snapshot.pack(repo.parent,output,work_bytes=budget)
+                assert output.exists() and seen['imported']
+            else:
+                try:
+                    snapshot.pack(repo.parent,output,work_bytes=budget)
+                    raise AssertionError('captured history escaped work accounting')
+                except snapshot.Budget:
+                    assert not seen['imported'] and not output.exists()
+            assert seen['changed']
+        finally: snapshot.checkpoint=factory
+    print('PASS: concurrent source growth refused before import at20MiB and accepted at128MiB control')
+
+    # The packaged native inspector is required; invalid metadata cannot fall back.
+    case=root/'inspector-required';repo=repository(case)
+    (repo/'safe').write_text('safe\n');git(repo,'add','.');git(repo,'commit','-m','initial')
+    original_run=snapshot.run
+    for missing in (False,True):
+        def invalid_inspector(*args,**options):
+            if args[0]=='/usr/local/bin/buzz':
+                if missing: raise FileNotFoundError('required inspector is unavailable')
+                return b'{}'
+            return original_run(*args,**options)
+        snapshot.run=invalid_inspector
+        try: expect_refusal(repo.parent,case/'refused.tar.gz')
+        finally: snapshot.run=original_run
+    print('PASS: missing or invalid native inspector has no source-inventory fallback')
+
     # No current or historical credential may be hidden by repo/global ignores.
     secret='sk-ant-oat01-'+'Z'*90
     for historical in (False,True):
