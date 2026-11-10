@@ -327,7 +327,7 @@ def copy_file(repo, descriptor, relative, destination, cp, limit):
                 if total > limit:
                     raise Budget('Snapshot source exceeds budget')
                 sink.write(chunk)
-        destination.chmod(0o755 if actual.st_mode & 0o111 else 0o644)
+        destination.chmod(0o755 if actual.st_mode & 0o100 else 0o644)
         return total
     finally:
         os.close(parent)
