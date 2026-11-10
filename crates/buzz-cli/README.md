@@ -26,7 +26,7 @@ buzz channels list
 workspace agents without the Buzz app: a Buzz identity (generated, or imported
 with `--import-key`), the community invite, GitHub, model and 1Password
 credentials, agents from presets in a workspace channel, the encrypted profile
-enrollment, and the Paseo pairing. It sends the same events and Sandbox manager
+enrollment, and the Paseo pairing for desktop, web, and mobile. It sends the same events and Sandbox manager
 requests as the Buzz app, so the result works in every Buzz app.
 
 ```bash
@@ -38,9 +38,14 @@ buzz onboard --reenroll                        # change a stored credential
 It does not need `BUZZ_PRIVATE_KEY` and ignores `BUZZ_RELAY_URL`: the relay is
 `--relay` (default `wss://buzz.voltage.cloud`, `wss://` only). The owner key is
 saved to `<config dir>/buzz/identity.nsec` and progress to `onboard.json` (both
-mode `0600`); a re-run does only what is missing. Credentials are never saved
+mode `0600`); a re-run resumes the setup. Credentials are never saved
 or printed. Progress goes to stderr and a JSON summary without secrets to
-stdout. See [voltage/remote-agents.md](../../voltage/remote-agents.md#set-up-with-paseo-no-buzz-app).
+stdout. A daemon gateway key is checked against your owner and agent keys.
+Until the gateway SDK is included, the wizard prints the exact grant command
+under **Action needed** and never reports a successful grant. The default and
+maximum lifetime is 90 days (`--gateway-expires`); use `--skip-gateway-grant`
+to defer authorization. The final step also prints your workflow command.
+See [voltage/remote-agents.md](../../voltage/remote-agents.md#set-up-with-paseo-no-buzz-app).
 
 ## Usage
 

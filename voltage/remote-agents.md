@@ -180,16 +180,18 @@ The wizard asks one question at a time, and hides each secret as you type it. It
 | 4. 1Password | Asks for the service account token. Uses the [shared via profile](#shared-via-profile). | Enroll form: 1Password token, via profile |
 | 5. Agents | Creates agents from presets (Brokkr, Frigg, Bifrost, Forseti, or an OpenRouter agent), lists them, and adds them to a private workspace channel. | **Create agent → Remote workspace** |
 | 6. Enroll | Sends the encrypted enroll request. Adds the signing key to GitHub with `gh`. Starts each new agent once, so that the Sandbox manager registers it. Shows your Paseo pairing. | **Enroll profile**, then the first mention |
-| 7. Next steps | Tells you how to pair Paseo and how to use the Buzz app instead. | |
+| 7. Gateway | Checks the daemon’s public gateway key and prints the grant command until the gateway SDK is available. | Owner delegation |
+| 8. Next steps | Shows pairing for desktop, web, and mobile, workflow commands, and the Buzz app path. | |
 
 Each step is saved when it completes. If a step fails, the wizard tells you why. Run `buzz onboard` again: it does only the steps that are not complete.
 The command never saves or shows your credentials. It sends them only in the encrypted enroll request. It keeps your key and its progress in `~/.config/buzz` (mode `0700`; files mode `0600`). Each agent's key is in `onboard.json`, as the Buzz app keeps agent keys on its device.
 
 ### Pair Paseo
 
-If an admin enabled Paseo daemons, step 6 shows your daemon's password, an offer link (`https://app.paseo.sh/#offer=…`), and the same link as a QR code. If not, it says that Paseo is not provisioned yet. Run `buzz onboard` again after an admin enables it.
+If an admin enabled Paseo daemons, the final step shows your daemon's password, an offer link (`https://app.paseo.sh/#offer=…`), and the same link as a QR code. If not, it says that Paseo is not provisioned yet. Run `buzz onboard` again after an admin enables it.
 
 - **Paseo desktop:** open the offer link on that computer, then enter the password.
+- **Paseo web:** open the offer link in a browser at `app.paseo.sh`, then enter the password.
 - **Paseo mobile:** scan the QR code, then enter the password.
 
 The command does not save the password. To show it again, run `buzz onboard`.
@@ -215,12 +217,34 @@ The other secret variables are `BUZZ_ONBOARD_CODEX_TOKEN`, `BUZZ_ONBOARD_OPENROU
 - `buzz onboard` lists agents that you created in the app, and does not create a second agent with the same name.
 - To change one credential later, run `buzz onboard --reenroll` and fill in only what changes. Or use the enroll form in the app.
 
-### Not available yet
+### Gateway authorization and workflows
 
-These steps come in later changes. The wizard lists them as not available:
+The manager returns the daemon's public gateway key with its pairing. The owner's private key stays on this computer.
+The wizard defaults to a 90-day grant lifetime; `--gateway-expires 2w` selects a shorter lifetime. The maximum is 90 days.
+Until the gateway SDK is included, this build prints `buzz gateway grant <pubkey> --expires 90d` under **Action needed**.
+It does not publish a grant or claim the daemon is authorized. Run that command after installing a build with gateway support.
+Use `--skip-gateway-grant` to defer this step explicitly.
 
-- Give your Paseo daemon a gateway key (`buzz gateway grant`).
-- Register your Paseo daemon, so that it can give work to your agents.
+The gateway is a separate community member. Before granting, ask an administrator to run:
+
+```sh
+buzz-admin add-member --pubkey <gateway-pubkey> --role member
+```
+
+As the channel owner, add that public key to your workspace channel:
+
+```sh
+buzz channels add-member --channel <channel-id> --pubkey <gateway-pubkey>
+```
+
+A delegation grants authority over your remote agents; it does not admit a key to the community or a channel.
+
+Each new agent starts once in a channel thread. This registers its launch with the manager and adds it to the daemon's agent list.
+With `--skip-first-start`, mentions cannot start an unregistered agent, and the daemon cannot list it. Rerun without that flag to finish registration.
+Agents added later appear after the daemon restarts.
+
+Use `buzz workflows --help` to create and manage channel workflows. The final step prints the command for your workspace channel.
+Ask the Paseo assistant to use those commands for automations. Workflows run on Buzz, with their history on the relay.
 
 ## Set up your agents
 

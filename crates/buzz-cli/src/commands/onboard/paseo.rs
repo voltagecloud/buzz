@@ -1,8 +1,9 @@
 //! The developer's Paseo pairing, from the Sandbox manager's `enroll` or
 //! `profile` reply. A manager that provisions Paseo daemons adds
-//! `paseo: {password, server_id, offer_url}` to both replies (branch
-//! `tee8z/paseo-provisioning`); an older manager adds nothing.
+//! `paseo: {password, server_id, offer_url, gateway_pubkey?}` to both
+//! replies (voltagecloud/buzz#150); an older manager adds nothing.
 
+use nostr::PublicKey;
 use qrcode::render::unicode::Dense1x2;
 use qrcode::QrCode;
 use serde_json::Value;
@@ -21,6 +22,9 @@ pub struct Pairing {
     pub server_id: String,
     /// `https://app.paseo.sh/#offer=…`, which carries only public values.
     pub offer_url: String,
+    /// The daemon's gateway key, when the manager gave it one. The owner
+    /// grants it ([`super::gateway`]) so the daemon can drive their agents.
+    pub gateway: Option<PublicKey>,
 }
 
 /// The pairing in a manager reply. `Ok(None)` when the reply has none; an
@@ -36,6 +40,13 @@ pub fn pairing(response: &Value) -> Result<Option<Pairing>, String> {
             .and_then(Value::as_str)
             .filter(|text| !text.is_empty())
     };
+    let malformed = || "The Sandbox manager's Paseo pairing was malformed.".to_owned();
+    // Absent or null means no gateway key yet; anything else must be a key.
+    let gateway = match paseo.get("gateway_pubkey") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(hex)) => Some(PublicKey::from_hex(hex).map_err(|_| malformed())?),
+        Some(_) => return Err(malformed()),
+    };
     match (text("password"), text("server_id"), text("offer_url")) {
         (Some(password), Some(server_id), Some(offer_url))
             if offer_url.starts_with(OFFER_PREFIX) && offer_url.len() > OFFER_PREFIX.len() =>
@@ -44,9 +55,10 @@ pub fn pairing(response: &Value) -> Result<Option<Pairing>, String> {
                 password: Secret::new(password.to_owned()),
                 server_id: server_id.to_owned(),
                 offer_url: offer_url.to_owned(),
+                gateway,
             }))
         }
-        _ => Err("The Sandbox manager's Paseo pairing was malformed.".into()),
+        _ => Err(malformed()),
     }
 }
 

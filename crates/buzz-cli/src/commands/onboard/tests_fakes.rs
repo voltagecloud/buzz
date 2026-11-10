@@ -289,8 +289,10 @@ pub struct ManagerState {
     pub versions: u32,
     pub paseo: Option<Value>,
     pub ops: Vec<Op>,
-    /// Agents whose next deploy fails.
-    pub failing_deploys: HashSet<String>,
+    /// Agents whose next deploy is refused, with the refusal code.
+    pub failing_deploys: BTreeMap<String, String>,
+    /// The code the next enroll is refused with, after the owner check.
+    pub enroll_refusal: Option<String>,
     /// Stored launch registrations, by agent pubkey.
     pub registrations: BTreeMap<String, Value>,
 }
@@ -349,6 +351,9 @@ impl FakeManager {
                 with_paseo(json!({"ok": true, "profile": summary}), &state.paseo)
             }
             Op::Enroll => {
+                if let Some(code) = state.enroll_refusal.take() {
+                    return json!({"ok": false, "code": code, "error": "refused by the fake"});
+                }
                 let profile = payload["profile"].clone();
                 let checked = match &state.profile {
                     None => profile::validate(&profile),
@@ -379,8 +384,15 @@ impl FakeManager {
                 buzz_backend_kubernetes::provider::check_sandbox_request(deploy)
                     .unwrap_or_else(|error| panic!("the manager refused the deploy: {error:?}"));
                 assert!(state.profile.is_some(), "deploys follow enrollment");
-                if state.failing_deploys.remove(signer) {
-                    return json!({"ok": false, "code": "manager_timeout", "error": "the Sandbox did not start"});
+                if let Some(code) = state.failing_deploys.remove(signer) {
+                    // The real manager refuses `paseo_store_failed` after it
+                    // saved the registration; the other codes, before.
+                    if code == "paseo_store_failed" {
+                        state
+                            .registrations
+                            .insert(signer.to_owned(), payload["agent"].clone());
+                    }
+                    return json!({"ok": false, "code": code, "error": "refused by the fake"});
                 }
                 state
                     .registrations
@@ -551,4 +563,32 @@ pub fn strings(value: &Value, out: &mut Vec<String>) {
 #[allow(dead_code)]
 pub fn object(value: Value) -> Map<String, Value> {
     value.as_object().cloned().unwrap_or_default()
+}
+
+/// Gateway grants as `buzz_sdk::gateway::Delegation::grant` builds them on
+/// `tee8z/agent-gateway-key`: an owner-signed kind 30181 head with `d` and
+/// `p` naming the gateway and a NIP-40 expiration.
+pub struct FakeGrants;
+
+impl super::super::gateway::GatewayGrants for FakeGrants {
+    fn grant(
+        &self,
+        owner: &Keys,
+        gateway: &nostr::PublicKey,
+        expires_at: u64,
+        created_at: u64,
+    ) -> Result<Option<nostr::Event>, String> {
+        let content = json!({"version": 1, "gateway": gateway.to_hex(),
+            "scope": "remote-agents", "enabled": true});
+        nostr::EventBuilder::new(nostr::Kind::Custom(30181), content.to_string())
+            .tags([
+                nostr::Tag::parse(["d", &gateway.to_hex()]).map_err(|e| e.to_string())?,
+                nostr::Tag::parse(["p", &gateway.to_hex()]).map_err(|e| e.to_string())?,
+                nostr::Tag::expiration(nostr::Timestamp::from(expires_at)),
+            ])
+            .custom_created_at(nostr::Timestamp::from(created_at))
+            .sign_with_keys(owner)
+            .map(Some)
+            .map_err(|e| e.to_string())
+    }
 }

@@ -594,7 +594,37 @@ pub const REFUSALS: &[(&str, &str)] = &[
     ),
     (
         "paseo_store_failed",
-        "The profile was stored, but not your Paseo daemon's secret. Run buzz onboard --reenroll.",
+        "The Sandbox manager could not store your Paseo daemon's secret, so your profile is unchanged. \
+         Run buzz onboard again (with --reenroll if you were changing a credential).",
+    ),
+    // Refusals of any session request (buzz-session-control's transport).
+    (
+        "signer_mismatch",
+        "The request was not signed by your owner key. Run buzz onboard again.",
+    ),
+    (
+        "stale_request",
+        "The Sandbox manager's clock and this computer's differ. Set your clock automatically, then run buzz onboard again.",
+    ),
+    (
+        "replayed_request",
+        "The Sandbox manager already received this request. Run buzz onboard again.",
+    ),
+    (
+        "request_id_reused",
+        "The request ID was already in use. Run buzz onboard again.",
+    ),
+    (
+        "manager_busy",
+        "The Sandbox manager is busy. Wait a minute, then run buzz onboard again.",
+    ),
+    (
+        "unsupported_op",
+        "The Sandbox manager does not support enrollment. Ask an admin to update it.",
+    ),
+    (
+        "unsupported_version",
+        "The Sandbox manager does not support this request version. Update buzz, or ask an admin to update the manager.",
     ),
 ];
 

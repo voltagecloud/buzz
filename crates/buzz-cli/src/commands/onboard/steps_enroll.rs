@@ -1,5 +1,5 @@
 //! Step 6 (enroll, the signing key on GitHub, the Paseo pairing) and
-//! step 7 (next steps).
+//! step 8 (next steps).
 
 use buzz_session_control::Op;
 use nostr::Keys;
@@ -14,7 +14,7 @@ use super::state::PendingKey;
 use super::steps_credentials::Credentials;
 use super::steps_identity::OnFile;
 use super::tools::Tools;
-use super::{FollowUp, Wizard};
+use super::Wizard;
 use crate::error::CliError;
 
 impl<P: Prompter, R: Relay, T: ControlTransport, X: Tools> Wizard<P, R, T, X> {
@@ -86,6 +86,7 @@ impl<P: Prompter, R: Relay, T: ControlTransport, X: Tools> Wizard<P, R, T, X> {
         match paseo::pairing(&response) {
             Ok(Some(found)) => pairing = Some(found),
             Ok(None) => {}
+            Err(error) if self.actions.contains(&error) => {}
             Err(error) => self.actions.push(error),
         }
         if let Some(key) = &credentials.signing_key {
@@ -148,8 +149,8 @@ impl<P: Prompter, R: Relay, T: ControlTransport, X: Tools> Wizard<P, R, T, X> {
         }
     }
 
-    /// Step 7. How to pair Paseo, how to use the Buzz app instead, what is
-    /// still to do, and the [`FollowUp`]s not built yet.
+    /// Step 8. How to pair Paseo, how to use workflows and the Buzz app,
+    /// and everything still to do.
     pub fn next_steps(&mut self, pairing: Option<&Pairing>) {
         match pairing {
             Some(pairing) => {
@@ -162,8 +163,10 @@ impl<P: Prompter, R: Relay, T: ControlTransport, X: Tools> Wizard<P, R, T, X> {
                     Err(error) => self.say(&format!("    {error}")),
                 }
                 self.say("    Paseo desktop: open the offer link on that computer, then enter the password.");
+                self.say("    Paseo web: open the offer link in a browser (app.paseo.sh), then enter the password.");
                 self.say("    Paseo mobile: scan the QR code with your phone's camera or the Paseo app, then enter the password.");
                 self.say("    The password is not saved. Run buzz onboard again to show it.");
+                self.say("    Your daemon lists an agent after its first start in a channel thread; agents added later appear after the daemon restarts.");
             }
             None => self.say(
                 "  Paseo isn't provisioned for you yet. Run buzz onboard again after an admin enables Paseo daemons.",
@@ -174,14 +177,21 @@ impl<P: Prompter, R: Relay, T: ControlTransport, X: Tools> Wizard<P, R, T, X> {
             .channel
             .as_ref()
             .map_or_else(String::new, |channel| format!(" in #{}", channel.name));
+        let channel_id = self
+            .state
+            .channel
+            .as_ref()
+            .map_or("<channel id>", |channel| channel.id.as_str());
+        self.say(&format!(
+            "  Workflows: BUZZ_PRIVATE_KEY=\"$(cat {})\" BUZZ_RELAY_URL={} buzz workflows list --channel {channel_id} (see buzz workflows --help).",
+            self.store.identity_path().display(),
+            self.relay_url
+        ));
         self.say(&format!(
             "  Buzz app instead: install the Voltage build (voltage/remote-agents.md), sign in with the key in {}, and join {}. Your agents appear under Agents; mention one{channel} to start a session.",
             self.store.identity_path().display(),
             self.relay_url
         ));
-        for step in FollowUp::PENDING {
-            self.say(&format!("  Later: {}", step.text()));
-        }
         if !self.actions.is_empty() {
             self.say("  Action needed:");
             let actions = self.actions.clone();
