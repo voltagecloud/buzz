@@ -446,9 +446,37 @@ async fn interactive_run_redacts_secrets_and_resumes_the_signing_key() {
     .await
     .unwrap();
     assert_eq!(tools.gh_added.lock().unwrap().len(), 1);
-    assert!(Store::new(state_dir).load().unwrap().pending_key.is_none());
+    assert!(Store::new(state_dir.clone())
+        .load()
+        .unwrap()
+        .pending_key
+        .is_none());
     assert!(again["action_needed"].as_array().unwrap().is_empty());
     assert_eq!(manager.state().versions, 1, "nothing was enrolled twice");
+
+    // Enabling Paseo later, and rotating its Secret later still, both work
+    // without collecting credentials again or replacing agent identities.
+    let before = manager.state().profile.clone();
+    manager.state().paseo_enabled = true;
+    manager.state().provisioned_pairing = Some(paseo(""));
+    for version in [2, 3] {
+        manager.state().paseo = None;
+        let mut prompter = ScriptPrompter::quiet();
+        let summary = onboard(
+            args(&state_dir, &manager, &["--yes"]),
+            EnvSecrets::default(),
+            &mut prompter,
+            &relay,
+            &manager,
+            &tools,
+        )
+        .await
+        .unwrap();
+        assert_eq!(summary["paseo"]["provisioned"], true);
+        assert_eq!(manager.state().versions, version);
+        assert_eq!(manager.state().profile, before);
+        assert_eq!(tools.gh_added.lock().unwrap().len(), 1);
+    }
 }
 
 /// A failed publish and a failed first start each fail the run, are
@@ -522,6 +550,23 @@ async fn failures_are_reported_and_resume_without_duplicates() {
     }
 
     // Fourth run: only the start is retried.
+    // A completed deploy whose reply is lost also resumes the same root.
+    manager.state().lost_deploy_reply = true;
+    let mut prompter = ScriptPrompter::quiet();
+    let error = onboard(
+        args(&state_dir, &manager, &["--yes"]),
+        EnvSecrets::default(),
+        &mut prompter,
+        &relay,
+        &manager,
+        &tools,
+    )
+    .await
+    .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("manager reply lost after deploy"));
+    assert!(manager.state().registrations.contains_key(&agent));
     let mut prompter = ScriptPrompter::quiet();
     onboard(
         args(&state_dir, &manager, &["--yes"]),
@@ -542,7 +587,14 @@ async fn failures_are_reported_and_resume_without_duplicates() {
     assert_eq!(profiles, 1);
     assert_eq!(relay.of_kind(30177).len(), 1);
     assert_eq!(relay.of_kind(9000).len(), 1);
-    assert_eq!(relay.of_kind(9).len(), 3, "one kickoff per start attempt");
+    assert_eq!(
+        relay.of_kind(9).len(),
+        1,
+        "retries reuse the durable kickoff"
+    );
+    let roots = manager.state().deploy_roots.clone();
+    let kickoff = relay.of_kind(9)[0]["id"].as_str().unwrap().to_owned();
+    assert!(roots.iter().all(|root| root == &kickoff));
     assert_eq!(manager.state().versions, 1);
 }
 
@@ -1053,4 +1105,42 @@ fn small_contracts_hold() {
     let mut all = Vec::new();
     strings(&json!({"a": ["b"]}), &mut all);
     assert_eq!(all, ["b"]);
+}
+
+/// The production HTTP boundary requests writer reads for every provisioning
+/// lookup. A simulated lagging replica otherwise hides the existing agent.
+#[tokio::test]
+async fn provisioning_reads_see_writer_state() {
+    use super::relay::{HttpRelay, Relay};
+    use axum::{routing::post, Json, Router};
+    let owner = Keys::generate();
+    let agent = nostr::EventBuilder::new(nostr::Kind::Custom(30177), "existing agent")
+        .tags([nostr::Tag::parse(["d", &Keys::generate().public_key().to_hex()]).unwrap()])
+        .sign_with_keys(&owner)
+        .unwrap();
+    let expected = serde_json::to_value(agent).unwrap();
+    let writer = expected.clone();
+    let app = Router::new().route(
+        "/query",
+        post(move |Json(filters): Json<Value>| {
+            let writer = writer.clone();
+            async move {
+                let strong = filters
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|f| f["consistency"] == "strong");
+                Json(if strong { json!([writer]) } else { json!([]) })
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let relay = HttpRelay::new(&format!("http://{address}"));
+    let events = Relay::query(&relay, &owner, json!({"kinds": [30177], "limit": 1})).await;
+    server.abort();
+    assert_eq!(events.unwrap(), vec![expected]);
 }

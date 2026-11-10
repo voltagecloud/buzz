@@ -195,6 +195,9 @@ If an admin enabled Paseo daemons, the final step shows your daemon's password, 
 - **Paseo mobile:** scan the QR code, then enter the password.
 
 The command does not save the password. To show it again, run `buzz onboard`.
+An unchanged developer profile still reconciles a missing or rotated daemon Secret.
+The manager reports whether Paseo is enabled, so enabling it after initial enrollment
+does not require changing credentials.
 
 ### Run without prompts
 
@@ -239,7 +242,10 @@ buzz channels add-member --channel <channel-id> --pubkey <gateway-pubkey>
 
 A delegation grants authority over your remote agents; it does not admit a key to the community or a channel.
 
-Each new agent starts once in a channel thread. This registers its launch with the manager and adds it to the daemon's agent list.
+Each new agent starts once in a channel thread. The wizard saves the signed kickoff
+before publishing and reuses its thread after a lost reply or a manager failure.
+Provisioning reads use the relay writer to avoid creating duplicates from stale reads.
+This registers the launch with the manager and adds it to the daemon's agent list.
 With `--skip-first-start`, mentions cannot start an unregistered agent, and the daemon cannot list it. Rerun without that flag to finish registration.
 Agents added later appear after the daemon restarts.
 

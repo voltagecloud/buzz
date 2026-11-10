@@ -22,6 +22,8 @@ pub struct OnFile {
     pub summary: Option<Summary>,
     /// The Paseo pairing the manager returned with it.
     pub pairing: Option<Pairing>,
+    /// The manager can provision Paseo, even if its Secret is absent.
+    pub paseo_enabled: bool,
 }
 
 /// The code in an invite code or an invite URL (`…/invite/<code>`), checked
@@ -259,6 +261,14 @@ impl<P: Prompter, R: Relay, T: ControlTransport, X: Tools> Wizard<P, R, T, X> {
             }
             None => self.say("  Nothing enrolled yet."),
         }
-        Ok(OnFile { summary, pairing })
+        let paseo_enabled = response
+            .get("paseo_enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(pairing.is_some());
+        Ok(OnFile {
+            summary,
+            pairing,
+            paseo_enabled,
+        })
     }
 }
