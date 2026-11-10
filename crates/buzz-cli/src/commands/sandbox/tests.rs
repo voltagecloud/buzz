@@ -192,17 +192,73 @@ fn configured_targets_and_untrusted_labels_have_budgets() {
     assert_eq!(label(&"x".repeat(1000)).len(), 100);
 }
 
-/// Run this production flow under a controlling PTY with the runbook's driver.
+/// Ordinary cargo/CI runs create a controlling PTY for this production flow.
 #[cfg(unix)]
 #[tokio::test]
 async fn real_tty_forwards_encrypted_raw_bytes_and_restores_after_close() {
     use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
     use axum::routing::get;
     use buzz_sdk::sandbox_attach::{Flow, Packet};
-    if !std::io::stdin().is_terminal() {
-        println!("PTY_REQUIRED");
+    if std::env::var_os("BUZZ_SANDBOX_TEST_PTY_CHILD").is_none() {
+        let driver = r#"
+import fcntl, os, pty, select, struct, subprocess, sys, termios, time
+master, slave = pty.openpty()
+fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 24, 80, 0, 0))
+original = termios.tcgetattr(slave)
+def child():
+    os.setsid()
+    fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+process = subprocess.Popen([sys.argv[1], sys.argv[2], '--exact', '--nocapture'],
+    stdin=slave, stdout=slave, stderr=slave, preexec_fn=child,
+    env=dict(os.environ, BUZZ_SANDBOX_TEST_PTY_CHILD='1'))
+output = bytearray()
+sent = False
+deadline = time.monotonic() + 25
+def consume():
+    global sent
+    output.extend(os.read(master, 65536))
+    if len(output) > 1048576:
+        raise RuntimeError('PTY test exceeded its output budget')
+    if b'REMOTE_OUTPUT_OK' in output and not sent:
+        os.write(master, b'\x03\x1b[Araw\r\n')
+        sent = True
+try:
+    while process.poll() is None and time.monotonic() < deadline:
+        if select.select([master], [], [], .1)[0]:
+            consume()
+    process.wait(timeout=2)
+    while select.select([master], [], [], 0)[0]:
+        consume()
+    assert process.returncode == 0 and sent and b'REAL_PTY_SUCCESS' in output, output.decode(errors='replace')
+    assert original == termios.tcgetattr(slave), 'terminal attributes not restored'
+    print('Controlling PTY: encrypted control bytes and complete termios restoration passed.')
+finally:
+    if process.poll() is None:
+        process.kill()
+        process.wait()
+    os.close(master)
+    os.close(slave)
+"#;
+        let executable = std::env::current_exe().unwrap();
+        let name = "commands::sandbox::tests::real_tty_forwards_encrypted_raw_bytes_and_restores_after_close";
+        let result = std::process::Command::new("python3")
+            .args(["-c", driver])
+            .arg(executable)
+            .arg(name)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "PTY driver failed: {}{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
         return;
     }
+    assert!(
+        std::io::stdin().is_terminal(),
+        "PTY child must own a terminal"
+    );
     async fn receive(socket: &mut WebSocket) -> Value {
         let frame = timeout(Duration::from_secs(10), socket.recv())
             .await
