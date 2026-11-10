@@ -1474,7 +1474,9 @@ dependencies = [
  "httparse",
  "nix 0.31.3",
  "nostr 0.44.7",
+ "pty-process",
  "reqwest 0.13.4",
+ "rustix",
  "rustls",
  "serde",
  "serde_json",
@@ -8757,6 +8759,16 @@ dependencies = [
  "miette",
  "prost-types 0.13.5",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "pty-process"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71cec9e2670207c5ebb9e477763c74436af3b9091dd550b9fb3c1bec7f3ea266"
+dependencies = [
+ "rustix",
+ "tokio",
 ]
 
 [[package]]

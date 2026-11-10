@@ -82,7 +82,11 @@ evalexpr = { workspace = true }
 # Process-group kill (safe wrapper around killpg) — Unix-only; kill_process_group
 # has a #[cfg(not(unix))] fallback in acp.rs.
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.31", default-features = false, features = ["signal", "user"] }
+nix = { version = "0.31", default-features = false, features = ["signal", "user", "process"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+pty-process = { version = "=0.5.3", features = ["async"] }
+rustix = { version = "1.1.4", features = ["process"] }
 
 [dev-dependencies]
 axum = { workspace = true }
