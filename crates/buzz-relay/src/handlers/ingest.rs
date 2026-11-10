@@ -552,7 +552,9 @@ fn map_push_accept_error(error: super::push_lease::AcceptError) -> IngestError {
 fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static str> {
     match kind {
         buzz_core::kind::KIND_TEAM_AGENT_STATUS => Ok(Scope::UsersWrite),
-        buzz_core::kind::KIND_AGENT_CHANNEL_GRANT => Ok(Scope::MessagesWrite),
+        buzz_core::kind::KIND_AGENT_CHANNEL_GRANT | buzz_core::kind::KIND_INTEGRATION_RECORD => {
+            Ok(Scope::MessagesWrite)
+        }
         // Owner-managed global authority, like a profile or managed-agent record.
         buzz_core::kind::KIND_AGENT_GATEWAY_DELEGATION => Ok(Scope::UsersWrite),
         KIND_PROFILE => Ok(Scope::UsersWrite),
@@ -845,6 +847,7 @@ pub(crate) fn requires_h_channel_scope(kind: u32) -> bool {
         kind,
         buzz_core::kind::KIND_AGENT_CHANNEL_GRANT
             | buzz_core::kind::KIND_TEAM_AGENT_STATUS
+            | buzz_core::kind::KIND_INTEGRATION_RECORD
             | KIND_STREAM_MESSAGE
             | KIND_STREAM_MESSAGE_V2
             | KIND_STREAM_MESSAGE_EDIT
@@ -4430,6 +4433,7 @@ mod postgres_tests {
     #[test]
     fn channel_scoped_content_kinds_require_h_tags() {
         for kind in [
+            buzz_core::kind::KIND_INTEGRATION_RECORD,
             KIND_STREAM_MESSAGE,
             KIND_STREAM_MESSAGE_DIFF,
             KIND_CANVAS,

@@ -1,0 +1,29 @@
+[package]
+name = "buzz-ingest"
+description = "Verified provider webhooks published as relay-backed Buzz threads"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+axum = { workspace = true }
+base64 = { workspace = true }
+buzz-core = { path = "../buzz-core" }
+chrono = { workspace = true }
+hex = { workspace = true }
+hmac = { workspace = true }
+nostr = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tower = { workspace = true }

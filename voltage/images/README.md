@@ -14,10 +14,11 @@ It also builds the Paseo relay image from a pinned upstream commit; see [The Pas
 | [buzz-relay](#the-relay-image) | Buzz relay, admin, and pair relay binaries with the web bundles, from the root `Dockerfile` | `buzz-relay` |
 | [paseo-relay](#the-paseo-relay-image) | The Paseo relay, from the upstream `Dockerfile` of getpaseo/paseo-relay at `PASEO_RELAY_SOURCE` | `paseo-relay` |
 | [paseo-daemon](paseo-daemon/README.md) | Paseo daemon that runs a developer's personal assistant in front of Buzz remote agents | `voltage-paseo-daemon-staging` |
+| [buzz-ingest](../../crates/buzz-ingest/README.md) | Verified GitHub, Linear, and public Slack webhooks, stored as Buzz threads | `buzz-ingest` (provision before publication) |
 
 Each Buzz image compiles the Buzz crates of the commit it is built from.
 The build context is the repository root, except for `paseo-relay`.
-For the agent images and `paseo-daemon`, BuildKit reads the `Dockerfile.dockerignore` next to each Dockerfile instead of the root `.dockerignore`.
+For the agent images, `paseo-daemon`, and `buzz-ingest`, BuildKit reads the `Dockerfile.dockerignore` next to each Dockerfile instead of the root `.dockerignore`.
 These files keep only the Cargo workspace and the files that each Dockerfile copies from its own directory.
 
 ## Publishing
@@ -37,6 +38,8 @@ Its first job selects only the images whose inputs changed; manual runs build al
 The voltage-terraform `v2/environments/staging` root creates the two agent ECR repositories; `v2/environments/prod` creates `buzz-relay` and `paseo-relay`.
 Publishing assumes the `github-buzz-ecr-push` IAM role (voltage-terraform `v2/environments/github`).
 The role trusts only `repo:voltagecloud/buzz:ref:refs/heads/main` and can push to and read only these four repositories.
+Provision `buzz-ingest` in prod and add it to this role before publishing the new sidecar.
+This source PR does not change the existing repository grants.
 The repository secret `AWS_ACCOUNT_ID` supplies the account ID, so the account ID is not in the repository and is masked in the public logs.
 
 ## Deploying a digest
