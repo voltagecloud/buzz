@@ -332,6 +332,38 @@ enum Cmd {
     /// Community moderation — reports queue, bans, timeouts, audit trail
     #[command(subcommand)]
     Moderation(ModerationCmd),
+    /// Drive a Buzz remote agent from an ACP client (such as Paseo) over stdio
+    #[command(
+        name = "acp-bridge",
+        long_about = "\
+Act as an ACP (Agent Client Protocol) agent on stdin/stdout that drives one Buzz
+remote agent through the relay. Each ACP session is one thread in --channel:
+the first prompt posts a kind 9 thread root that mentions --agent (which starts
+the agent's sandbox), and later prompts post replies in that thread. The
+agent's observer telemetry streams back as session/update notifications.
+
+When the thread's agent session has ended, the bridge says so and accepts
+/fresh (resend as a new thread, new empty workspace) or /recover (resend in the
+same thread after choosing Recover on it in the Buzz app).
+
+BUZZ_RELAY_URL must be a wss:// URL. BUZZ_PRIVATE_KEY signs prompts and cancel
+requests; live telemetry is only readable when it is the agent owner's key.
+stdout carries only JSON-RPC; diagnostics go to stderr.",
+        after_help = "\
+Example Paseo provider:
+  {\"extends\":\"acp\",\"command\":[\"buzz\",\"acp-bridge\",\"--agent\",\"<agent pubkey>\",\"--channel\",\"<channel uuid>\"]}"
+    )]
+    AcpBridge {
+        /// Pubkey of the remote agent to drive (hex or npub)
+        #[arg(long)]
+        agent: String,
+        /// Owner public key when signing with a delegated gateway key
+        #[arg(long)]
+        owner: Option<String>,
+        /// Channel UUID where prompts are posted as thread messages
+        #[arg(long)]
+        channel: String,
+    },
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -2290,6 +2322,11 @@ fn normalize_auth_tag_input(input: &str) -> String {
 }
 
 async fn run(cli: Cli) -> Result<(), CliError> {
+    // The bridge holds a long-lived WebSocket and refuses anything but wss://.
+    // Check the raw value: normalization rewrites ws:// and wss:// to http(s)://.
+    if matches!(cli.command, Cmd::AcpBridge { .. }) {
+        commands::acp_bridge::require_wss(&cli.relay)?;
+    }
     let relay_url = client::normalize_relay_url(&cli.relay);
 
     // Pack commands are local-only — no relay connection needed.
@@ -2361,6 +2398,11 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
+        Cmd::AcpBridge {
+            agent,
+            channel,
+            owner,
+        } => commands::acp_bridge::run(client, &agent, &channel, owner.as_deref()).await,
         Cmd::Pack(_) => unreachable!("handled above"),
     }
 }
@@ -2530,6 +2572,7 @@ mod tests {
     #[test]
     fn command_inventory_is_stable() {
         let expected_groups: Vec<&str> = vec![
+            "acp-bridge",
             "agents",
             "canvas",
             "channels",

@@ -1,3 +1,4 @@
+pub mod acp_bridge;
 pub mod agents;
 pub mod channel_templates;
 pub mod channels;

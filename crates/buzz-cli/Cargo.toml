@@ -22,8 +22,8 @@ clap = { version = "4", features = ["derive", "env"] }
 # HTTP client — async REST calls to the relay
 reqwest = { workspace = true, features = ["json"] }
 
-# Async runtime — tokio macros + multi-thread for reqwest
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# Async runtime — tokio macros + multi-thread for reqwest; io-std for acp-bridge stdio
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-std"] }
 
 # Serialization — JSON body building and response passthrough
 serde = { workspace = true }
