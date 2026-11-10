@@ -36,6 +36,9 @@ Shallow clones retain their explicit local boundaries, without unshallow or netw
 Unborn HEADs are refused.
 
 Before packing, the helper inventories source objects and byte/count budgets.
+After capture, the required local `buzz sandbox inspect-bundle` helper validates the actual bundle with the SDK before any Git import, independently of credentials or relay configuration.
+The producer reserves the captured expansion, object/ref/index/block costs and aggregate counts, then verifies the neutral inventory matches before writing raw review bodies.
+A source commit between preflight and capture therefore cannot inherit stale scratch admission; missing or malformed inspector output fails closed.
 It imports the bundle into a neutral Git repository, verifies its object graph, and scans that exact history with immutable gitleaks rules.
 It also scans the copied working files, manifest, ref names, and every archived raw object, including merge-only blobs and annotated-tag messages.
 Global/system configuration, replacement refs, grafts, lazy fetch, hooks, fsmonitor, repository ignore files, and `GITLEAKS_*` overrides cannot weaken the scan.

@@ -49,7 +49,7 @@ def run(*args, cwd=None, timeout=60, env=None, input=None, output=None,
     if args and args[0] == 'git':
         args = (args[0], '-c', 'protocol.allow=never', '-c', 'core.hooksPath=/dev/null',
                 '-c', 'core.fsmonitor=false', '-c', 'pack.threads=1',
-                '-c', 'pack.windowMemory=16m', *args[1:])
+                '-c', 'pack.windowMemory=16m', '-c', 'core.logAllRefUpdates=false', *args[1:])
     expires = time.monotonic() + remaining(timeout)
     with ExitStack() as stack:
         sink = stack.enter_context(open(output, 'xb')) if output is not None else None
@@ -139,6 +139,30 @@ def inventory(repo, cp):
         if total > cp.MAX_BYTES:
             raise Budget('Snapshot Git expansion exceeds budget')
     return lines
+
+
+def inspect_captured(bundle, cp):
+    # No fallback: source preflight cannot authorize costs of a different bundle
+    # captured after the source commits. The native SDK validates the exact pack.
+    result = json.loads(run('/usr/local/bin/buzz', 'sandbox', 'inspect-bundle',
+                            str(bundle), limit=16 * 1024 * 1024))
+    if (not isinstance(result, dict)
+            or set(result) != {'version', 'objects', 'expanded_bytes', 'hash_bytes', 'refs'}
+            or type(result['version']) is not int or result['version'] != 1
+            or type(result['objects']) is not int or not 0 < result['objects'] <= MAX_OBJECTS
+            or type(result['expanded_bytes']) is not int or not 0 <= result['expanded_bytes'] <= cp.MAX_BYTES
+            or type(result['hash_bytes']) is not int or result['hash_bytes'] not in (20, 32)
+            or not isinstance(result['refs'], list) or not 0 < len(result['refs']) <= cp.MAX_FILES):
+        raise ValueError('Snapshot captured-bundle metadata is invalid')
+    parents = set()
+    for ref in result['refs']:
+        if (not isinstance(ref, list) or len(ref) != 2 or not all(isinstance(v, str) for v in ref)
+                or len(ref[0]) != result['hash_bytes'] * 2
+                or any(c not in '0123456789abcdef' for c in ref[0])
+                or not (ref[1] == 'HEAD' or ref[1].startswith('refs/'))):
+            raise ValueError('Snapshot captured reference is invalid')
+        parents.update(path(ref[1]).parents)
+    return result, len(parents)
 
 
 class ObjectStream:
@@ -362,7 +386,8 @@ def pack(workspace, output, work_bytes=512 * 1024 * 1024):
                 # Inventory before packing is conservative: even unreachable source
                 # objects count, so no large source object is decoded before a bound.
                 source_objects = inventory(repo, cp)
-                expanded += sum(int(line.rsplit(' ', 1)[1]) for line in source_objects)
+                source_expanded = sum(int(line.rsplit(' ', 1)[1]) for line in source_objects)
+                expanded += source_expanded
                 objects_count += len(source_objects)
                 if expanded > cp.MAX_BYTES or objects_count > MAX_OBJECTS:
                     raise Budget('Snapshot aggregate Git expansion exceeds budget')
@@ -373,8 +398,8 @@ def pack(workspace, output, work_bytes=512 * 1024 * 1024):
                 target = stage / 'repositories' / str(index)
                 (target / 'files').mkdir(parents=True)
                 bundle = target / 'history.bundle'
-                work.reserve(sum(int(line.rsplit(' ', 1)[1]) for line in source_objects)
-                             + len(source_objects) * (work.block + 64))
+                source_cost = source_expanded + len(source_objects) * (work.block + 64)
+                work.reserve(source_cost)
                 allowance = min(MAX_BLOB, cp.MAX_BYTES - total, (work.limit - work.used) // 2)
                 if allowance <= 0:
                     raise Budget('Snapshot bundle capacity exceeds budget')
@@ -384,9 +409,21 @@ def pack(workspace, output, work_bytes=512 * 1024 * 1024):
                 work.reserve(2 * bundle_size)
                 if total > cp.MAX_BYTES or bundle_size > MAX_BLOB:
                     raise Budget('Snapshot source exceeds budget')
+                packed, ref_directories = inspect_captured(bundle, cp)
+                expanded += max(0, packed['expanded_bytes'] - source_expanded)
+                objects_count += max(0, packed['objects'] - len(source_objects))
+                refs_count += len(packed['refs'])
+                if expanded > cp.MAX_BYTES or objects_count > MAX_OBJECTS or refs_count > cp.MAX_FILES:
+                    raise Budget('Snapshot captured aggregate inventory exceeds budget')
+                actual_cost = (packed['expanded_bytes'] + packed['objects'] * (work.block + 64)
+                               + (len(packed['refs']) + ref_directories) * work.block)
+                work.reserve(max(0, actual_cost - source_cost))
                 neutral = Path(temp) / f'history-{index}'
                 cp.restore_history(bundle, record, neutral)
                 objects = inventory(neutral, cp)
+                actual_expanded = sum(int(line.rsplit(' ', 1)[1]) for line in objects)
+                if actual_expanded != packed['expanded_bytes'] or len(objects) != packed['objects']:
+                    raise ValueError('Snapshot neutral inventory differs from the captured bundle')
                 object_review = review / str(index)
                 object_review.mkdir()
                 writer = ObjectStream(objects, object_review)
@@ -405,9 +442,6 @@ def pack(workspace, output, work_bytes=512 * 1024 * 1024):
                 stop = value.find(b'\n\n')
                 if stop < 0:
                     raise Budget('Snapshot bundle header exceeds budget')
-                refs_count += sum(1 for line in value[:stop].splitlines() if not line.startswith((b'#', b'@', b'-')))
-                if refs_count > cp.MAX_FILES:
-                    raise Budget('Snapshot reference count exceeds budget')
                 (object_review / 'references').write_bytes(value[:stop])
                 names = cp.git(repo, 'ls-files', '-z', '--cached', '--others', '--exclude-standard')
                 for raw in sorted(set(names.split(b'\0')) - {b''}):
