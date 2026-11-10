@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, ensure, Context, Result};
-use buzz_sdk::sandbox_attach::{Packet, MAX_DATA_BYTES, MAX_GRANT_SECS};
+use buzz_sdk::sandbox_attach::{Packet, MAX_DATA_BYTES, MAX_GRANT_SECS, MAX_IN_FLIGHT_BYTES};
 use futures_util::StreamExt;
 use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -101,6 +101,34 @@ async fn output(message: &Output<'_>) -> Result<()> {
     Ok(())
 }
 
+/// Reap jobs that could retain the slave, then preserve the shell's buffered
+/// final output. A byte or time limit is an error, never a successful truncation.
+async fn drain_tail(pty: &mut pty_process::Pty) -> Result<()> {
+    process_tree::cleanup()?;
+    tokio::time::timeout(IO_TIMEOUT, async {
+        let mut remaining = MAX_IN_FLIGHT_BYTES;
+        let mut bytes = [0_u8; MAX_DATA_BYTES];
+        loop {
+            match pty.read(&mut bytes).await {
+                Ok(0) => return Ok(()),
+                Ok(length) => {
+                    ensure!(
+                        length <= remaining,
+                        "terminal final output exceeds drain bound"
+                    );
+                    remaining -= length;
+                    let packet = Packet::data(&bytes[..length])?;
+                    output(&Output::Packet { packet: &packet }).await?;
+                }
+                Err(error) if error.raw_os_error() == Some(nix::libc::EIO) => return Ok(()),
+                Err(error) => return Err(anyhow::Error::from(error)),
+            }
+        }
+    })
+    .await
+    .context("terminal final output drain timed out")?
+}
+
 async fn run(workspace: PathBuf, lifetime: Duration) -> Result<()> {
     use tokio::signal::unix::{signal, SignalKind};
     let (mut term, mut hangup, mut interrupt) = (
@@ -144,7 +172,11 @@ async fn run(workspace: PathBuf, lifetime: Duration) -> Result<()> {
             _ = hangup.recv() => break,
             _ = interrupt.recv() => break,
             _ = tick.tick() => {
-                if tokio::time::Instant::now() >= deadline || idle.elapsed() >= IDLE_TIMEOUT || child.try_wait()?.is_some() { break; }
+                if tokio::time::Instant::now() >= deadline || idle.elapsed() >= IDLE_TIMEOUT { break; }
+                if child.try_wait()?.is_some() {
+                    drain_tail(&mut pty).await?;
+                    break;
+                }
             }
             line = lines.next() => {
                 let Some(line) = line else { break; };

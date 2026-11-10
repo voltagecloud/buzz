@@ -34,6 +34,7 @@ must wait for `ready` before acknowledging the remote client's open packet.
 | Descendants | 256 |
 | Process scan | 4096 processes; 4096 bytes per stat record |
 | Complete process cleanup | Five seconds |
+| Final output after natural shell exit | 64 KiB and one five-second drain deadline |
 | Tokio shutdown after a cancelled stdin read | 100 milliseconds |
 
 The shell is `/bin/sh -i`, running in the supplied workspace as the agent user.
@@ -45,7 +46,9 @@ must convey that shell access includes those sandbox privileges.
 ## Shutdown contract
 
 EOF, close, termination signals, idle, expiry and I/O failure all lead to
-process cleanup. The worker stops and kills its descendants, then reaps adopted
+process cleanup. On natural shell exit, the worker first stops background jobs
+that could retain the slave, then drains buffered output before reporting the
+end. Exceeding the drain byte or time bound reports failure. The worker stops and kills its descendants, then reaps adopted
 children until the tree is empty. A pidfd plus process start-time verification
 prevents PID reuse from directing a signal at an unrelated process.
 
@@ -67,7 +70,8 @@ cargo test --locked -p buzz-acp --lib terminal_process_selection
 ```
 
 The first suite runs the production binary with a real PTY and checks terminal
-resize, environment filtering, EOF, expiry, malformed input and a detached
+resize, environment filtering, EOF, expiry, malformed input, final output after
+shell exit with a background holder, and a detached
 double-fork child. It also verifies that a sibling process survives cleanup.
 The second checks the production process-selection boundary and descendant cap
 without sending signals to host processes.

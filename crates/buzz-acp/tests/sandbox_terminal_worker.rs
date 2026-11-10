@@ -105,6 +105,10 @@ impl Drop for Worker {
         if let Some(pid) = self.child.id() {
             let _ = nix::sys::signal::kill(
                 nix::unistd::Pid::from_raw(pid as i32),
+                nix::sys::signal::Signal::SIGCONT,
+            );
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid as i32),
                 nix::sys::signal::Signal::SIGTERM,
             );
             let deadline = std::time::Instant::now() + BOUND;
@@ -117,6 +121,65 @@ impl Drop for Worker {
             let _ = self.child.start_kill();
         }
     }
+}
+
+/// Stop only the worker until its shell has exited with unread PTY output.
+/// A ready timer must not discard that tail, even with a background job still
+/// holding the slave open. This fails against the original early-exit branch.
+#[tokio::test]
+async fn terminal_worker_drains_final_output_after_shell_exit() {
+    use nix::sys::signal::{kill, Signal};
+    use nix::unistd::Pid;
+    let workspace = tempfile::tempdir().unwrap();
+    let mut worker = Worker::start(workspace.path(), 60);
+    worker.open().await;
+    let command = b"sh -c 'trap \"\" HUP; echo $$ > hold.pid; sleep 60' & echo $$ > shell.pid; while [ ! -f release ]; do sleep 0.01; done; printf '%s%s\\n' FINAL_ OUTPUT; exit\n";
+    worker.send(Packet::data(command).unwrap()).await;
+    let shell = tokio::time::timeout(BOUND, async {
+        loop {
+            if let (Ok(shell), Ok(_)) = (
+                std::fs::read_to_string(workspace.path().join("shell.pid")),
+                std::fs::read_to_string(workspace.path().join("hold.pid")),
+            ) {
+                if let Ok(pid) = shell.trim().parse::<i32>() {
+                    break pid;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let worker_pid = Pid::from_raw(worker.child.id().unwrap() as i32);
+    kill(worker_pid, Signal::SIGSTOP).unwrap();
+    std::fs::write(workspace.path().join("release"), b"").unwrap();
+    tokio::time::timeout(BOUND, async {
+        loop {
+            let stat = std::fs::read_to_string(format!("/proc/{shell}/stat")).unwrap();
+            if stat.rsplit_once(')').unwrap().1.split_whitespace().next() == Some("Z") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    kill(worker_pid, Signal::SIGCONT).unwrap();
+    worker.until("FINAL_OUTPUT").await;
+    for _ in 0..8 {
+        let event = worker.next().await;
+        if event["type"] == "ended" {
+            assert_eq!(event["failed"], false);
+            assert!(tokio::time::timeout(BOUND, worker.child.wait())
+                .await
+                .unwrap()
+                .unwrap()
+                .success());
+            return;
+        }
+    }
+    panic!("terminal did not end after its bounded tail drain");
 }
 
 #[tokio::test]
