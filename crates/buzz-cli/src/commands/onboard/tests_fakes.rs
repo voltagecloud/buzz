@@ -138,7 +138,9 @@ fn matches(filter: &Value, event: &Value) -> bool {
             })
     };
     within("kinds", &event["kind"])
+        && within("ids", &event["id"])
         && within("authors", &event["pubkey"])
+        && tagged("#h", "h")
         && tagged("#d", "d")
         && tagged("#p", "p")
 }
@@ -295,6 +297,12 @@ pub struct ManagerState {
     pub enroll_refusal: Option<String>,
     /// Stored launch registrations, by agent pubkey.
     pub registrations: BTreeMap<String, Value>,
+    /// Recorded scopes prove retries converge on the same Sandbox.
+    pub deploy_roots: Vec<String>,
+    /// Commit a deploy, then lose its response once.
+    pub lost_deploy_reply: bool,
+    pub paseo_enabled: bool,
+    pub provisioned_pairing: Option<Value>,
 }
 
 impl FakeManager {
@@ -348,7 +356,10 @@ impl FakeManager {
         match op {
             Op::Profile => {
                 let summary = state.profile.as_ref().map(Self::summary);
-                with_paseo(json!({"ok": true, "profile": summary}), &state.paseo)
+                with_paseo(
+                    json!({"ok": true, "profile": summary, "paseo_enabled": state.paseo_enabled || state.paseo.is_some()}),
+                    &state.paseo,
+                )
             }
             Op::Enroll => {
                 if let Some(code) = state.enroll_refusal.take() {
@@ -371,6 +382,9 @@ impl FakeManager {
                 };
                 state.profile = Some(merged);
                 state.versions += 1;
+                if state.paseo_enabled && state.paseo.is_none() {
+                    state.paseo = state.provisioned_pairing.clone();
+                }
                 let version = format!("v{}", state.versions);
                 with_paseo(json!({"ok": true, "version_id": version}), &state.paseo)
             }
@@ -384,6 +398,12 @@ impl FakeManager {
                 buzz_backend_kubernetes::provider::check_sandbox_request(deploy)
                     .unwrap_or_else(|error| panic!("the manager refused the deploy: {error:?}"));
                 assert!(state.profile.is_some(), "deploys follow enrollment");
+                state.deploy_roots.push(
+                    payload["provider_config"]["sandbox"]["thread_root"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
+                );
                 if let Some(code) = state.failing_deploys.remove(signer) {
                     // The real manager refuses `paseo_store_failed` after it
                     // saved the registration; the other codes, before.
@@ -439,6 +459,12 @@ impl ControlTransport for &FakeManager {
             &opened.request.payload,
             opened.auth_tag.as_deref(),
         );
+        if opened.request.op == Op::Deploy && self.state().lost_deploy_reply {
+            self.state().lost_deploy_reply = false;
+            return Err(CliError::DeliveryUnknown(
+                "manager reply lost after deploy".into(),
+            ));
+        }
         let id = opened.request.request_id.clone();
         let requester = signer.keys.public_key();
         let now = Timestamp::now();

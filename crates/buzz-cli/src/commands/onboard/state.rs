@@ -92,6 +92,12 @@ pub struct AgentRecord {
     /// The manager stored its launch registration (first start succeeded).
     #[serde(default)]
     pub registered: bool,
+    /// The signed first-start message, saved before any publication or deploy.
+    #[serde(default)]
+    pub kickoff: Option<nostr::Event>,
+    /// The relay acknowledged the kickoff before a deploy could be attempted.
+    #[serde(default)]
+    pub kickoff_published: bool,
 }
 
 /// A signing key the manager stored but GitHub may not have yet.

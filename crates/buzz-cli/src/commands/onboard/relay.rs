@@ -176,7 +176,13 @@ impl Relay for HttpRelay {
         parse_claim(&reply)
     }
 
-    async fn query(&self, keys: &Keys, filter: Value) -> Result<Vec<Value>, CliError> {
+    async fn query(&self, keys: &Keys, mut filter: Value) -> Result<Vec<Value>, CliError> {
+        // Provisioning decisions must see prior writes, including after a
+        // lost acknowledgement or local-state write failure.
+        filter
+            .as_object_mut()
+            .ok_or_else(|| CliError::Other("Provisioning filter must be an object.".into()))?
+            .insert("consistency".into(), json!("strong"));
         self.client(&Signer::owner(keys))?
             .query_all_bounded(filter, 500)
             .await

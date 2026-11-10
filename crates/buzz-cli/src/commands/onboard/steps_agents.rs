@@ -315,10 +315,7 @@ impl<P: Prompter, R: Relay, T: ControlTransport, X: Tools> Wizard<P, R, T, X> {
         let mut jobs = Vec::new();
         for index in pending {
             let agent = self.state.agents[index].clone();
-            let kickoff = agents::kickoff_event(&agent, channel_id, keys)?;
-            self.relay
-                .publish(&Signer::owner(keys), kickoff.clone())
-                .await?;
+            let kickoff = self.first_start_kickoff(index, channel_id, keys).await?;
             let payload = agents::deploy_payload(
                 &agent,
                 &self.relay_url,
@@ -372,5 +369,69 @@ impl<P: Prompter, R: Relay, T: ControlTransport, X: Tools> Wizard<P, R, T, X> {
             failures.len(),
             failures.join("; ")
         )))
+    }
+}
+
+impl<P: Prompter, R: Relay, T: ControlTransport, X: Tools> Wizard<P, R, T, X> {
+    /// Resume one durable first-start identity across publication and deploy
+    /// failures. A manager refusal can follow an already committed launch.
+    async fn first_start_kickoff(
+        &mut self,
+        index: usize,
+        channel: Uuid,
+        keys: &Keys,
+    ) -> Result<nostr::Event, CliError> {
+        if let Some(event) = self.state.agents[index].kickoff.clone() {
+            let found = self.relay.query(keys, json!({
+                "kinds": [9], "ids": [event.id.to_hex()], "#h": [channel.to_string()], "limit": 1,
+            })).await?;
+            let mut seen = false;
+            for value in found {
+                let stored: nostr::Event = serde_json::from_value(value)
+                    .map_err(|_| CliError::Other("Invalid first-start lookup response.".into()))?;
+                if stored.id != event.id || stored.verify().is_err() {
+                    return Err(CliError::Other(
+                        "Unrelated first-start lookup response.".into(),
+                    ));
+                }
+                seen = true;
+            }
+            if seen {
+                if !self.state.agents[index].kickoff_published {
+                    self.state.agents[index].kickoff_published = true;
+                    self.save()?;
+                }
+                return Ok(event);
+            }
+            if self.state.agents[index].kickoff_published {
+                return Err(CliError::Other(format!(
+                    "The saved first-start thread {} is unavailable. Check that thread before retrying; a Sandbox may already be running.", event.id.to_hex()
+                )));
+            }
+            // No deploy was attempted before the durable publication flag.
+            // An unposted expired message can therefore be replaced safely.
+            if nostr::Timestamp::now()
+                .as_secs()
+                .abs_diff(event.created_at.as_secs())
+                <= 840
+            {
+                self.relay
+                    .publish(&Signer::owner(keys), event.clone())
+                    .await?;
+                self.state.agents[index].kickoff_published = true;
+                self.save()?;
+                return Ok(event);
+            }
+        }
+        let event = agents::kickoff_event(&self.state.agents[index], channel, keys)?;
+        self.state.agents[index].kickoff = Some(event.clone());
+        self.state.agents[index].kickoff_published = false;
+        self.save()?;
+        self.relay
+            .publish(&Signer::owner(keys), event.clone())
+            .await?;
+        self.state.agents[index].kickoff_published = true;
+        self.save()?;
+        Ok(event)
     }
 }

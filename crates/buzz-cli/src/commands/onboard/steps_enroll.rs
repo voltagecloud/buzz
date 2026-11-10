@@ -30,7 +30,11 @@ impl<P: Prompter, R: Relay, T: ControlTransport, X: Tools> Wizard<P, R, T, X> {
         credentials: Credentials,
     ) -> Result<Option<Pairing>, CliError> {
         let mut pairing = on_file.pairing.clone();
-        if on_file.summary.is_some() && !credentials.changes() {
+        if on_file.summary.is_some()
+            && !credentials.changes()
+            && !self.args.reenroll
+            && !(on_file.paseo_enabled && pairing.is_none())
+        {
             self.say("  Your profile is on file; nothing new to send.");
             self.register_signing_key().await;
             return Ok(pairing);
@@ -48,17 +52,28 @@ impl<P: Prompter, R: Relay, T: ControlTransport, X: Tools> Wizard<P, R, T, X> {
                     .ok_or_else(|| CliError::Other("No signing key was created.".into()))?;
                 profile::profile(&credentials.values, &owner, github, &key.private)
             }
-            Some(_) => profile::partial(
-                &credentials.values,
-                &owner,
-                Changes {
-                    github: credentials.github.as_ref(),
-                    signing_key: credentials
-                        .signing_key
-                        .as_ref()
-                        .map(|key| key.private.as_str()),
-                },
-            ),
+            Some(summary) => {
+                // Re-enrollment also provisions or rotates the narrow daemon
+                // Secret. Preserve credentials by sending the existing email.
+                let mut unchanged = profile::Values::default();
+                let values = if credentials.changes() {
+                    &credentials.values
+                } else {
+                    unchanged.set(profile::Field::GitEmail, summary.git.email.clone());
+                    &unchanged
+                };
+                profile::partial(
+                    values,
+                    &owner,
+                    Changes {
+                        github: credentials.github.as_ref(),
+                        signing_key: credentials
+                            .signing_key
+                            .as_ref()
+                            .map(|key| key.private.as_str()),
+                    },
+                )
+            }
         }
         .map_err(CliError::Usage)?;
         let response = manager::ask(
