@@ -15,6 +15,7 @@ docker run --rm --entrypoint /bin/bash "$IMAGE" -ceu '
   codex --version
   claude --version
   kubectl version --client
+  gh stack --help >/dev/null
   codex login --help | grep -q -- --device-auth
   claude setup-token --help >/dev/null
   # Startup appends the sub-agent guide to the harness instructions as this user.
