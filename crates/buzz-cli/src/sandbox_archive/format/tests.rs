@@ -3,7 +3,7 @@ use flate2::{write::GzEncoder, Compression};
 use serde_json::{json, Value};
 use std::{fs, io::Write, process::Command};
 
-fn git(repo: &Path, args: &[&str]) -> Vec<u8> {
+pub(crate) fn git(repo: &Path, args: &[&str]) -> Vec<u8> {
     let output = Command::new("git")
         .arg("-C")
         .arg(repo)
@@ -23,7 +23,7 @@ fn git(repo: &Path, args: &[&str]) -> Vec<u8> {
     );
     output.stdout
 }
-fn fixture(sha256: bool) -> (tempfile::TempDir, Value, Vec<u8>) {
+pub(crate) fn fixture(sha256: bool) -> (tempfile::TempDir, Value, Vec<u8>) {
     let temp = tempfile::tempdir().unwrap();
     let repo = temp.path();
     git(
@@ -65,7 +65,7 @@ fn fixture(sha256: bool) -> (tempfile::TempDir, Value, Vec<u8>) {
     let bytes = fs::read(bundle).unwrap();
     (temp, manifest, bytes)
 }
-fn header(path: &str, kind: u8, size: u64) -> tar::Header {
+pub(crate) fn header(path: &str, kind: u8, size: u64) -> tar::Header {
     let mut h = tar::Header::new_ustar();
     h.set_size(size);
     h.set_mode(0o644);
@@ -75,7 +75,7 @@ fn header(path: &str, kind: u8, size: u64) -> tar::Header {
     h.set_cksum();
     h
 }
-fn packed(entries: Vec<(tar::Header, Vec<u8>)>) -> Vec<u8> {
+pub(crate) fn packed(entries: Vec<(tar::Header, Vec<u8>)>) -> Vec<u8> {
     let gzip = GzEncoder::new(Vec::new(), Compression::fast());
     let mut tar = tar::Builder::new(gzip);
     for (h, data) in entries {
@@ -83,7 +83,7 @@ fn packed(entries: Vec<(tar::Header, Vec<u8>)>) -> Vec<u8> {
     }
     tar.into_inner().unwrap().finish().unwrap()
 }
-fn entries(manifest: &Value, bundle: &[u8]) -> Vec<(tar::Header, Vec<u8>)> {
+pub(crate) fn entries(manifest: &Value, bundle: &[u8]) -> Vec<(tar::Header, Vec<u8>)> {
     let data = serde_json::to_vec(manifest).unwrap();
     vec![
         (

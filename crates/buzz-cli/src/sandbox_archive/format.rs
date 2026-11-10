@@ -125,6 +125,8 @@ pub(super) struct Item {
     pub path: String,
     pub size: u64,
     pub kind: Kind,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub mode: u32,
 }
 /// Validated snapshot structure; parsing performs no filesystem writes or Git execution.
 /// Consumers must still validate imported Git objects and enforce local capacity limits.
@@ -277,7 +279,13 @@ where
         if !fields.is_empty() {
             return Err(invalid("PAX link metadata on non-link"));
         }
-        let item = Item { path, size, kind };
+        let item = Item {
+            path,
+            size,
+            kind,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            mode: entry.header().mode()?,
+        };
         visit(item, &mut entry)?;
         std::io::copy(&mut entry, &mut std::io::sink())?;
     }
@@ -616,4 +624,4 @@ impl ArchivePlan {
     }
 }
 #[cfg(test)]
-mod tests;
+pub(in crate::sandbox_archive) mod tests;

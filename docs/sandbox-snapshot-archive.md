@@ -52,3 +52,58 @@ symlink ancestors to reject cycles and excessive chains. A nested repository
 owns a copied file when both its own bundle and an outer repository name the
 same physical path. Consumers must defer creating links until all regular files
 and Git metadata have been written.
+
+## Read-only restore
+
+`buzz_cli::sandbox_archive::check_git().await` checks platform support and Git
+2.29 or newer before a caller publishes a snapshot request. Linux and macOS are
+supported. Paseo requires `host-tools=on` for restore and explorer Git commands.
+The probe preserves the Git-denying PATH wrapper when host tools are off.
+
+`extract` owns the authenticated archive bytes and accepts a fresh destination,
+store root, `RestoreBudget`, and cancellation token. The destination parent must
+already exist inside the store. Existing destinations, including empty
+directories, are refused. The output lists repository roots for explorer
+history and diffs.
+
+```mermaid
+flowchart LR
+  A[Validate archive] --> B[Reserve storage]
+  B --> C[Stage files and bundles]
+  C --> D[Import and verify Git]
+  D --> E[Create safe links]
+  E --> F[Freeze permissions]
+  F --> G[Publish fresh directory]
+```
+
+Restore serializes operations within a store. It charges existing store usage,
+new file and directory blocks, temporary bundles, imported packs, indexes and
+an operational reserve. Both explicit work/store budgets and actual filesystem
+free space must permit the operation. Filesystem free space does not reveal a
+Kubernetes emptyDir quota. Configure budgets below that quota. The defaults
+allow 128 MiB for the operation and the total store; explicit limits cannot
+exceed 2 GiB each.
+
+Git imports run with fixed arguments and no network, hooks, templates,
+replacement refs, lazy fetch or external configuration. Pack preflight happens
+before import. Full Git integrity checks and actual object inventories must
+match the preflight before index creation. Ref creation uses [Git's NUL-delimited transaction format](https://git-scm.com/docs/git-update-ref) and rejects null object IDs. Restore reads HEAD into the index
+without checking out files. It marks excluded tracked paths skip-worktree, so
+omitted private files do not appear as deletions. Genuine working-tree
+deletions remain visible in diffs. Local branches, tags and declared shallow
+boundaries are preserved without fetching unavailable ancestors.
+
+Each Git operation has bounded output and a 60-second deadline. Restore has a
+180-second deadline. Process-group teardown retains the leader until after the
+stop signal, preventing process-ID reuse during cleanup. Scratch directories
+are private and beside the destination. Safe symlinks are created after files
+and Git metadata. Files and directories become owner-only and read-only before atomic
+publication with no replacement of an existing destination.
+
+Cancel by cancelling the token, then await `extract` to completion. Do not abort
+or drop its future. The function stops and reaps Git children and removes
+staging before returning cancellation. Failures leave the destination absent;
+a concurrent creator keeps its own destination. Cleanup failures propagate.
+Once publication succeeds, the local copy remains available after remote grant
+expiry. Expiry prevents new transfer and receipt use; it cannot erase bytes
+already delivered to an authorized reader.

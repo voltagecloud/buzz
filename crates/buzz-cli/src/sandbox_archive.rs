@@ -11,7 +11,9 @@ use buzz_sdk::sandbox_attach::snapshot::{
 use serde::{Deserialize, Serialize};
 
 mod format;
+mod restore;
 pub use format::{inspect_archive, ArchivePlan};
+pub use restore::{check_git, extract, RestoreBudget, Restored};
 
 /// Local archive refusal; file contents and scanner diagnostics are never included.
 #[derive(Debug, thiserror::Error)]
@@ -19,6 +21,15 @@ pub enum ArchiveError {
     /// Cancellation completed after staging and child cleanup.
     #[error("snapshot extraction cancelled")]
     Cancelled,
+    /// The platform cannot guarantee atomic publication.
+    #[error("snapshot extraction requires Linux or macOS")]
+    Unsupported,
+    /// A bounded Git operation failed or Git is unavailable/denied.
+    #[error("snapshot Git operation failed: {0}")]
+    Git(&'static str),
+    /// Cleanup failed and its caller must retain this failure.
+    #[error("snapshot staging cleanup failed: {0}")]
+    Cleanup(std::io::Error),
     /// Filesystem access failed.
     #[error("archive file access failed: {0}")]
     Io(#[from] std::io::Error),
