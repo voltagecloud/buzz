@@ -48,10 +48,13 @@ with tempfile.TemporaryDirectory() as temp:
         repo=repository(case,format)
         (repo/'source.rs').write_text('initial\n')
         (repo/'deleted.txt').write_text('tracked deletion\n')
+        (repo/'nonowner-exec.txt').write_text('clean non-executable\n')
         (repo/'.env.example').write_text('PUBLIC_URL=https://example.invalid\n')
         git(repo,'add','.')
         git(repo,'commit','-m','initial')
         git(repo,'branch','local-only')
+        (repo/'nonowner-exec.txt').chmod(0o654)
+        assert git(repo,'diff','--name-only','--','nonowner-exec.txt')==''
         (repo/'source.rs').write_text('edited\n')
         (repo/'deleted.txt').unlink()
         (repo/'new.txt').write_text('untracked\n')
@@ -76,7 +79,8 @@ with tempfile.TemporaryDirectory() as temp:
             names=package.getnames()
             assert not any(name.endswith(('/.env','/credentials.json','/.env.example')) for name in names)
             assert package.getmember('snapshot/repositories/0/files/link').issym()
-            assert package.getmember('snapshot/repositories/0/files/tool.sh').mode&0o111
+            assert package.getmember('snapshot/repositories/0/files/tool.sh').mode&0o100
+            assert package.getmember('snapshot/repositories/0/files/nonowner-exec.txt').mode&0o111==0,'non-owner execute bits invented an executable Git file'
             assert all(member.mtime==0 for member in package)
             package.extractall(extracted,filter='data')
         history=case/'history'
@@ -86,7 +90,7 @@ with tempfile.TemporaryDirectory() as temp:
         assert git(history,'show','HEAD:.env.example').startswith('PUBLIC_URL=')
         assert 'refs/heads/local-only' in git(history,'show-ref')
         assert (extracted/'snapshot/repositories/0/files'/long.name).read_text()=='long path\n'
-        print('PASS: full history, exclusions, dirty files, links, PAX and '+format)
+        print('PASS: full history, exclusions, dirty files, Git owner-execute semantics, links, PAX and '+format)
 
     # Shallow bundle restores with its explicit local boundary, without origin.
     source=root/'sha1/workspace/example'
