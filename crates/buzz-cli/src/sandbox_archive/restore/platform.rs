@@ -378,7 +378,7 @@ fn prepare(
             if reversed.contains_key(item.path.as_str()) {
                 fs::set_permissions(
                     &target,
-                    fs::Permissions::from_mode(if item.mode & 0o111 != 0 { 0o500 } else { 0o400 }),
+                    fs::Permissions::from_mode(if item.mode & 0o100 != 0 { 0o500 } else { 0o400 }),
                 )?;
             }
         }
@@ -622,7 +622,7 @@ fn finish(
             } else if metadata.is_file() {
                 fs::set_permissions(
                     path,
-                    fs::Permissions::from_mode(if metadata.mode() & 0o111 != 0 {
+                    fs::Permissions::from_mode(if metadata.mode() & 0o100 != 0 {
                         0o500
                     } else {
                         0o400

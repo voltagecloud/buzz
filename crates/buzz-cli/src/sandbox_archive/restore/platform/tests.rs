@@ -494,3 +494,36 @@ async fn malformed_bundle_ref_headers_cannot_create_undeclared_refs() {
         no_staging(store.path());
     }
 }
+
+#[tokio::test]
+async fn nonowner_execute_bits_do_not_invent_git_mode_changes() {
+    let (source, manifest, bundle) = fixture::fixture(false);
+    fs::set_permissions(
+        source.path().join("tracked.txt"),
+        fs::Permissions::from_mode(0o654),
+    )
+    .unwrap();
+    assert!(fixture::git(source.path(), &["diff", "--name-status"]).is_empty());
+    let mut items = fixture::entries(&manifest, &bundle);
+    items[2].1 = b"clean\n".to_vec();
+    items[2].0.set_mode(0o654);
+    items[2].0.set_cksum();
+    let store = tempfile::tempdir().unwrap();
+    let destination = store.path().join("mirror");
+    let restored = extract(
+        fixture::packed(items),
+        &destination,
+        store.path(),
+        RestoreBudget::default(),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let repo = &restored.repositories[0];
+    assert!(fixture::git(repo, &["diff", "--name-status"]).is_empty());
+    assert_eq!(
+        fs::metadata(repo.join("tracked.txt")).unwrap().mode() & 0o777,
+        0o400
+    );
+    cleanup(&destination).unwrap();
+}
