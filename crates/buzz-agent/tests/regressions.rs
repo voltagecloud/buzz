@@ -183,7 +183,9 @@ async fn tool_metadata_caps_enforced() {
                 "args": [],
                 "env": [
                     { "name": "FAKE_MCP_TOOL_COUNT", "value": "200" },
-                    { "name": "FAKE_MCP_HUGE_DESC", "value": "1" },
+                    // Stay below rmcp's 16 MiB stdio frame bound so this
+                    // fixture reaches Buzz's tool-count and metadata guards.
+                    { "name": "FAKE_MCP_DESC_SIZE", "value": "10000" },
                 ],
             }],
         }),
