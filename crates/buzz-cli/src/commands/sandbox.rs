@@ -8,7 +8,7 @@ use clap::Subcommand;
 use nostr::{Event, EventId, PublicKey, Timestamp};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::time::{sleep, timeout, Instant};
+use tokio::time::{sleep, timeout};
 use uuid::Uuid;
 
 use crate::{client::BuzzClient, error::CliError};
