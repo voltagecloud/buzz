@@ -153,6 +153,14 @@ async fn submit(
             "every message requires a durable plan before publication"
         );
         if tag(&event, "e").is_some() {
+            let (root, parent) = buzz_core::nip10::parse_thread_markers(&event.tags)
+                .resolve()
+                .expect("display plans must be real replies, including after refresh");
+            assert_eq!(root, parent);
+            assert!(
+                store.events.contains_key(&root),
+                "reply anchor must already exist"
+            );
             assert!(
                 record_count >= 2,
                 "delivery and body fingerprint plans precede replies"
@@ -560,7 +568,7 @@ async fn linear_and_slack_only_publish_authenticated_mapped_public_work() {
     let keys = Keys::generate();
     let router = app(config(&url), &keys);
     let now = nostr::Timestamp::now().as_secs() * 1000;
-    let issue = json!({"type":"Issue","action":"create","webhookTimestamp":now,"webhookId":"HOOK","url":"https://linear.app/issue/ENG-7","actor":{"name":"Ada"},"data":{"id":"issue-7","identifier":"ENG-7","teamId":"TEAM","title":"Fix it","description":"Details"}});
+    let issue = json!({"type":"Issue","action":"create","webhookTimestamp":now,"webhookId":"HOOK","url":"https://linear.app/issue/ENG-7","actor":{"name":"Ada"},"data":{"id":"issue-7","identifier":"ENG-7","teamId":"TEAM","title":"Fix it","description":"Details","stateId":"STATE-TODO"}});
     assert_eq!(
         request(&router, "linear", &issue, "linear-1", true, 0, "")
             .await
@@ -573,6 +581,9 @@ async fn linear_and_slack_only_publish_authenticated_mapped_public_work() {
             .0,
         StatusCode::OK
     );
+    assert!(messages(&store)
+        .iter()
+        .any(|event| tag(event, "ext-state") == Some("STATE-TODO")));
     let mut labeled = issue.clone();
     labeled["action"] = json!("update");
     labeled["data"]["labelIds"] = json!(["LABEL-AGENT"]);
@@ -601,7 +612,7 @@ async fn linear_and_slack_only_publish_authenticated_mapped_public_work() {
         3,
         "transport timestamps must not duplicate a Linear occurrence"
     );
-    let comment = json!({"type":"Comment","action":"create","webhookTimestamp":now,"webhookId":"HOOK","url":"https://linear.app/issue/ENG-7#comment-1","actor":{"name":"Ada"},"data":{"id":"comment-1","issueId":"issue-7","body":"An update"}});
+    let comment = json!({"type":"Comment","action":"create","webhookTimestamp":now,"url":"https://linear.app/issue/ENG-7#comment-1","actor":{"name":"Ada"},"data":{"id":"comment-1","issueId":"issue-7","body":"An update"}});
     assert_eq!(
         request(&router, "linear", &comment, "linear-2", false, 0, "")
             .await
@@ -662,6 +673,7 @@ async fn linear_and_slack_only_publish_authenticated_mapped_public_work() {
     // An existing issue without a saved route can use an explicitly mapped
     // signed webhook ID. A known route above must retain the team channel.
     let mut orphan = comment.clone();
+    orphan["webhookId"] = json!("HOOK");
     orphan["data"]["id"] = json!("orphan-comment");
     orphan["data"]["issueId"] = json!("never-seen-issue");
     assert_eq!(
@@ -686,4 +698,70 @@ fn endpoints_and_provider_mappings_fail_closed() {
     cfg.slack_channels
         .insert("T123/GPRIVATE".into(), CHANNEL.parse().unwrap());
     assert!(cfg.validate().is_err());
+}
+
+/// A bounded burst of authenticated CI callbacks waits for the serialized
+/// journal writer instead of rejecting every overlapping GitHub delivery.
+#[tokio::test]
+async fn authenticated_ci_bursts_preserve_every_delivery() {
+    let (url, store, server) = external().await;
+    let keys = Keys::generate();
+    let router = app(config(&url), &keys);
+    let mut tasks = tokio::task::JoinSet::new();
+    for index in 0..5 {
+        let router = router.clone();
+        tasks.spawn(async move {
+            let mut payload = github();
+            payload["pull_request"]["number"] = json!(100 + index);
+            request(
+                &router,
+                "github",
+                &payload,
+                &format!("burst-{index}"),
+                false,
+                0,
+                "pull_request",
+            )
+            .await
+            .0
+        });
+    }
+    while let Some(outcome) = tasks.join_next().await {
+        assert_eq!(outcome.unwrap(), StatusCode::OK);
+    }
+    assert_eq!(messages(&store).len(), 10);
+    server.abort();
+}
+
+/// A saved route is a fallback; current explicit signed webhook configuration
+/// can redirect subsequent activity without leaking it to the previous channel.
+#[tokio::test]
+async fn linear_current_mapping_overrides_saved_issue_route() {
+    let (url, store, server) = external().await;
+    let keys = Keys::generate();
+    let router = app(config(&url), &keys);
+    let now = nostr::Timestamp::now().as_secs() * 1000;
+    let issue = json!({"type":"Issue","action":"create","webhookTimestamp":now,"data":{"id":"redirect-issue","identifier":"ENG-9","teamId":"TEAM","title":"Original route"},"url":"https://linear.app/issue/ENG-9"});
+    assert_eq!(
+        request(&router, "linear", &issue, "route-before", false, 0, "")
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let comment = json!({"type":"Comment","action":"create","webhookTimestamp":now,"webhookId":"HOOK","data":{"id":"redirect-comment","issueId":"redirect-issue","body":"Current route"},"url":"https://linear.app/issue/ENG-9#comment"});
+    assert_eq!(
+        request(&router, "linear", &comment, "route-after", false, 0, "")
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let imported = messages(&store)
+        .into_iter()
+        .find(|event| event.content.contains("Current route"))
+        .unwrap();
+    assert_eq!(
+        tag(&imported, "h"),
+        Some("0b6c1f0e-2a7d-4c1e-9f3a-5d2b8e4c7a11")
+    );
+    server.abort();
 }

@@ -260,13 +260,13 @@ pub(crate) fn linear(
         .get(text(data, "/projectId"))
         .or_else(|| config.linear_teams.get(text(data, "/teamId")))
         .copied()
-        .or(routed)
         .or_else(|| {
             config
                 .linear_webhooks
                 .get(text(payload, "/webhookId"))
                 .copied()
-        });
+        })
+        .or(routed);
     let Some(channel) = channel else {
         if kind == "Comment" {
             bail!("Linear issue route is unavailable; deliver the issue before its comments");
@@ -369,7 +369,11 @@ pub(crate) fn linear(
         ("title", "/title"),
         ("state", "/state/name"),
     ] {
-        let value = text(data, pointer);
+        let value = if field == "state" && text(data, pointer).is_empty() {
+            text(data, "/stateId")
+        } else {
+            text(data, pointer)
+        };
         if !value.is_empty() {
             item.fields.push((field.into(), short(value, 256)));
         }
