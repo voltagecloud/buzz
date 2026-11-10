@@ -551,7 +551,7 @@ fn map_push_accept_error(error: super::push_lease::AcceptError) -> IngestError {
 /// Returns `Err` for unknown kinds — the relay rejects them.
 fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static str> {
     match kind {
-        buzz_core::kind::KIND_AGENT_CHANNEL_GRANT => Ok(Scope::MessagesWrite),
+        buzz_core::kind::KIND_AGENT_CHANNEL_GRANT | buzz_core::kind::KIND_SANDBOX_ATTACH => Ok(Scope::MessagesWrite),
         // Owner-managed global authority, like a profile or managed-agent record.
         buzz_core::kind::KIND_AGENT_GATEWAY_DELEGATION => Ok(Scope::UsersWrite),
         KIND_PROFILE => Ok(Scope::UsersWrite),
@@ -4503,6 +4503,7 @@ mod postgres_tests {
     fn per_kind_scope_allowlist_covers_all_migrated_kinds() {
         let dummy = make_dummy_event();
         let migrated = [
+            buzz_core::kind::KIND_SANDBOX_ATTACH,
             KIND_PROFILE,
             KIND_DELETION,
             KIND_REACTION,

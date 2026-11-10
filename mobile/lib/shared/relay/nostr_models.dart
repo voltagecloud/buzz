@@ -38,6 +38,8 @@ abstract final class EventKind {
 
   /// Owner-signed, expiring gateway delegation for remote agents.
   static const agentGatewayDelegation = 30181;
+  static const sandboxAttach = 30624;
+  static const sandboxTerminalFrame = 24203;
   static const eventReminder = 30300;
   static const userStatus = 30315;
   static const dmVisibility = 30622;

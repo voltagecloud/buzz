@@ -17,6 +17,7 @@ pub mod builders;
 pub mod gateway;
 pub mod mentions;
 pub mod nip_oa;
+pub mod sandbox_attach;
 pub mod sharing;
 pub mod workflow;
 

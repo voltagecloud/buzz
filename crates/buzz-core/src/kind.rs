@@ -204,6 +204,7 @@ pub const RESULT_GATED_KINDS: &[u32] = &[
 /// included for filter-layer enforcement but are never stored, so the
 /// storage-layer search defense does not apply to them.
 pub const P_GATED_KINDS: &[u32] = &[
+    KIND_SANDBOX_TERMINAL_FRAME,
     KIND_AGENT_OBSERVER_FRAME,
     KIND_MEMBER_ADDED_NOTIFICATION,
     KIND_MEMBER_REMOVED_NOTIFICATION,
@@ -713,8 +714,15 @@ pub const KIND_GIT_STATUS_DRAFT: u32 = 1633;
 /// announcement, never a project. See `docs/nips/NIP-MP.md`.
 pub const KIND_PROJECT: u32 = 30621;
 
+/// Owner/gateway terminal grants and metadata-only acceptance/end records.
+pub const KIND_SANDBOX_ATTACH: u32 = 30624;
+/// NIP-44 encrypted, ephemeral terminal frames; never persisted.
+pub const KIND_SANDBOX_TERMINAL_FRAME: u32 = 24203;
+
 /// All registered kind constants — used for duplicate detection and iteration.
 pub const ALL_KINDS: &[u32] = &[
+    KIND_SANDBOX_ATTACH,
+    KIND_SANDBOX_TERMINAL_FRAME,
     KIND_PROFILE,
     KIND_TEXT_NOTE,
     KIND_CONTACT_LIST,
