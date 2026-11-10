@@ -119,7 +119,7 @@ pub(crate) async fn read(
 }
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     use super::*;
     use nostr::Keys;
     use serde_json::json;
