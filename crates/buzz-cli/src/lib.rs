@@ -260,6 +260,8 @@ pub enum OutputFormat {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Set up your Buzz identity, credentials and Remote workspace agents (interactive)
+    Onboard(commands::onboard::OnboardArgs),
     /// Draft owner-reviewed agent creation and updates
     #[command(subcommand)]
     Agents(AgentsCmd),
@@ -2277,6 +2279,11 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         };
     }
 
+    // Onboarding creates or imports the identity, so it needs no key yet.
+    if let Cmd::Onboard(ref args) = cli.command {
+        return commands::onboard::run(args.clone()).await;
+    }
+
     // Auth: private key is required for all relay operations.
     // The keypair IS the identity — no tokens, no other auth.
     let private_key_str = cli.private_key.ok_or_else(|| {
@@ -2338,6 +2345,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
         Cmd::Pack(_) => unreachable!("handled above"),
+        Cmd::Onboard(_) => unreachable!("handled above"),
     }
 }
 
@@ -2519,6 +2527,7 @@ mod tests {
             "messages",
             "moderation",
             "notes",
+            "onboard",
             "pack",
             "patches",
             "pr",

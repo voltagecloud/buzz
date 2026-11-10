@@ -86,9 +86,27 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # Random number generation — full jitter for exponential backoff in with_retry
 rand = { workspace = true }
 
-[dev-dependencies]
-# Scratch files for channel-templates.json fixtures in tests
+# `buzz onboard`: kind 24210 Sandbox session control (enroll, profile, the
+# first agent-signed deploy), NIP-44 encrypted to the Sandbox manager.
+buzz-session-control = { workspace = true }
+# `buzz onboard`: secrets held in memory are wiped on drop.
+zeroize = { workspace = true }
+# `buzz onboard`: hidden terminal input for keys and tokens.
+rpassword = "7.5"
+# `buzz onboard`: the Paseo offer URL as a terminal QR code (no image backend).
+qrcode = { version = "0.14", default-features = false }
+# `buzz onboard`: the via profile check that profile.py makes.
+toml = "1.0"
+# `buzz onboard`: ssh-keygen writes the agent signing key into a private
+# temporary directory, as the GPUI enroll form does.
 tempfile = "3"
+# `buzz onboard`: the agents' first starts run concurrently.
+futures-util = { workspace = true }
+
+[dev-dependencies]
+# `buzz onboard` tests: the Sandbox manager's own deploy checks
+# (`provider::parse`, `check_sandbox_request`) accept the first-start payload.
+buzz-backend-kubernetes = { path = "../buzz-backend-kubernetes" }
 # Minimal HTTP test server for retry/policy integration tests
 axum = { workspace = true }
 # `test-util` enables paused-time control for deterministic timeout tests
