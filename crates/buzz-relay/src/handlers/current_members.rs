@@ -33,6 +33,7 @@ pub(crate) async fn read(
         || filter.since.is_some()
         || filter.until.is_some()
         || filter.search.is_some()
+        || filter.generic_tags.len() != 1
     {
         return Ok(None);
     }
@@ -185,6 +186,28 @@ mod tests {
             limit: Some(1),
             ..EventQuery::for_community(community)
         };
+        // Extra generic constraints retain ordinary filter semantics and must
+        // never be answered as an unconstrained current authority query.
+        let constrained: Filter = serde_json::from_value(json!({
+            "kinds":[39002], "authors":[relay], "#d":[channel],
+            "#p":[stranger.public_key()], "limit":1
+        }))
+        .unwrap();
+        assert!(
+            read(&state, &tenant, agent.public_key().as_bytes(), &constrained)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            state
+                .db
+                .query_events(&stored_query)
+                .await
+                .unwrap()
+                .is_empty(),
+            "an ordinary constrained query must not repair the projection"
+        );
         let original = read(&state, &tenant, agent.public_key().as_bytes(), &filter)
             .await
             .unwrap()
