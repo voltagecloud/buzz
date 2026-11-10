@@ -16,3 +16,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 base64 = { workspace = true }
+
+# AEAD for bounded snapshot blobs; the random key is wrapped by NIP-44.
+chacha20poly1305 = "0.10"
+flate2 = "1"

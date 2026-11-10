@@ -2144,6 +2144,8 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "buzz-core",
+ "chacha20poly1305 0.10.1",
+ "flate2",
  "nostr 0.44.7",
  "serde",
  "serde_json",

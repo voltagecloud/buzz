@@ -14,6 +14,9 @@ use uuid::Uuid;
 
 use crate::{kind, SdkError};
 
+/// Separately approved, encrypted read-only workspace snapshots.
+pub mod snapshot;
+
 /// Longest terminal grant lifetime, in seconds.
 pub const MAX_GRANT_SECS: u64 = 3600;
 /// Largest decoded data frame, in bytes.
@@ -170,7 +173,7 @@ impl Grant {
     /// Verify an owner-approval envelope and its one-hour-or-shorter lifetime.
     /// [`Self::authorized`] separately checks the expected owner and current authority.
     pub fn parse(event: &Event, scope: Scope, now: u64) -> Result<Self, SdkError> {
-        let request = read_request(event, Some(scope), "grant", now)?;
+        let request = read_request(event, Some(scope), "grant", "terminal", now)?;
         let request_id = request
             .request_id
             .ok_or_else(|| invalid("terminal approval has no request"))?;
@@ -232,7 +235,7 @@ pub struct Pending {
 impl Pending {
     /// Verify a bounded request, without treating its sender as the sandbox owner.
     pub fn parse(event: &Event, now: u64) -> Result<Self, SdkError> {
-        let body = read_request(event, None, "request", now)?;
+        let body = read_request(event, None, "request", "terminal", now)?;
         if body.requester != event.pubkey || body.request_id.is_some() {
             return Err(invalid("invalid pending terminal requester"));
         }
@@ -267,6 +270,7 @@ fn read_request(
     event: &Event,
     scope: Option<Scope>,
     phase: &str,
+    mode: &str,
     now: u64,
 ) -> Result<Request, SdkError> {
     if event.kind.as_u16() as u32 != kind::KIND_SANDBOX_ATTACH
@@ -278,7 +282,7 @@ fn read_request(
     let request: Request =
         serde_json::from_str(&event.content).map_err(|_| invalid("invalid terminal request"))?;
     if request.version != 1
-        || request.mode != "terminal"
+        || request.mode != mode
         || scope.is_some_and(|scope| scope != request.scope)
         || event.created_at.as_secs() > now
         || request.expires_at <= now
@@ -288,7 +292,7 @@ fn read_request(
             > MAX_GRANT_SECS
         || tag(event, "expiration").and_then(|value| value.parse::<u64>().ok())
             != Some(request.expires_at)
-        || tag(event, "d") != Some(format!("terminal:{}:{phase}", request.session).as_str())
+        || tag(event, "d") != Some(format!("{mode}:{}:{phase}", request.session).as_str())
         || !request.scope.matches(event, request.scope.agent)
     {
         return Err(invalid("expired or incorrectly scoped terminal request"));
@@ -304,7 +308,7 @@ fn signed_request(keys: &Keys, body: Request, phase: &str) -> Result<Event, SdkE
     let mut values = body.scope.tags(body.scope.agent);
     values.push(vec![
         "d".into(),
-        format!("terminal:{}:{phase}", body.session),
+        format!("{}:{}:{phase}", body.mode, body.session),
     ]);
     values.push(vec!["expiration".into(), body.expires_at.to_string()]);
     let content = serde_json::to_string(&body).map_err(|_| invalid("invalid terminal request"))?;

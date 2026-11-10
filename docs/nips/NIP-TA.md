@@ -48,3 +48,5 @@ Consumers must apply that budget before cryptographic work.
 
 Shell processes, idle expiry, authorization refresh, audit publication, and local TTY restoration belong to the runtime consumer.
 The relay remains the only channel into the sandbox; this protocol adds no broker, exec endpoint, or tunnel.
+
+Read-only workspace snapshots use the distinct [NIP-SA](NIP-SA.md) capability; terminal approvals never authorize snapshot export.
