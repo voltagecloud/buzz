@@ -4943,9 +4943,9 @@ pub(crate) async fn dispatch_refusal(ctx: &PromptContext, pending: &FlushBatch) 
         }
         let mut gateway_error = None;
         if let Some(gateways) = &ctx.gateways {
-            match gateways.is_live(&item.event.pubkey).await {
-                Ok(true) => continue,
-                Ok(false) => {}
+            match gateways.prompt_author(&item.event).await {
+                Ok(Some(_)) => continue,
+                Ok(None) => {}
                 Err(error) => gateway_error = Some(error.to_string()),
             }
         }

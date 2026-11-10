@@ -193,7 +193,7 @@ async fn connection(
                         assert!(author.is_some());
                         let id = input[1].as_str().unwrap().to_string();
                         let filter = input[2].clone();
-                        if matches!(id.as_str(), "mention-gateways" | "mention-gateway-profiles" | "mention-gateway-channel") {
+                        if matches!(id.as_str(), "mention-gateways" | "mention-gateway-profiles" | "mention-gateway-channel" | "mention-channel" | "mention-listing") {
                             assert_eq!(filter["consistency"], json!("strong"));
                         }
                         let allowed = |event: &Event| matches!(event.kind.as_u16(), 0 | 24210 | 30177 | 30181) || event.tags.iter().any(|tag| tag.as_slice() == ["h", CHANNEL] || tag.as_slice() == ["d", CHANNEL]);

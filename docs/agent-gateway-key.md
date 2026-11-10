@@ -85,6 +85,45 @@ daemon Secret, and the owner enrolls again to generate new credentials. Admit
 and grant the new public key. Remove the old key's relay and channel membership
 when its records no longer need to remain accessible to that account.
 
+## Gateway-owned workflows
+
+A gateway can create and manage its own workflows using its ordinary channel
+membership. With a live owner grant, those workflows can prompt that owner's
+remote agents in channels where the owner, agent and gateway remain posting
+members. The grant provides no authority over the owner's workflow definitions.
+
+Use the gateway key for the existing workflow commands:
+
+```sh
+buzz workflows create --channel "$CHANNEL_ID" --yaml ./workflow.yaml
+buzz workflows trigger --workflow "$WORKFLOW_ID"
+```
+
+Name the target agent explicitly in the stored workflow step text. For example,
+replace `@agent` below with the agent's channel mention, then save `workflow.yaml`:
+
+```yaml
+name: Gateway agent check
+trigger:
+  on: webhook
+steps:
+  - id: ask_agent
+    action: send_message
+    text: "@agent reply with gateway workflow confirmed"
+```
+
+Use the workflow ID returned by `create` for the explicit `trigger` command.
+A mention introduced only by substituted trigger text does not carry authority. The relay signs the emitted prompt and
+records the workflow owner and explicitly authored agent target. The launcher
+and harness verify that signature and provenance before applying the gateway's
+current grant and channel membership. The signed prompt must address the same
+agent and channel; a custom owner tag by itself grants nothing.
+
+Queued workflow prompts are checked again before model dispatch. Expiration,
+revocation and channel removal have the same bounds as direct gateway prompts.
+Workflows cannot turn a gateway grant into owner administration, model changes
+or access to owner DMs.
+
 ## Revocation and failure behavior
 
 Revocation uses a newer disabled replacement, without expiration. The relay

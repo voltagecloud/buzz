@@ -10,7 +10,7 @@ fn signed_mention(signer: &Keys, content: &str) -> Event {
         .unwrap()
 }
 
-fn delegation(enabled: bool, age: u64) -> Event {
+pub(super) fn delegation(enabled: bool, age: u64) -> Event {
     let now = Timestamp::now().as_secs();
     let gateway = keys("44").public_key();
     let builder = if enabled {
@@ -21,7 +21,7 @@ fn delegation(enabled: bool, age: u64) -> Event {
     builder.unwrap().sign_with_keys(&keys("33")).unwrap()
 }
 
-fn roster(gateway: bool) -> Event {
+pub(super) fn roster(gateway: bool) -> Event {
     let mut tags = vec![Tag::parse(["d", CHANNEL]).unwrap()];
     for key in ["22", "33"].into_iter().chain(gateway.then_some("44")) {
         tags.push(Tag::parse(["p", &keys(key).public_key().to_hex(), "", "member"]).unwrap());

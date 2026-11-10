@@ -9,6 +9,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::*;
 
+mod workflow;
+
 /// Fake relay state shared with the serving task.
 pub(crate) struct FakeRelay {
     pub(crate) heads: Arc<Mutex<Vec<Event>>>,
@@ -259,7 +261,10 @@ async fn gateway_access_is_cached_bounded_and_fails_closed() {
         .unwrap();
     *access.cached.lock().await = Cached::Fresh {
         at: tokio::time::Instant::now(),
-        gateways: buzz_sdk::gateway::live_heads(owner.public_key(), &[expired], now - 1),
+        authority: Authority {
+            gateways: buzz_sdk::gateway::live_heads(owner.public_key(), &[expired], now - 1),
+            relay: None,
+        },
     };
     assert!(
         !access.is_live(&gw).await.unwrap(),

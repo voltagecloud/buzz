@@ -6,6 +6,7 @@ mod live_relay;
 mod relay;
 mod revoked;
 mod shared_live;
+mod workflow;
 
 use std::sync::Arc;
 use std::time::Duration;

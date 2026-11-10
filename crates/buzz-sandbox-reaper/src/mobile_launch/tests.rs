@@ -396,3 +396,52 @@ fn invalid_desktop_registration_has_a_deploy_specific_refusal_without_url_secret
     assert_eq!(error["code"], "invalid_launch_registration");
     assert!(!error.to_string().contains("private"));
 }
+
+/// A workflow launch revalidates the current relay's proof at the final Start
+/// boundary. Raw owner tags, a different target, expiration and signature
+/// tampering cannot turn into an owner-scoped launch.
+#[test]
+fn gateway_workflow_start_revalidates_the_owner_proof() {
+    let gateway = Keys::parse(&"44".repeat(32)).unwrap();
+    let relay = Keys::parse(&"11".repeat(32)).unwrap();
+    let at = 1_800_000_000;
+    let head = buzz_sdk::gateway::Delegation::grant(gateway.public_key(), at + 60, at - 10)
+        .unwrap()
+        .sign_with_keys(&owner())
+        .unwrap();
+    let delegation =
+        buzz_sdk::gateway::live(&head, owner().public_key(), gateway.public_key(), at).unwrap();
+    let request = super::GatewayRequest {
+        delegation,
+        workflow_relay: Some(relay.public_key()),
+    };
+    let payload = |signer: &Keys, mentioned: nostr::PublicKey| {
+        let event = EventBuilder::new(Kind::Custom(9), "@agent workflow")
+            .tags([
+                Tag::parse(["h", CHANNEL]).unwrap(),
+                Tag::public_key(agent().public_key()),
+                Tag::parse(["buzz:workflow", "true"]).unwrap(),
+                Tag::parse(["buzz:workflow-owner", &gateway.public_key().to_hex()]).unwrap(),
+                Tag::parse(["buzz:workflow-mention", &mentioned.to_hex()]).unwrap(),
+            ])
+            .custom_created_at(Timestamp::from(at))
+            .sign_with_keys(signer)
+            .unwrap();
+        json!({"agent_pubkey":agent().public_key(),"relay_url":RELAY,"trigger":event})
+    };
+    let valid = payload(&relay, agent().public_key());
+    let start = Start::gateway(valid.clone(), &request, at).unwrap();
+    assert_eq!(start.owner, owner().public_key());
+    assert_eq!(start.scope["channel_id"], CHANNEL);
+    assert!(Start::gateway(
+        payload(&Keys::generate(), agent().public_key()),
+        &request,
+        at
+    )
+    .is_err());
+    assert!(Start::gateway(payload(&relay, gateway.public_key()), &request, at).is_err());
+    assert!(Start::gateway(valid.clone(), &request, at + 60).is_err());
+    let mut tampered = valid;
+    tampered["trigger"]["content"] = json!("forged");
+    assert!(Start::gateway(tampered, &request, at).is_err());
+}
