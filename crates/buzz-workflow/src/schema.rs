@@ -57,6 +57,19 @@ pub enum TriggerDef {
         #[serde(default)]
         filter: Option<String>,
     },
+    /// Fires on signed integration messages from explicitly trusted publishers.
+    IntegrationEvent {
+        /// Provider identifier carried in the event's `ext-source` tag.
+        source: String,
+        /// Optional exact normalized action, such as `issue.update`.
+        #[serde(default)]
+        action: Option<String>,
+        /// Trusted integration publisher public keys (hex), never an empty list.
+        authors: Vec<String>,
+        /// Optional evalexpr expression over `trigger_*` metadata fields.
+        #[serde(default)]
+        filter: Option<String>,
+    },
     /// Fires on a cron schedule.
     Schedule {
         /// Cron expression (UTC). Mutually exclusive with `interval`.
@@ -192,6 +205,33 @@ impl WorkflowDef {
                 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
         };
 
+        if let TriggerDef::IntegrationEvent {
+            source,
+            action,
+            authors,
+            ..
+        } = &self.trigger
+        {
+            let valid_name = |name: &str| {
+                !name.is_empty()
+                    && name.len() <= 128
+                    && name
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+            };
+            if !valid_name(source)
+                || action.as_ref().is_some_and(|a| !valid_name(a))
+                || authors.is_empty()
+                || authors.len() > 32
+                || authors
+                    .iter()
+                    .any(|a| a.len() != 64 || nostr::PublicKey::from_hex(a).is_err())
+            {
+                return Err(WorkflowError::InvalidDefinition(
+                    "integration_event needs a source, an optional action, and 1–32 valid hex publisher keys".into()
+                ));
+            }
+        }
         let mut seen_ids: HashSet<&str> = HashSet::new();
         for step in &self.steps {
             if step.id.trim().is_empty() {
@@ -221,6 +261,7 @@ impl WorkflowDef {
             TriggerDef::MessagePosted { .. }
                 | TriggerDef::ReactionAdded { .. }
                 | TriggerDef::DiffPosted { .. }
+                | TriggerDef::IntegrationEvent { .. }
         );
         if !trigger_has_message {
             for step in &self.steps {

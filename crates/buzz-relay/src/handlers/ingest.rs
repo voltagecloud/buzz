@@ -551,7 +551,7 @@ fn map_push_accept_error(error: super::push_lease::AcceptError) -> IngestError {
 /// Returns `Err` for unknown kinds — the relay rejects them.
 fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static str> {
     match kind {
-        buzz_core::kind::KIND_AGENT_CHANNEL_GRANT => Ok(Scope::MessagesWrite),
+        buzz_core::kind::KIND_AGENT_CHANNEL_GRANT | buzz_core::kind::KIND_INTEGRATION_RECORD => Ok(Scope::MessagesWrite),
         KIND_PROFILE => Ok(Scope::UsersWrite),
         KIND_TEXT_NOTE | KIND_LONG_FORM | buzz_core::kind::KIND_ARTIFACT => Ok(Scope::MessagesWrite),
         KIND_CONTACT_LIST | KIND_READ_STATE | KIND_USER_STATUS | KIND_AGENT_ENGRAM
@@ -836,6 +836,7 @@ pub(crate) fn requires_h_channel_scope(kind: u32) -> bool {
     matches!(
         kind,
         buzz_core::kind::KIND_AGENT_CHANNEL_GRANT
+            | buzz_core::kind::KIND_INTEGRATION_RECORD
             | KIND_STREAM_MESSAGE
             | KIND_STREAM_MESSAGE_V2
             | KIND_STREAM_MESSAGE_EDIT
@@ -4263,6 +4264,7 @@ mod postgres_tests {
     #[test]
     fn channel_scoped_content_kinds_require_h_tags() {
         for kind in [
+            buzz_core::kind::KIND_INTEGRATION_RECORD,
             KIND_STREAM_MESSAGE,
             KIND_STREAM_MESSAGE_DIFF,
             KIND_CANVAS,

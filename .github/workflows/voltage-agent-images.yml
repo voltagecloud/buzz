@@ -9,9 +9,10 @@ name: Voltage images
 #   buzz-agent           voltage/images/buzz-agent/Dockerfile → voltage-buzz-agent-staging
 #   buzz-sandbox-reaper  voltage/images/buzz-sandbox-reaper/Dockerfile → voltage-buzz-sandbox-reaper-staging
 #   buzz-relay           the upstream root Dockerfile (target runtime) → buzz-relay
+#   buzz-ingest          voltage/images/buzz-ingest/Dockerfile → buzz-ingest
 #
 # The changes job selects only the images whose inputs changed. Manual runs
-# (workflow_dispatch) build all three, or only buzz-agent with agent_only.
+# (workflow_dispatch) build all images, or only buzz-agent with agent_only.
 #
 # Trust model: this repository and its logs are public. Pull requests run
 # without AWS access. Only the publish and merge jobs request an OIDC token,
@@ -131,6 +132,15 @@ jobs:
               - 'examples/**'
               - 'voltage/images/buzz-sandbox-reaper/**'
               - '.github/workflows/voltage-agent-images.yml'
+            ingest:
+              - '.cargo/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - 'crates/**'
+              - 'examples/**'
+              - 'voltage/images/buzz-ingest/**'
+              - '.github/workflows/voltage-agent-images.yml'
             relay:
               - 'Dockerfile'
               - '.dockerignore'
@@ -157,16 +167,19 @@ jobs:
           AGENT: ${{ steps.filter.outputs.agent }}
           REAPER: ${{ steps.filter.outputs.reaper }}
           RELAY: ${{ steps.filter.outputs.relay }}
+          INGEST: ${{ steps.filter.outputs.ingest }}
         run: |
           set -euo pipefail
           selected=()
           if [ "$ALL" = true ] || [ "$AGENT_ONLY" = true ] || [ "$AGENT" = true ]; then selected+=(buzz-agent); fi
           if [ "$ALL" = true ] || [ "$REAPER" = true ]; then selected+=(buzz-sandbox-reaper); fi
           if [ "$ALL" = true ] || [ "$RELAY" = true ]; then selected+=(buzz-relay); fi
+          if [ "$ALL" = true ] || [ "$INGEST" = true ]; then selected+=(buzz-ingest); fi
           images='{
             "buzz-agent": {"file": "voltage/images/buzz-agent/Dockerfile", "target": "", "repository": "voltage-buzz-agent-staging"},
             "buzz-sandbox-reaper": {"file": "voltage/images/buzz-sandbox-reaper/Dockerfile", "target": "", "repository": "voltage-buzz-sandbox-reaper-staging"},
-            "buzz-relay": {"file": "Dockerfile", "target": "runtime", "repository": "buzz-relay"}
+            "buzz-relay": {"file": "Dockerfile", "target": "runtime", "repository": "buzz-relay"},
+            "buzz-ingest": {"file": "voltage/images/buzz-ingest/Dockerfile", "target": "", "repository": "buzz-ingest"}
           }'
           platforms='[{"arch": "amd64", "runner": "ubuntu-latest"}, {"arch": "arm64", "runner": "ubuntu-24.04-arm"}]'
           build=$(jq -cn --argjson images "$images" --argjson platforms "$platforms" \
@@ -208,7 +221,7 @@ jobs:
         run: |
           set -euo pipefail
           sh voltage/images/buzz-agent/select-skills.sh --none "$RUNNER_TEMP/engineering-skills"
-          for file in voltage/images/buzz-agent/Dockerfile voltage/images/buzz-sandbox-reaper/Dockerfile Dockerfile; do
+          for file in voltage/images/buzz-agent/Dockerfile voltage/images/buzz-sandbox-reaper/Dockerfile voltage/images/buzz-ingest/Dockerfile Dockerfile; do
             echo "==> $file"
             docker buildx build --check --build-context engineering-skills="$RUNNER_TEMP/engineering-skills" -f "$file" .
           done
@@ -261,6 +274,9 @@ jobs:
           docker run --rm "$IMAGE" --help
           docker run --rm "$IMAGE" reconcile --help
           docker run --rm "$IMAGE" serve --help | grep -- '--mention-launch'
+      - name: Ingest smoke test
+        if: matrix.image == 'buzz-ingest'
+        run: bash voltage/images/buzz-ingest/test-image.sh "$IMAGE"
       - name: Relay smoke test
         if: matrix.image == 'buzz-relay'
         run: bash voltage/images/test-relay-image.sh "$IMAGE"
@@ -414,6 +430,9 @@ jobs:
         run: |
           docker run --rm "$IMAGE" --help
           docker run --rm "$IMAGE" serve --help | grep -- '--mention-launch'
+      - name: Ingest smoke test
+        if: matrix.image == 'buzz-ingest'
+        run: bash voltage/images/buzz-ingest/test-image.sh "$IMAGE"
       - name: Relay smoke test
         if: matrix.image == 'buzz-relay'
         run: bash voltage/images/test-relay-image.sh "$IMAGE"
