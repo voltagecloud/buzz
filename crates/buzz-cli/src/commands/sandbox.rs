@@ -1,4 +1,4 @@
-//! Explicit, owner-approved terminal access through the community relay.
+//! Explicit, owner-approved sandbox access through the community relay.
 
 use std::io::{BufRead, IsTerminal, Read, Write};
 use std::time::Duration;
@@ -13,12 +13,13 @@ use uuid::Uuid;
 
 use crate::{client::BuzzClient, error::CliError};
 
+mod snapshot;
 #[cfg(unix)]
 mod terminal;
 #[cfg(test)]
 mod tests;
 
-/// Owner approvals and interactive sandbox terminals.
+/// Owner approvals, interactive terminals, and read-only sandbox snapshots.
 #[derive(Subcommand)]
 pub enum SandboxCmd {
     /// Validate a local captured bundle before any Git import (internal worker seam)
@@ -26,6 +27,11 @@ pub enum SandboxCmd {
     InspectBundle {
         /// Captured bundle file
         file: std::path::PathBuf,
+    },
+    /// Transfer a read-only snapshot or return a patch through the thread
+    Snapshot {
+        #[command(subcommand)]
+        command: snapshot::SnapshotCmd,
     },
     /// Attach a local TTY; omitted targets are selected from BUZZ_PASEO_AGENTS
     Attach {
@@ -113,29 +119,29 @@ async fn query(client: &BuzzClient, mut filter: Value) -> Result<Vec<Event>, Cli
     filter["consistency"] = json!("strong");
     let result = timeout(Duration::from_secs(5), client.query(&filter))
         .await
-        .map_err(|_| failure("terminal authority query timed out"))??;
+        .map_err(|_| failure("sandbox authority query timed out"))??;
     if result.len() > 2 * 1024 * 1024 {
-        return Err(failure("terminal query exceeded response budget"));
+        return Err(failure("sandbox query exceeded response budget"));
     }
     let events: Vec<Event> = serde_json::from_str(&result).map_err(failure)?;
     let limit = filter["limit"].as_u64().unwrap_or(1) as usize;
     if events.len() > limit || events.iter().any(|event| event.verify().is_err()) {
-        return Err(failure("invalid terminal query response"));
+        return Err(failure("invalid sandbox query response"));
     }
     Ok(events)
 }
 async fn one(client: &BuzzClient, filter: Value) -> Result<Event, CliError> {
     let mut events = query(client, filter).await?;
     if events.len() != 1 {
-        return Err(failure("terminal authority is absent or ambiguous"));
+        return Err(failure("sandbox authority is absent or ambiguous"));
     }
     Ok(events.remove(0))
 }
 async fn publish(client: &BuzzClient, event: Event) -> Result<(), CliError> {
     let response = timeout(Duration::from_secs(5), client.submit_event(event))
         .await
-        .map_err(|_| failure("terminal publish timed out; acceptance is unknown"))??;
-    super::parse_write_response(&response, "terminal metadata changed concurrently")?;
+        .map_err(|_| failure("sandbox publish timed out; acceptance is unknown"))??;
+    super::parse_write_response(&response, "sandbox metadata changed concurrently")?;
     Ok(())
 }
 async fn relay_key(client: &BuzzClient) -> Result<PublicKey, CliError> {
@@ -176,7 +182,7 @@ async fn authorized(
     }).await.map_err(|_| failure("terminal authorization refresh timed out"))?
 }
 
-/// Execute a terminal command. Hosted gateways cannot sign owner approvals.
+/// Execute sandbox commands. Hosted gateways cannot sign owner approvals.
 pub async fn dispatch(command: SandboxCmd, client: &BuzzClient) -> Result<(), CliError> {
     let ws_url = websocket_url(client.relay_url())?;
     if client.auth_tag_owner_hex().is_some() {
@@ -186,6 +192,7 @@ pub async fn dispatch(command: SandboxCmd, client: &BuzzClient) -> Result<(), Cl
     }
     match command {
         SandboxCmd::InspectBundle { file } => inspect_bundle_cmd(&file),
+        SandboxCmd::Snapshot { command } => snapshot::dispatch(command, client).await,
         SandboxCmd::Authorize { request, minutes } => {
             let event = one(client, json!({"ids":[request],"kinds":[30624],"limit":1})).await?;
             if event.id != request {
@@ -247,7 +254,7 @@ pub async fn dispatch(command: SandboxCmd, client: &BuzzClient) -> Result<(), Cl
             }
             let channel = tag(&event, "h").ok_or_else(|| failure("approval has no channel"))?;
             let builder =
-                nostr::EventBuilder::new(nostr::Kind::EventDeletion, "terminal approval revoked")
+                nostr::EventBuilder::new(nostr::Kind::EventDeletion, "sandbox approval revoked")
                     .tags([
                         nostr::Tag::parse(["e", &grant.to_hex()]).map_err(failure)?,
                         nostr::Tag::parse(["h", channel]).map_err(failure)?,

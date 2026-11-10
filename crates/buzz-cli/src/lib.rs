@@ -268,7 +268,7 @@ enum Cmd {
     /// Delegate a separate key to drive your remote agents
     #[command(subcommand)]
     Gateway(GatewayCmd),
-    /// Attach to an explicitly owner-approved sandbox terminal
+    /// Use owner-approved sandbox terminals and read-only snapshots
     #[command(subcommand)]
     Sandbox(commands::sandbox::SandboxCmd),
     /// Send, read, search, and manage messages

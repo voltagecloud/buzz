@@ -1,6 +1,8 @@
 use std::future::Future;
 use std::time::Duration;
 
+mod snapshot;
+
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag};

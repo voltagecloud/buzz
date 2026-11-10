@@ -4,6 +4,10 @@ Manual testing runbook for verifying every CLI command against a local relay.
 An agent or developer follows this step by step, running each command and
 checking the output.
 
+For owner-approved snapshot transfer and patch return, use the
+[snapshot CLI runbook](../../docs/sandbox-snapshot-cli.md). That workflow requires
+an HTTPS relay, a snapshot-capable sandbox, and separate owner approval.
+
 ---
 
 ## 1. Prerequisites
