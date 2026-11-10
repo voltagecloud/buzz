@@ -977,10 +977,36 @@ async fn should_fire_workflow(
         }
     }
 
+    if let TriggerDef::IntegrationEvent {
+        source,
+        action,
+        authors,
+        ..
+    } = &def.trigger
+    {
+        // Source tags are signer-controlled. Only a named publisher may drive
+        // this workflow; a channel member cannot spoof an integration source.
+        if !authors
+            .iter()
+            .any(|author| author.eq_ignore_ascii_case(&trigger_ctx.author))
+            || trigger_ctx.webhook_fields.get("source") != Some(source)
+            || trigger_ctx
+                .webhook_fields
+                .get("action")
+                .is_none_or(String::is_empty)
+            || action
+                .as_ref()
+                .is_some_and(|expected| trigger_ctx.webhook_fields.get("action") != Some(expected))
+        {
+            return false;
+        }
+    }
+
     let filter = match &def.trigger {
         TriggerDef::MessagePosted { filter }
         | TriggerDef::ReactionAdded { filter, .. }
-        | TriggerDef::DiffPosted { filter } => filter.as_ref(),
+        | TriggerDef::DiffPosted { filter }
+        | TriggerDef::IntegrationEvent { filter, .. } => filter.as_ref(),
         TriggerDef::Schedule { .. } | TriggerDef::Webhook => None,
     };
     if let Some(expr) = filter {
@@ -1075,7 +1101,9 @@ pub fn build_trigger_context(event: &buzz_core::StoredEvent) -> executor::Trigge
         emoji,
         message_id,
         is_reply: event_is_reply(&event.event),
-        webhook_fields: HashMap::new(),
+        webhook_fields: buzz_core::integration::ext_fields(&event.event.tags)
+            .into_iter()
+            .collect(),
     }
 }
 
@@ -1120,13 +1148,18 @@ fn owner_authority_allows(role: Option<&str>, needs_elevated: bool) -> bool {
 fn trigger_matches_event(trigger: &TriggerDef, kind_u32: u32) -> bool {
     use buzz_core::kind::{KIND_REACTION, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_DIFF};
     match trigger {
-        TriggerDef::MessagePosted { .. } => kind_u32 == KIND_STREAM_MESSAGE,
+        TriggerDef::MessagePosted { .. } | TriggerDef::IntegrationEvent { .. } => {
+            kind_u32 == KIND_STREAM_MESSAGE
+        }
         TriggerDef::ReactionAdded { .. } => kind_u32 == KIND_REACTION,
         TriggerDef::DiffPosted { .. } => kind_u32 == KIND_STREAM_MESSAGE_DIFF,
         // Schedule and Webhook triggers are not fired by channel events.
         TriggerDef::Schedule { .. } | TriggerDef::Webhook => false,
     }
 }
+
+#[cfg(test)]
+mod integration_tests;
 
 #[cfg(test)]
 mod postgres_tests {

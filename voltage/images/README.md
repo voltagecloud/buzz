@@ -11,10 +11,11 @@ The same workflow also builds the Buzz relay image from the upstream root `Docke
 | [buzz-agent](buzz-agent/README.md) | Remote developer agent Sandbox: the `sprig` harness, Codex and Claude ACP adapters, and developer tools. It also runs as the `buzz-agent-gate` DaemonSet. | `voltage-buzz-agent-staging` |
 | [buzz-sandbox-reaper](buzz-sandbox-reaper/Dockerfile) | In-cluster reaper for ended and orphaned agent Sandboxes (`buzz-sandbox-reaper reconcile`) | `voltage-buzz-sandbox-reaper-staging` |
 | [buzz-relay](#the-relay-image) | Buzz relay, admin, and pair relay binaries with the web bundles, from the root `Dockerfile` | `buzz-relay` |
+| [buzz-ingest](../../crates/buzz-ingest/README.md) | Verified GitHub, Linear, and public Slack webhooks, stored as Buzz threads | `buzz-ingest` (provision before publication) |
 
 Each image compiles the Buzz crates of the commit it is built from.
 The build context is the repository root.
-For the two agent images, BuildKit reads the `Dockerfile.dockerignore` next to each Dockerfile instead of the root `.dockerignore`.
+For the Voltage images, BuildKit reads the `Dockerfile.dockerignore` next to each Dockerfile instead of the root `.dockerignore`.
 These files keep only the Cargo workspace and, for `buzz-agent`, the files that its Dockerfile copies from `voltage/images/buzz-agent`.
 
 ## Publishing
@@ -33,7 +34,9 @@ Its first job selects only the images whose inputs changed; manual runs build al
 
 The voltage-terraform `v2/environments/staging` root creates the two agent ECR repositories; `v2/environments/prod` creates `buzz-relay`.
 Publishing assumes the `github-buzz-ecr-push` IAM role (voltage-terraform `v2/environments/github`).
-The role trusts only `repo:voltagecloud/buzz:ref:refs/heads/main` and can push to and read only these three repositories.
+The role trusts only `repo:voltagecloud/buzz:ref:refs/heads/main`.
+Provision `buzz-ingest` in prod and add it to this role before publishing the new sidecar.
+The existing three repository grants remain unchanged by this source PR.
 The repository secret `AWS_ACCOUNT_ID` supplies the account ID, so the account ID is not in the repository and is masked in the public logs.
 
 ## Deploying a digest
