@@ -364,6 +364,9 @@ def pack(workspace, output, work_bytes=512 * 1024 * 1024):
     cp = checkpoint()
     workspace = Path(workspace).resolve(strict=True)
     output = Path(output)
+    output = output.parent.resolve(strict=True) / output.name
+    if output.parent.is_relative_to(workspace) and not cp.excluded(output.parent.relative_to(workspace)):
+        raise ValueError('Snapshot output parent must be outside its source or checkpoint-excluded')
     if output.exists() or output.is_symlink():
         raise ValueError('Snapshot output already exists')
     repos = discover(workspace, cp)
@@ -372,7 +375,7 @@ def pack(workspace, output, work_bytes=512 * 1024 * 1024):
     total = expanded = objects_count = refs_count = 0
     count = 0
     manifest = {'version': 1, 'snapshot': True, 'scanned': True, 'repositories': []}
-    with tempfile.TemporaryDirectory(prefix='buzz-snapshot-') as temp:
+    with tempfile.TemporaryDirectory(prefix='buzz-snapshot-', dir=output.parent) as temp:
         work = Work(temp, work_bytes)
         stage = Path(temp) / 'snapshot'
         review = Path(temp) / 'review'
@@ -443,7 +446,12 @@ def pack(workspace, output, work_bytes=512 * 1024 * 1024):
                 if stop < 0:
                     raise Budget('Snapshot bundle header exceeds budget')
                 (object_review / 'references').write_bytes(value[:stop])
-                names = cp.git(repo, 'ls-files', '-z', '--cached', '--others', '--exclude-standard')
+                listing = ['ls-files', '-z', '--cached', '--others', '--exclude-standard']
+                source_root = repo.resolve()
+                if output.parent.is_relative_to(source_root):
+                    private_job = output.parent.relative_to(source_root).as_posix()
+                    listing += ['--', '.', ':(top,exclude,literal)' + private_job]
+                names = cp.git(repo, *listing)
                 for raw in sorted(set(names.split(b'\0')) - {b''}):
                     name = os.fsdecode(raw)
                     directory_marker = name.endswith('/')

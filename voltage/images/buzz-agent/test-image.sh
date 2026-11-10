@@ -53,4 +53,5 @@ docker run --rm --tmpfs /home/agent:uid=10001,gid=10001,mode=0700 \
   '
 python3 "$(dirname "$0")/test-review.py" "$IMAGE"
 python3 "$(dirname "$0")/test-snapshot.py" "$IMAGE"
+python3 "$(dirname "$0")/test-snapshot-scratch.py" "$IMAGE"
 printf 'PASS: agent adapter packaging and unauthenticated ACP initialization (%s)\n' "$IMAGE"
