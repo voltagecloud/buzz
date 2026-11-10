@@ -134,7 +134,7 @@ impl Fixture {
         std::fs::write(
             &executable,
             r#"#!/usr/bin/env python3
-import os, sys, signal
+import os, sys, signal, json
 os.chdir(sys.argv[2])
 with open('marker', 'w') as marker: marker.write('spawned')
 def end(*_):
@@ -143,7 +143,10 @@ def end(*_):
 signal.signal(signal.SIGTERM, end)
 sys.stdin.readline()
 print('{"type":"ready"}', flush=True)
-for _ in sys.stdin: pass
+for line in sys.stdin:
+    packet = json.loads(line)
+    if packet.get('type') == 'data':
+        print(json.dumps({'type':'packet', 'packet':packet}), flush=True)
 end()
 "#,
         )
@@ -540,4 +543,181 @@ async fn harness_shutdown_propagates_unconfirmed_containment_and_task_panics() {
     let panic: tokio::task::JoinHandle<Result<()>> =
         tokio::spawn(async { panic!("deliberate terminal task panic") });
     assert!(crate::sandbox_terminal::stop(Some(panic)).await.is_err());
+}
+
+struct EngineRelay {
+    url: String,
+    inject: tokio::sync::mpsc::Sender<Event>,
+    events: tokio::sync::mpsc::Receiver<Event>,
+    ready: tokio::sync::oneshot::Receiver<()>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+async fn engine_relay(agent: PublicKey) -> EngineRelay {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    let (inject, mut injected) = tokio::sync::mpsc::channel::<Event>(16);
+    let (events_tx, events) = tokio::sync::mpsc::channel(16);
+    let (ready_tx, ready) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+        ws.send(Message::Text(
+            json!(["AUTH", "terminal-engine-fixture"])
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+        let mut ready = Some(ready_tx);
+        loop {
+            tokio::select! {
+                message=ws.next()=>{
+                    let Some(Ok(Message::Text(text)))=message else {break};
+                    let value:Value=serde_json::from_str(&text).unwrap();
+                    match value[0].as_str() {
+                        Some("AUTH")=>{
+                            let event:Event=serde_json::from_value(value[1].clone()).unwrap();
+                            assert_eq!(event.pubkey,agent);
+                            event.verify().unwrap();
+                            ws.send(Message::Text(json!(["OK",event.id,true,""]).to_string().into())).await.unwrap();
+                        }
+                        Some("REQ")=>{if let Some(ready)=ready.take(){let _=ready.send(());}},
+                        Some("EVENT")=>{
+                            let event:Event=serde_json::from_value(value[1].clone()).unwrap();
+                            event.verify().unwrap();
+                            if event.kind.as_u16()==30624 {
+                                let body:Value=serde_json::from_str(&event.content).unwrap();
+                                let receipt=if body["status"]=="accepted" {attach::CLAIM_OK_MESSAGE}else{"saved"};
+                                ws.send(Message::Text(json!(["OK",event.id,true,receipt]).to_string().into())).await.unwrap();
+                            } else {events_tx.send(event).await.unwrap();}
+                        }
+                        _=>{},
+                    }
+                }
+                Some(event)=injected.recv()=>{
+                    ws.send(Message::Text(json!(["EVENT",SUBSCRIPTION,event]).to_string().into())).await.unwrap();
+                }
+            }
+        }
+    });
+    EngineRelay {
+        url,
+        inject,
+        events,
+        ready,
+        task,
+    }
+}
+
+#[tokio::test]
+async fn production_engine_delivers_a_full_sdk_data_packet_through_worker_ipc() {
+    let f = Fixture::new(false).await;
+    let mut relay = engine_relay(f.config.scope.agent).await;
+    let mut config = f.config.clone();
+    config.relay = relay.url.clone();
+    let rest = f.rest.clone();
+    let (shutdown_tx, shutdown) = watch::channel(());
+    let service = tokio::spawn(serve(config, rest, shutdown));
+    let bytes = vec![0xff; attach::MAX_DATA_BYTES];
+    let journey = timeout(Duration::from_secs(5), async {
+        (&mut relay.ready).await.unwrap();
+        relay.inject.send(f.open_event()).await.unwrap();
+        loop {
+            let event = relay.events.recv().await.unwrap();
+            let frame = attach::decrypt(
+                &f.requester,
+                f.config.scope.agent,
+                f.config.scope,
+                f.approval.id,
+                &event,
+                Timestamp::now().as_secs(),
+            )
+            .unwrap();
+            if frame.ack >= 1 {
+                break;
+            }
+        }
+        let data = attach::encrypt(
+            &f.requester,
+            f.config.scope.agent,
+            f.config.scope,
+            &Frame {
+                grant: f.approval.id,
+                seq: 2,
+                ack: 0,
+                packet: Packet::data(&bytes).unwrap(),
+            },
+        )
+        .unwrap();
+        assert!(
+            data.content.len() > 32 * 1024,
+            "fixture did not cross the old encrypted-content guard"
+        );
+        relay.inject.send(data).await.unwrap();
+        loop {
+            let event = relay.events.recv().await.unwrap();
+            let frame = attach::decrypt(
+                &f.requester,
+                f.config.scope.agent,
+                f.config.scope,
+                f.approval.id,
+                &event,
+                Timestamp::now().as_secs(),
+            )
+            .unwrap();
+            if matches!(frame.packet, Packet::Data { .. }) {
+                assert_eq!(frame.packet.bytes().unwrap(), bytes);
+                break;
+            }
+        }
+    })
+    .await;
+    // Always confirm cleanup before asserting, including with the old guard
+    // restored by a mutation that deliberately prevents the packet's delivery.
+    shutdown_tx.send(()).unwrap();
+    let stopped = timeout(Duration::from_secs(5), service).await;
+    relay.task.abort();
+    assert!(stopped.unwrap().unwrap().is_ok());
+    assert!(
+        journey.is_ok(),
+        "maximum SDK packet never reached/returned from the worker"
+    );
+    let record = f.journal().records().unwrap().remove(0);
+    assert_eq!(record.bytes_in, attach::MAX_DATA_BYTES as u64);
+    assert_eq!(record.bytes_out, attach::MAX_DATA_BYTES as u64);
+}
+
+#[test]
+fn production_admission_rejects_oversize_before_crypto_without_spending_rate_budget() {
+    let (owner, agent) = (Keys::generate(), Keys::generate());
+    let scope = Scope {
+        channel: Uuid::new_v4(),
+        thread: EventId::all_zeros(),
+        agent: agent.public_key(),
+    };
+    let event = attach::encrypt(
+        &owner,
+        scope.agent,
+        scope,
+        &Frame {
+            grant: EventId::all_zeros(),
+            seq: u64::MAX,
+            ack: u64::MAX,
+            packet: Packet::data(&vec![0xff; attach::MAX_DATA_BYTES]).unwrap(),
+        },
+    )
+    .unwrap();
+    assert!(event.content.len() > 32 * 1024);
+    assert!(event.content.len() <= buzz_core::observer::NIP44_MAX_CONTENT_LEN);
+    let mut oversized = event.clone();
+    oversized.content = "z".repeat(buzz_core::observer::NIP44_MAX_CONTENT_LEN + 1);
+    let mut budget = Rate::default();
+    // This deliberately has an invalid signature: the production gate only
+    // inspects size/admission and cannot invoke signature/decryption work.
+    assert!(!frame_admitted(&oversized, &mut budget, 0));
+    for _ in 0..attach::MAX_FRAMES_PER_SECOND {
+        assert!(frame_admitted(&event, &mut budget, 0));
+    }
+    assert!(!frame_admitted(&event, &mut budget, 0));
 }

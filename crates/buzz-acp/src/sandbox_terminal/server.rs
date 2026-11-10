@@ -24,6 +24,7 @@ const IDLE: Duration = Duration::from_secs(300);
 const DRAIN: Duration = Duration::from_secs(6);
 const SUBSCRIPTION: &str = "sandbox-terminal";
 
+#[derive(Clone)]
 pub(super) struct Config {
     pub(super) relay: String,
     pub(super) keys: Keys,
@@ -108,6 +109,13 @@ struct RefreshResult {
 
 fn elapsed(start: Instant) -> u64 {
     u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+fn frame_admitted(event: &Event, budget: &mut Rate, ms: u64) -> bool {
+    // NIP44 padding/base64 can exceed twice the decoded packet budget. Use
+    // the shared codec's bounded envelope before any signature/decryption;
+    // Packet::bytes separately enforces the 16KiB decoded data limit.
+    buzz_core::observer::content_looks_like_nip44(&event.content) && budget.allow(ms)
 }
 
 fn authority_deadline(grant: &Grant, checked_at: Instant) -> Instant {
@@ -223,7 +231,7 @@ async fn open(
     // Bound ciphertext before decryption. The second typed decryption binds
     // the discovered approval ID to the complete signed envelope.
     ensure!(
-        event.content.len() <= 32 * 1024 && event.verify().is_ok(),
+        buzz_core::observer::content_looks_like_nip44(&event.content) && event.verify().is_ok(),
         "invalid terminal open"
     );
     let discovered: Frame = buzz_core::observer::decrypt_observer_payload(&config.keys, event)?;
@@ -421,7 +429,7 @@ async fn run(config: &Config, rest: &RestClient, mut shutdown: watch::Receiver<(
                         RelayMessage::Closed { subscription_id, .. } if subscription_id == SUBSCRIPTION => bail!("terminal subscription closed"),
                         RelayMessage::Event { subscription_id, event } if subscription_id == SUBSCRIPTION => {
                             let ms = elapsed(start);
-                            if event.content.len() > 32 * 1024 || !incoming.allow(ms) { continue; }
+                            if !frame_admitted(&event, &mut incoming, ms) { continue; }
                             if let Some(session) = &mut active {
                                 if event.pubkey != session.grant.requester() { continue; }
                                 let Ok(frame) = attach::decrypt(&config.keys, event.pubkey, config.scope, session.grant.id(), &event, Timestamp::now().as_secs()) else { continue; };

@@ -52,6 +52,8 @@ The journal caps records at 256 and each record at 16 KiB.
 
 One terminal runs per bound sandbox.
 Frames use recipient-encrypted NIP-44 payloads, four-frame windows, 16 KiB data packets, and a 64-frame-per-second budget.
+Encrypted content uses the shared NIP-44 envelope bound of 87,472 bytes before cryptographic work.
+The decoded data limit remains 16 KiB; padding and base64 make a full SDK packet exceed 32 KiB on the wire.
 Reliable empty heartbeats run every five seconds without resetting idle expiry.
 Five failed one-second retries close the transport; idle peer disappearance can therefore take about eleven seconds to detect.
 Actual input, resize, or output resets the five-minute idle deadline.
