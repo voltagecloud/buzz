@@ -107,6 +107,12 @@ The defining constraint, stated as a design axiom:
   requires a channel to the substrate. The price is the staleness bounds in
   §Presence.
 
+  Owner-approved [terminal attachment](sandbox-attach-cli.md) also uses only
+  relay events: stored session metadata and ephemeral encrypted frames. It
+  expands relay protocol surface without a substrate exec or tunnel. Runtime
+  and CLI consumers must both be available; a gateway delegation alone does
+  not authorize a shell.
+
 An agent's identity is a Nostr keypair. The **agent record** on `D` carries:
 `name`, `relay_url`, the nsec (keyring-hydrated), the NIP-OA `auth` tag
 attesting owner authorization, `agent_command`/`agent_args` (the ACP agent the

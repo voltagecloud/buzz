@@ -266,6 +266,9 @@ enum Cmd {
     /// Delegate a separate key to drive your remote agents
     #[command(subcommand)]
     Gateway(GatewayCmd),
+    /// Attach to an explicitly owner-approved sandbox terminal
+    #[command(subcommand)]
+    Sandbox(commands::sandbox::SandboxCmd),
     /// Send, read, search, and manage messages
     #[command(subcommand)]
     Messages(MessagesCmd),
@@ -2340,6 +2343,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
     match cli.command {
         Cmd::Agents(sub) => commands::agents::dispatch(sub, &client).await,
         Cmd::Gateway(sub) => commands::gateway::dispatch(sub, &client).await,
+        Cmd::Sandbox(sub) => commands::sandbox::dispatch(sub, &client).await,
         Cmd::Messages(sub) => commands::messages::dispatch(sub, &client, &cli.format).await,
         Cmd::Channels(sub) => commands::channels::dispatch(sub, &client, &cli.format).await,
         Cmd::Canvas(sub) => commands::channels::dispatch_canvas(sub, &client).await,
@@ -2550,6 +2554,7 @@ mod tests {
             "projects",
             "reactions",
             "repos",
+            "sandbox",
             "social",
             "upload",
             "users",
