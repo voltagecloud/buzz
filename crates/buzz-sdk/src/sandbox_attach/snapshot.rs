@@ -3,10 +3,14 @@ use super::*;
 
 /// Bounded, non-writing preflight for self-contained Git bundles.
 pub mod archive;
+mod end;
+/// Durable metadata for planned and confirmed/ambiguous ciphertext uploads.
+pub mod upload;
 use chacha20poly1305::{
     aead::{Aead, Payload},
     KeyInit, XChaCha20Poly1305, XNonce,
 };
+pub use end::End;
 use nostr::hashes::{sha256, Hash};
 
 /// Largest ciphertext blob, matching the default generic Blossom file budget.

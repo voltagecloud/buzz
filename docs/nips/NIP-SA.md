@@ -27,6 +27,21 @@ Its NIP-44 content contains version 1, approval ID, expiry, ciphertext SHA-256, 
 Its expiration tag matches the approval expiry.
 The requester verifies the agent signature, recipient, scope, approval ID, expiry, size, and ciphertext hash before decrypting.
 
+Upload recovery uses separate agent-signed `snapshot:<session>:upload` and `snapshot:<session>:upload-outcome` coordinates.
+The upload intent records the exact acceptance event, owner approval, ciphertext SHA-256, size, and approval expiry before any PUT.
+It contains no blob key or nonce and has no NIP-40 expiration.
+The outcome records `uploaded` or `unconfirmed` without replacing that intent.
+An unconfirmed operation can have committed ciphertext; consumers must not report remote erasure or retry the PUT automatically.
+The SDK validates historical upload metadata independently of current access.
+The typed `snapshot::End` parser validates the exact agent, approval, scope, byte count, and optional failure category.
+Completion records can arrive after approval expiry and never authorize retrieval.
+
+The current media API has no deletion or expiry operation.
+Existing upload size, rate, and concurrency limits do not provide a retained-byte quota or a retention deadline.
+Ciphertext can remain indefinitely under the existing media retention policy.
+Operators can use durable upload metadata to identify retained or ambiguous objects after sandbox loss.
+Receipt expiry prevents new protocol transfers; it does not erase media or copies already downloaded.
+
 Blob bytes start with `BUZZSNAP1` followed by a NUL, then XChaCha20-Poly1305 ciphertext and authentication tag.
 Every blob uses a fresh random 32-byte key and 24-byte nonce.
 Associated data is the canonical JSON tuple of approval ID, scope, and requester.
