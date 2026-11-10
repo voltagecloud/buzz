@@ -57,6 +57,8 @@ pub(crate) mod nip_fi_http;
 pub mod nip_fi_resolver;
 /// Deployment-global operator-listener mention delivery worker.
 pub mod operator_listener;
+/// Paseo relay protocol on `/ws`, for Paseo daemons and their clients.
+pub mod paseo_relay;
 /// NIP-01 client/relay message parsing.
 pub mod protocol;
 /// Durable NIP-PL matcher and delivery worker.

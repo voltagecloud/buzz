@@ -190,6 +190,10 @@ pub struct Config {
     pub require_auth_token: bool,
     /// Opt-in private accessory API; disabled until explicitly deployed.
     pub buzz_v1_enabled: bool,
+    /// Serve the Paseo relay protocol on `/ws` (`BUZZ_PASEO_RELAY_ENABLED`);
+    /// disabled by default. Requires a `wss://` `RELAY_URL`. See
+    /// [`crate::paseo_relay`].
+    pub paseo_relay_enabled: bool,
     /// Author-time unread tracking duration, independent of NIP-RS retention.
     pub buzz_v1_retention_seconds: u32,
     /// Comma-separated list of allowed CORS origins.
@@ -445,6 +449,20 @@ fn invite_v1_cutoff_from_env() -> Result<Option<u64>, ConfigError> {
             "BUZZ_INVITE_V1_INVALID_AFTER must be valid Unicode".into(),
         )),
     }
+}
+
+/// Paseo daemons and apps must reach `/ws` over TLS: the `serverId` in its
+/// query works as a capability, so plain `ws://` would expose it. The relay
+/// serves plain HTTP behind the deployment's TLS front, so the public
+/// `RELAY_URL` scheme is the deployment's statement that TLS is in place.
+fn check_paseo_relay_transport(relay_url: &str) -> Result<(), ConfigError> {
+    if relay_url.starts_with("wss://") {
+        return Ok(());
+    }
+    Err(ConfigError::InvalidValue(
+        "BUZZ_PASEO_RELAY_ENABLED requires a wss:// RELAY_URL; Paseo traffic never uses plain ws://"
+            .into(),
+    ))
 }
 
 /// An empty value turns the setting off; header names match case-insensitively.
@@ -1434,6 +1452,11 @@ impl Config {
         }
 
         let buzz_v1_enabled = std::env::var("BUZZ_V1_ENABLED").is_ok_and(|v| v == "true");
+        let paseo_relay_enabled =
+            std::env::var("BUZZ_PASEO_RELAY_ENABLED").is_ok_and(|v| v == "true");
+        if paseo_relay_enabled {
+            check_paseo_relay_transport(&relay_url)?;
+        }
         // Read only when enabled: a disabled relay ignores every v1 setting.
         let buzz_v1_retention_seconds = match std::env::var("BUZZ_V1_RETENTION_SECONDS") {
             Ok(v) if buzz_v1_enabled => v.parse().ok().filter(|s| *s > 0).ok_or_else(|| {
@@ -1477,6 +1500,7 @@ impl Config {
             auth,
             require_auth_token,
             buzz_v1_enabled,
+            paseo_relay_enabled,
             buzz_v1_retention_seconds,
             cors_origins,
             relay_private_key,
@@ -1560,6 +1584,22 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_paseo_relay_requires_a_tls_relay_url() {
+        for (relay_url, ok) in [
+            ("wss://buzz.voltage.cloud", true),
+            ("wss://localhost:3443", true),
+            ("ws://localhost:3000", false),
+            ("https://buzz.voltage.cloud", false),
+        ] {
+            assert_eq!(
+                check_paseo_relay_transport(relay_url).is_ok(),
+                ok,
+                "{relay_url}"
+            );
+        }
+    }
 
     #[test]
     fn klipy_config_debug_redacts_the_api_key() {

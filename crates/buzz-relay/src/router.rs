@@ -384,6 +384,24 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .buzz_v1_enabled
         .then(|| Router::new().nest(api::buzz_v1::BASE_PATH, api::buzz_v1::router(state.clone())));
 
+    // Unmounted when disabled, so `/ws` answers exactly as before.
+    let paseo_router = state.config.paseo_relay_enabled.then(|| {
+        let hub = Arc::new(crate::paseo_relay::Hub::default());
+        let cluster = crate::paseo_relay::Cluster::start(
+            Arc::clone(&hub),
+            state.redis_pool.clone(),
+            state.config.redis_url.clone(),
+        );
+        cluster.drain_on(state.shutdown.clone());
+        Router::new()
+            .route("/ws", get(crate::paseo_relay::ws_handler))
+            .with_state(crate::paseo_relay::RelayState {
+                app: state.clone(),
+                hub,
+                cluster,
+            })
+    });
+
     let api_router = Router::new()
         // WebSocket + NIP-11
         .route("/", get(nip11_or_ws_handler))
@@ -495,7 +513,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .merge(media_router)
         .merge(git_router)
         .merge(git_policy_router);
-    for optional in [accessory_router, admin_router].into_iter().flatten() {
+    for optional in [accessory_router, admin_router, paseo_router]
+        .into_iter()
+        .flatten()
+    {
         merged = merged.merge(optional);
     }
 
@@ -1369,6 +1390,53 @@ mod tests {
             media_storage,
         );
         Arc::new(state)
+    }
+
+    /// `/ws` exists only when `BUZZ_PASEO_RELAY_ENABLED` is on: off, it
+    /// answers like any unknown path; on, a malformed query reaches the Paseo
+    /// relay's own validation before any host lookup, and a draining relay
+    /// refuses the socket.
+    #[tokio::test]
+    async fn the_paseo_relay_route_is_mounted_only_when_enabled() {
+        async fn status(enabled: bool, path: &str) -> StatusCode {
+            status_while(enabled, false, path).await
+        }
+        async fn status_while(enabled: bool, shutting_down: bool, path: &str) -> StatusCode {
+            let mut state = unreachable_dependency_state().await;
+            Arc::make_mut(&mut Arc::get_mut(&mut state).expect("sole reference").config)
+                .paseo_relay_enabled = enabled;
+            state
+                .shutting_down
+                .store(shutting_down, std::sync::atomic::Ordering::Release);
+            build_router(state)
+                .oneshot(
+                    Request::get(path)
+                        .header(axum::http::header::HOST, "localhost:3000")
+                        .header(axum::http::header::CONNECTION, "upgrade")
+                        .header(axum::http::header::UPGRADE, "websocket")
+                        .header(axum::http::header::SEC_WEBSOCKET_VERSION, "13")
+                        .header(
+                            axum::http::header::SEC_WEBSOCKET_KEY,
+                            "dGhlIHNhbXBsZSBub25jZQ==",
+                        )
+                        .body(Body::empty())
+                        .expect("ws request"),
+                )
+                .await
+                .expect("ws response")
+                .status()
+        }
+        let query = "/ws?serverId=s&role=server&v=1";
+        assert_eq!(
+            status(false, query).await,
+            status(false, "/not-a-route").await
+        );
+        assert_eq!(status(true, query).await, StatusCode::BAD_REQUEST);
+        let valid = "/ws?serverId=s&role=server&v=2";
+        assert_eq!(
+            status_while(true, true, valid).await,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
     }
 
     async fn readiness_request(router: Router) -> (StatusCode, serde_json::Value) {

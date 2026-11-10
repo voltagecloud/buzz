@@ -1416,6 +1416,9 @@ pub struct AppState {
     pub community_revalidator_cancel: CancellationToken,
     /// Cancels push claims and in-flight delivery on process shutdown.
     pub push_cancel: CancellationToken,
+    /// Cancelled when graceful shutdown begins, for subsystems that hand off
+    /// work to other replicas (the Paseo relay releases its servers).
+    pub shutdown: CancellationToken,
     /// Test/telemetry counter for archive disconnect publication attempts.
     pub community_disconnect_publish_attempts: Arc<AtomicU64>,
     /// Semaphore limiting total concurrent connections.
@@ -1767,6 +1770,7 @@ impl AppState {
             community_connections: Arc::new(CommunityConnectionRegistry::new()),
             community_revalidator_cancel: CancellationToken::new(),
             push_cancel: CancellationToken::new(),
+            shutdown: CancellationToken::new(),
             community_disconnect_publish_attempts: Arc::new(AtomicU64::new(0)),
             conn_semaphore: Arc::new(Semaphore::new(max_connections)),
             handler_semaphore: Arc::new(Semaphore::new(max_concurrent_handlers)),
@@ -1922,6 +1926,7 @@ impl AppState {
     pub fn begin_shutdown(&self) {
         self.shutting_down.store(true, Ordering::Release);
         self.push_cancel.cancel();
+        self.shutdown.cancel();
         self.db.cancel_push_enqueue();
     }
 
