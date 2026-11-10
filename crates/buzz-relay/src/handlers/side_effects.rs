@@ -1579,7 +1579,7 @@ fn group_state_identity_tags(
     )?)
 }
 
-fn group_members_tags(
+pub(crate) fn group_members_tags(
     group_id: &str,
     identity: Option<&buzz_db::channel::ChannelIdentity>,
     members: &[MemberRecord],
@@ -1598,7 +1598,7 @@ fn group_members_tags(
     Ok(tags)
 }
 
-async fn store_group_members_event(
+pub(crate) async fn store_group_members_event(
     state: &Arc<AppState>,
     member_snapshot: &mut buzz_db::channel::LockedMemberSnapshot,
 ) -> anyhow::Result<Option<buzz_core::StoredEvent>> {

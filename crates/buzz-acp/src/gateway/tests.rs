@@ -16,7 +16,18 @@ pub(crate) struct FakeRelay {
     pub(crate) fail: Arc<AtomicBool>,
     pub(crate) queries: Arc<AtomicUsize>,
     pub(crate) rest: RestClient,
+    pub(crate) members: Arc<Mutex<Vec<PublicKey>>>,
     task: tokio::task::JoinHandle<()>,
+}
+
+impl FakeRelay {
+    fn admit(&self, members: &[PublicKey]) {
+        *self.members.lock().unwrap() = members.to_vec();
+    }
+}
+
+fn channel() -> uuid::Uuid {
+    "0b6c1f0e-2a7d-4c1e-9f3a-5d2b8e4c7a10".parse().unwrap()
 }
 
 impl Drop for FakeRelay {
@@ -31,14 +42,16 @@ pub(crate) async fn fake_relay() -> FakeRelay {
     let base_url = format!("http://{}", listener.local_addr().unwrap());
     let heads = Arc::new(Mutex::new(Vec::<Event>::new()));
     let profiles = Arc::new(Mutex::new(Vec::<Event>::new()));
+    let members = Arc::new(Mutex::new(Vec::<PublicKey>::new()));
     let fail = Arc::new(AtomicBool::new(false));
     let queries = Arc::new(AtomicUsize::new(0));
     let task = {
-        let (heads, profiles, fail, queries) = (
+        let (heads, profiles, fail, queries, members) = (
             heads.clone(),
             profiles.clone(),
             fail.clone(),
             queries.clone(),
+            members.clone(),
         );
         tokio::spawn(async move {
             loop {
@@ -81,7 +94,10 @@ pub(crate) async fn fake_relay() -> FakeRelay {
                             .is_ok_and(|(grant, _)| authors.contains(&json!(grant.gateway)))
                     })
                 });
-                if filter["kinds"] == json!([30181]) || gateway_profile_read {
+                if filter["kinds"] == json!([30181])
+                    || filter["kinds"] == json!([39002])
+                    || gateway_profile_read
+                {
                     assert_eq!(
                         filter["consistency"],
                         json!("strong"),
@@ -90,6 +106,22 @@ pub(crate) async fn fake_relay() -> FakeRelay {
                 }
                 let (status, payload) = if fail.load(Ordering::SeqCst) {
                     ("403 Forbidden", "{}".to_string())
+                } else if text.starts_with("GET ") {
+                    let relay = Keys::parse(&"11".repeat(32)).unwrap();
+                    ("200 OK", json!({"self":relay.public_key()}).to_string())
+                } else if filter["kinds"] == json!([39002]) {
+                    let relay = Keys::parse(&"11".repeat(32)).unwrap();
+                    let mut tags = vec![nostr::Tag::parse(["d", &channel().to_string()]).unwrap()];
+                    tags.extend(
+                        members.lock().unwrap().iter().map(|key| {
+                            nostr::Tag::parse(["p", &key.to_hex(), "", "member"]).unwrap()
+                        }),
+                    );
+                    let roster = EventBuilder::new(Kind::Custom(39002), "")
+                        .tags(tags)
+                        .sign_with_keys(&relay)
+                        .unwrap();
+                    ("200 OK", serde_json::to_string(&[roster]).unwrap())
                 } else if filter["kinds"] == json!([30181]) {
                     (
                         "200 OK",
@@ -114,6 +146,7 @@ pub(crate) async fn fake_relay() -> FakeRelay {
     FakeRelay {
         heads,
         profiles,
+        members,
         fail,
         queries,
         rest: RestClient {
@@ -158,7 +191,13 @@ async fn gateway_access_is_cached_bounded_and_fails_closed() {
         Keys::generate(),
         Keys::generate(),
     );
-    let access = GatewayAccess::new(owner.public_key(), agent.public_key(), relay.rest.clone());
+    relay.admit(&[owner.public_key(), agent.public_key(), gateway.public_key()]);
+    let access = GatewayAccess::new(
+        owner.public_key(),
+        agent.public_key(),
+        relay.rest.clone(),
+        channel(),
+    );
     let gw = gateway.public_key();
 
     assert!(!access.is_live(&gw).await.unwrap(), "no delegation yet");
@@ -265,10 +304,12 @@ async fn author_gate_admits_a_live_gateway_only_in_owner_mode_channels() {
         .lock()
         .unwrap()
         .push(grant(&owner, gateway.public_key(), 10));
+    relay.admit(&[owner.public_key(), agent.public_key(), gateway.public_key()]);
     let access = Arc::new(GatewayAccess::new(
         owner.public_key(),
         agent.public_key(),
         relay.rest.clone(),
+        channel(),
     ));
     let mut gate =
         crate::InboundAuthorGate::connect(&relay.rest, &agent.public_key().to_hex(), "test").await;
@@ -328,7 +369,7 @@ fn control_frame(sender: &Keys, agent: &Keys, command: &str) -> Event {
     let content = crate::encrypt_observer_payload(
         sender,
         &agent.public_key(),
-        &serde_json::json!({"type": command, "channelId": uuid::Uuid::new_v4()}),
+        &serde_json::json!({"type": command, "channelId": channel()}),
     )
     .unwrap();
     buzz_sdk::build_agent_observer_frame(
@@ -361,7 +402,13 @@ async fn observer_control_from_a_gateway_is_cancel_only() {
         .lock()
         .unwrap()
         .push(grant(&owner, gateway.public_key(), 10));
-    let access = GatewayAccess::new(owner.public_key(), agent.public_key(), relay.rest.clone());
+    relay.admit(&[owner.public_key(), agent.public_key(), gateway.public_key()]);
+    let access = GatewayAccess::new(
+        owner.public_key(),
+        agent.public_key(),
+        relay.rest.clone(),
+        channel(),
+    );
     let owner_hex = owner.public_key().to_hex();
     let accepted = |sender: &Keys, command: &str| {
         let frame = control_frame(sender, &agent, command);
@@ -408,10 +455,12 @@ async fn telemetry_reaches_live_gateways_within_the_frame_budget() {
         .lock()
         .unwrap()
         .push(grant(&owner, gateway.public_key(), 10));
+    relay.admit(&[owner.public_key(), agent.public_key(), gateway.public_key()]);
     let access = Arc::new(GatewayAccess::new(
         owner.public_key(),
         agent.public_key(),
         relay.rest.clone(),
+        channel(),
     ));
     // Prime the cache in real time; the paced loop below runs on paused time.
     assert_eq!(access.live().await.unwrap(), vec![gateway.public_key()]);
@@ -504,10 +553,12 @@ async fn queued_gateway_turns_are_rechecked_at_dispatch() {
         .push(grant(&owner, gateway.public_key(), 10));
     let mut ctx = crate::pool::tests::make_prompt_context_no_owner();
     ctx.agent_owner_pubkey = Some(owner.public_key());
+    relay.admit(&[owner.public_key(), agent.public_key(), gateway.public_key()]);
     ctx.gateways = Some(Arc::new(GatewayAccess::new(
         owner.public_key(),
         agent.public_key(),
         relay.rest.clone(),
+        channel(),
     )));
     let channel = uuid::Uuid::new_v4();
     let batch = |signer: &Keys| crate::queue::FlushBatch {
@@ -590,4 +641,115 @@ async fn gateway_factory_admits_only_bound_owner_channel_threads() {
             expected
         );
     }
+}
+
+/// A global grant never grants a private channel. Joining enables telemetry,
+/// prompts and cancellation; removing membership disables all three on refresh.
+#[tokio::test]
+async fn channel_membership_gates_gateway_telemetry_prompts_and_cancellation() {
+    let relay = fake_relay().await;
+    let (owner, agent, gateway) = (Keys::generate(), Keys::generate(), Keys::generate());
+    relay
+        .heads
+        .lock()
+        .unwrap()
+        .push(grant(&owner, gateway.public_key(), 10));
+    relay.admit(&[owner.public_key(), agent.public_key()]);
+    let access = Arc::new(GatewayAccess::new(
+        owner.public_key(),
+        agent.public_key(),
+        relay.rest.clone(),
+        channel(),
+    ));
+    let mut gate =
+        crate::InboundAuthorGate::connect(&relay.rest, &agent.public_key().to_hex(), "test").await;
+    gate.enable_gateways(Some(access.clone()));
+    let owner_hex = owner.public_key().to_hex();
+    let owner_cache = crate::OwnerCache::new(Some(owner_hex.clone()));
+    let allowlist = std::collections::HashSet::new();
+    for allowed in [false, true, false] {
+        if allowed {
+            relay.admit(&[owner.public_key(), agent.public_key(), gateway.public_key()]);
+        } else {
+            relay.admit(&[owner.public_key(), agent.public_key()]);
+        }
+        skip(VERDICT_TTL).await;
+        assert_eq!(
+            access.is_live(&gateway.public_key()).await.unwrap(),
+            allowed
+        );
+        let prompt = channel_message(&gateway, agent.public_key());
+        assert_eq!(
+            gate.evaluate_for_test(
+                &prompt,
+                &crate::RespondTo::Owner,
+                &allowlist,
+                false,
+                &owner_cache,
+                &relay.rest
+            )
+            .await
+            .allowed,
+            allowed
+        );
+        let control = control_frame(&gateway, &agent, "cancel_turn");
+        let delegated = crate::delegated_control_sender(Some(&access), &control, &owner_hex).await;
+        assert_eq!(
+            crate::authorized_control_payload(&agent, &control, &owner_hex, delegated).is_some(),
+            allowed
+        );
+        let recipients = membership_telemetry(access.clone(), &owner, &agent).await;
+        let expected = if allowed {
+            vec![owner.public_key(), gateway.public_key()]
+        } else {
+            vec![owner.public_key()]
+        };
+        assert_eq!(recipients, expected);
+    }
+}
+
+async fn membership_telemetry(
+    access: Arc<GatewayAccess>,
+    owner: &Keys,
+    agent: &Keys,
+) -> Vec<PublicKey> {
+    let observer = crate::observer::ObserverHandle::in_process();
+    observer.emit(
+        "test_event",
+        None,
+        &crate::observer::context_for(Some(channel()), None, None),
+        serde_json::json!({"state":"private"}),
+    );
+    let (publisher, mut published) = crate::relay::RelayEventPublisher::test_pair();
+    let task = tokio::spawn(crate::run_relay_observer_publisher(
+        observer.snapshot(),
+        observer.subscribe(),
+        publisher,
+        agent.clone(),
+        agent.public_key().to_hex(),
+        owner.public_key(),
+        Some(access),
+    ));
+    let first = tokio::time::timeout(Duration::from_secs(2), published.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut frames = vec![first];
+    if let Ok(Some(second)) =
+        tokio::time::timeout(crate::OBSERVER_PUBLISH_TICK * 2, published.recv()).await
+    {
+        frames.push(second);
+    }
+    task.abort();
+    frames
+        .into_iter()
+        .map(|frame| {
+            frame
+                .tags
+                .iter()
+                .find(|tag| tag.as_slice().first().map(String::as_str) == Some("p"))
+                .and_then(|tag| PublicKey::from_hex(&tag.as_slice()[1]).ok())
+                .unwrap()
+        })
+        .collect()
 }

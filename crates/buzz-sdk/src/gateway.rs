@@ -342,6 +342,38 @@ pub fn is_live_delegate(
         .any(|grant| grant.gateway() == signer)
 }
 
+/// Whether `key` has current posting membership in a relay-signed channel
+/// roster (kind39002). Callers must fetch the newest roster from the writer.
+/// Missing, malformed, duplicated, guest, or foreign-channel entries deny.
+pub fn channel_member(
+    roster: &Event,
+    relay: PublicKey,
+    channel: uuid::Uuid,
+    key: PublicKey,
+) -> bool {
+    if u32::from(roster.kind.as_u16()) != crate::kind::KIND_NIP29_GROUP_MEMBERS
+        || roster.pubkey != relay
+        || roster.verify().is_err()
+        || single(roster, "d").ok().flatten() != Some(channel.to_string().as_str())
+    {
+        return false;
+    }
+    let key = key.to_hex();
+    let entries: Vec<_> = roster
+        .tags
+        .iter()
+        .map(Tag::as_slice)
+        .filter(|tag| tag.first().map(String::as_str) == Some("p") && tag.get(1) == Some(&key))
+        .collect();
+    match entries.as_slice() {
+        [entry] => entry
+            .get(3)
+            .and_then(|role| role.parse::<buzz_core::channel::MemberRole>().ok())
+            .is_some_and(|role| role.can_post()),
+        _ => false,
+    }
+}
+
 fn lifetime_ok(created_at: u64, expires_at: u64) -> bool {
     expires_at > created_at && expires_at - created_at <= MAX_DELEGATION_SECS
 }

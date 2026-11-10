@@ -349,3 +349,52 @@ fn signed_grant_and_delegate_verifier_bind_the_owner_signature() {
         build_gateway_grant(&owner, gateway.public_key(), now + MAX_DELEGATION_SECS + 60).is_err()
     );
 }
+
+#[test]
+fn channel_authority_requires_current_relay_signature_exact_channel_and_posting_role() {
+    let relay = keys("11");
+    let channel = uuid::Uuid::new_v4();
+    let member = gateway().public_key();
+    let roster = |signer: &Keys, channel: uuid::Uuid, role: &str, duplicate: bool| {
+        let entry = Tag::parse(["p", &member.to_hex(), "", role]).unwrap();
+        let mut tags = vec![
+            Tag::parse(["d", &channel.to_string()]).unwrap(),
+            entry.clone(),
+        ];
+        if duplicate {
+            tags.push(entry);
+        }
+        EventBuilder::new(Kind::Custom(39002), "")
+            .tags(tags)
+            .sign_with_keys(signer)
+            .unwrap()
+    };
+    for (event, expected) in [
+        (roster(&relay, channel, "member", false), true),
+        (roster(&relay, channel, "admin", false), true),
+        (roster(&relay, channel, "guest", false), false),
+        (roster(&relay, channel, "unknown", false), false),
+        (roster(&relay, channel, "member", true), false),
+        (roster(&relay, uuid::Uuid::new_v4(), "member", false), false),
+        (roster(&keys("22"), channel, "member", false), false),
+    ] {
+        assert_eq!(
+            channel_member(&event, relay.public_key(), channel, member),
+            expected
+        );
+        assert!(!channel_member(
+            &event,
+            relay.public_key(),
+            channel,
+            keys("55").public_key()
+        ));
+    }
+    let mut tampered = roster(&relay, channel, "member", false);
+    tampered.content = "forged".into();
+    assert!(!channel_member(
+        &tampered,
+        relay.public_key(),
+        channel,
+        member
+    ));
+}

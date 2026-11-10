@@ -518,9 +518,18 @@ pub(crate) async fn handle_req_consistent(
             |(idx, per_filter_channel, params)| {
                 let db = db.clone();
                 let writer_read = writer_reads.get(idx).copied().unwrap_or(false);
+                let state = state.clone();
+                let tenant = conn.tenant.clone();
+                let reader = pubkey_bytes.clone();
+                let filter = filters[idx].clone();
                 async move {
                     let filter_events = if writer_read {
-                        db.query_events(&params).await
+                        match super::current_members::read(&state, &tenant, &reader, &filter).await
+                        {
+                            Ok(Some(events)) => Ok(events),
+                            Ok(None) => db.query_events(&params).await,
+                            Err(error) => Err(error),
+                        }
                     } else {
                         db.query_events_routed("req_historical", &params).await
                     };

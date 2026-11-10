@@ -2172,6 +2172,10 @@ async fn query_member_events(
     let mut catchall_results = stream::iter(catchall_queries.into_iter().map(
         |(idx, query, read_route)| {
             let db = db.clone();
+            let state = state.clone();
+            let tenant = tenant.clone();
+            let reader = pubkey_bytes.clone();
+            let filter = filters[idx].clone();
             async move {
                 // The route was resolved from client-carried `consistency`
                 // intent in phase 1 (`resolve_read_route`). `Writer` pins the
@@ -2179,7 +2183,15 @@ async fn query_member_events(
                 // replica-eligible path. Only these two directions exist — the
                 // inverse "force replica" is deliberately unrepresentable.
                 let result = match read_route {
-                    ReadRoute::Writer => db.query_events(&query).await,
+                    ReadRoute::Writer => match crate::handlers::current_members::read(
+                        &state, &tenant, &reader, &filter,
+                    )
+                    .await
+                    {
+                        Ok(Some(events)) => Ok(events),
+                        Ok(None) => db.query_events(&query).await,
+                        Err(error) => Err(error),
+                    },
                     ReadRoute::Routed => db.query_events_routed("bridge_query", &query).await,
                 };
                 (idx, result)

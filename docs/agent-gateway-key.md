@@ -91,6 +91,19 @@ Revocation uses a newer disabled replacement, without expiration. The relay
 ignores NIP-09 deletion of gateway heads. Deleting a head could otherwise let an
 old signed grant be replayed into an empty coordinate. Use `gateway revoke`.
 
+Gateway authority also requires current posting membership in the bound channel.
+The harness strongly reads the latest kind39002 roster signed by the current
+NIP-11 relay key. The owner, agent, and gateway must all remain posting members.
+A global grant never admits a gateway into a private channel. Membership removal
+stops gateway prompts, cancellation, and telemetry after the 30-second cache
+window. The launcher rechecks membership immediately before each launch.
+
+For an explicit strong kind39002 lookup with the current relay author and one channel
+coordinate, the relay checks canonical writer membership behind its existing
+membership lock. A stale discovery projection is repaired before returning it.
+Only a current channel member can trigger or receive that repair. Unchanged
+rosters keep their event ID; this read path never broadcasts metadata.
+
 Authority reads use `"consistency":"strong"` on HTTP queries and WebSocket REQ
 filters. The relay pins these reads to the writer, so a lagging replica cannot
 renew stale authority or hide the current revocation head.

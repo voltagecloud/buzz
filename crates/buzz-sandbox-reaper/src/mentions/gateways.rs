@@ -57,6 +57,34 @@ pub(super) async fn read(
     .map_err(|_| Error::Deadline)?
 }
 
+/// Fresh channel authority for a launch. A global delegation never substitutes
+/// for explicit current posting membership of owner, agent and gateway.
+pub(super) async fn member(
+    connection: &mut NostrWsConnection,
+    identity: &Identity,
+    channel: uuid::Uuid,
+    gateway: nostr::PublicKey,
+) -> Result<bool, Error> {
+    let relay = crate::shared_tasks::relay_key(&identity.relay)
+        .await
+        .map_err(|_| Error::Relay)?;
+    let rosters = fetch(
+        connection,
+        "mention-gateway-channel",
+        json!({
+            "kinds":[39002], "authors":[relay], "#d":[channel], "limit":1,
+        }),
+        1,
+    )
+    .await?;
+    let Some(roster) = rosters.first() else {
+        return Ok(false);
+    };
+    Ok([identity.owner, identity.keys.public_key(), gateway]
+        .into_iter()
+        .all(|key| buzz_sdk::gateway::channel_member(roster, relay, channel, key)))
+}
+
 /// One finite REQ, read to EOSE. More than `limit` results is a relay fault.
 async fn fetch(
     connection: &mut NostrWsConnection,

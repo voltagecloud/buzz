@@ -25,6 +25,7 @@ enum LaunchPermission {
     Allowed(Option<buzz_sdk::gateway::Live>),
     UnsupportedConversation,
     NoLongerRemote,
+    GatewayNotMember,
 }
 
 // A worker must renew its fenced journal before its longest external effect
@@ -374,6 +375,9 @@ async fn drain(
         let result = match channel_launch_allowed(identity, &event).await {
             // A non-owner trigger needs a fresh live delegation unless the
             // manager may still admit it as a shared task.
+            Ok(LaunchPermission::GatewayNotMember) => {
+                json!({"ok": false, "code": "gateway_not_member"})
+            }
             Ok(LaunchPermission::Allowed(None))
                 if event.pubkey != identity.owner && !manager.sharing_enabled() =>
             {
@@ -419,6 +423,7 @@ async fn drain(
                     | "unsupported_conversation"
                     | "shared_task_denied"
                     | "gateway_not_delegated"
+                    | "gateway_not_member"
             ) || pending.attempts >= MAX_ATTEMPTS
             {
                 pending.notice = Some(failure_notice(identity, &event, code)?);
@@ -497,6 +502,7 @@ fn failure_notice(identity: &Identity, event: &Event, code: &str) -> Result<Even
         "launch_not_registered" => "Start this agent once from desktop to register its launch settings, then mention me again.",
         "unsupported_conversation" => "Automatic remote startup requires a channel thread. Mention me in a channel, or manage this conversation from desktop.",
         "shared_task_denied" => "Shared task refused: current sharing permission, channel membership, or handoff budget does not permit this request. Ask the agent owner to check sharing.",
+        "gateway_not_member" => "This gateway is not a current posting member of this channel, so I did not start. Ask the channel owner to restore membership.",
         "gateway_not_delegated" => "This gateway key is not currently delegated by my owner, so I did not start. Ask my owner to check `buzz gateway list`.",
         "shared_task_retry" => "Current sharing authorization is unavailable. Mention me again to retry; this request has not been allowed to run.",
         _ => "Agent startup could not be confirmed. Mention me again to retry.",
@@ -535,6 +541,10 @@ async fn channel_launch_allowed(
                 .into_iter()
                 .find(|live| live.gateway() == trigger.pubkey)
         };
+        if delegation.is_some() && !super::gateways::member(&mut connection, identity,
+            channel.parse().map_err(|_| Error::Registration)?, trigger.pubkey).await? {
+            return Ok(LaunchPermission::GatewayNotMember);
+        }
         send(&mut connection, json!(["REQ", "mention-trigger", {"kinds":[9,40002],"ids":[trigger.id],"#h":[channel],"limit":1}])).await?;
         send(&mut connection, json!(["REQ", "mention-channel", {"kinds":[39000],"#d":[channel],"limit":1}])).await?;
         // Query the current coordinate without a runtime filter: an old remote

@@ -1930,6 +1930,7 @@ fn gateway_access_for(
         owner,
         config.keys.public_key(),
         rest,
+        config.bound_session.as_ref()?.channel_id(),
     )))
 }
 

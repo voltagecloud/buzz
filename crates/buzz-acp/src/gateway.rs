@@ -57,16 +57,23 @@ enum Cached {
 pub(crate) struct GatewayAccess {
     owner: PublicKey,
     agent: PublicKey,
+    channel: uuid::Uuid,
     rest: RestClient,
     cached: tokio::sync::Mutex<Cached>,
 }
 
 impl GatewayAccess {
     /// Gateway access for `agent`, owned by `owner`, read through `rest`.
-    pub(crate) fn new(owner: PublicKey, agent: PublicKey, rest: RestClient) -> Self {
+    pub(crate) fn new(
+        owner: PublicKey,
+        agent: PublicKey,
+        rest: RestClient,
+        channel: uuid::Uuid,
+    ) -> Self {
         Self {
             owner,
             agent,
+            channel,
             rest,
             cached: tokio::sync::Mutex::new(Cached::Empty),
         }
@@ -144,13 +151,37 @@ impl GatewayAccess {
                 "limit": candidates.len(),
             }))
             .await?;
+        let relay = self
+            .rest
+            .relay_self()
+            .await
+            .map_err(|error| LookupError(error.to_string()))?
+            .and_then(|key| PublicKey::from_hex(&key).ok())
+            .ok_or_else(|| LookupError("relay identity unavailable".into()))?;
+        let rosters = self
+            .query(json!({"kinds":[39002], "authors":[relay],
+            "#d":[self.channel], "limit":1}))
+            .await?;
+        if rosters.len() > 1 {
+            return Err(LookupError("ambiguous channel membership".into()));
+        }
+        let Some(roster) = rosters.first() else {
+            return Ok(Vec::new());
+        };
+        let member = |key| buzz_sdk::gateway::channel_member(roster, relay, self.channel, key);
+        if !member(self.owner) || !member(self.agent) {
+            return Ok(Vec::new());
+        }
         Ok(buzz_sdk::gateway::resolve(
             self.owner,
             &heads,
             &profiles,
             &[self.owner, self.agent],
             now,
-        ))
+        )
+        .into_iter()
+        .filter(|live| member(live.gateway()))
+        .collect())
     }
 
     /// One `/query`, refusing any response that is not an array of events.
