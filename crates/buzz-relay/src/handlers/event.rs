@@ -4178,7 +4178,7 @@ mod tests {
             assert!(!accepted(&text), "undelegated gateway control: {text}");
 
             let old_grant = grant(&gateway, now - 10);
-            let text = ok_frame_scoped_owner(&state, &tenant, &owner, old_grant.clone()).await;
+            let text = ok_frame_scoped_owner(&state, &tenant, &owner, old_grant).await;
             assert!(accepted(&text), "grant stored: {text}");
             let text = ok_frame(&state, &tenant, &gateway, control(&gateway, &agent)).await;
             assert!(accepted(&text), "live gateway control: {text}");
@@ -4216,10 +4216,27 @@ mod tests {
                 .unwrap()
                 .sign_with_keys(&owner)
                 .unwrap();
+            let revocation_id = revocation.id;
             let text = ok_frame_scoped_owner(&state, &tenant, &owner, revocation).await;
             assert!(accepted(&text), "revocation stored: {text}");
             let text = ok_frame(&state, &tenant, &gateway, control(&gateway, &agent)).await;
             assert!(!accepted(&text), "revoked gateway control: {text}");
+
+            // NIP-09 e-tag deletion cannot erase the durable revocation.
+            // Replay a correctly signed older head never submitted before:
+            // reusing an existing event id could be rejected by generic dedup.
+            let deletion = EventBuilder::new(Kind::EventDeletion, "")
+                .tag(Tag::event(revocation_id))
+                .sign_with_keys(&owner)
+                .unwrap();
+            let _ = ok_frame_scoped_owner(&state, &tenant, &owner, deletion).await;
+            let _ = ok_frame_scoped_owner(&state, &tenant, &owner, grant(&gateway, now - 7)).await;
+            state.observer_gateway_cache.invalidate_all();
+            let text = ok_frame(&state, &tenant, &gateway, control(&gateway, &agent)).await;
+            assert!(
+                !accepted(&text),
+                "revocation survived e-tag deletion and a never-seen old head: {text}"
+            );
 
             let coordinate = format!(
                 "{KIND_AGENT_GATEWAY_DELEGATION}:{}:{}",
@@ -4231,7 +4248,8 @@ mod tests {
                 .sign_with_keys(&owner)
                 .unwrap();
             let _ = ok_frame_scoped_owner(&state, &tenant, &owner, deletion).await;
-            let _ = ok_frame_scoped_owner(&state, &tenant, &owner, old_grant).await;
+            let _ = ok_frame_scoped_owner(&state, &tenant, &owner, grant(&gateway, now - 6)).await;
+            state.observer_gateway_cache.invalidate_all();
             let text = ok_frame(&state, &tenant, &gateway, control(&gateway, &agent)).await;
             assert!(
                 !accepted(&text),

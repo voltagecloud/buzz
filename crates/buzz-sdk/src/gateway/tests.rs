@@ -246,7 +246,10 @@ fn resolve_uses_the_newest_head_and_refuses_agents_and_excluded_keys() {
             .collect::<Vec<_>>()
     };
 
-    assert_eq!(gateways(&[grant_old.clone()], &[], &[]), vec![gw]);
+    assert_eq!(
+        gateways(std::slice::from_ref(&grant_old), &[], &[]),
+        vec![gw]
+    );
     // A stale grant returned beside a newer revocation never wins, in any order.
     assert!(gateways(&[grant_old.clone(), revoke_new.clone()], &[], &[]).is_empty());
     assert!(gateways(&[revoke_new.clone(), grant_old.clone()], &[], &[]).is_empty());
@@ -255,13 +258,13 @@ fn resolve_uses_the_newest_head_and_refuses_agents_and_excluded_keys() {
         vec![gw]
     );
     assert_eq!(
-        gateways(&[grant_old.clone()], &[plain_profile], &[]),
+        gateways(std::slice::from_ref(&grant_old), &[plain_profile], &[]),
         vec![gw]
     );
-    assert!(gateways(&[grant_old.clone()], &[foreign_claim], &[]).is_empty());
+    assert!(gateways(std::slice::from_ref(&grant_old), &[foreign_claim], &[]).is_empty());
     // An owner's own agent can never pass as the owner's gateway.
     assert!(gateways(&[agent_grant], &[agent_profile], &[]).is_empty());
-    assert!(gateways(&[grant_old.clone()], &[], &[gw]).is_empty());
+    assert!(gateways(std::slice::from_ref(&grant_old), &[], &[gw]).is_empty());
     // Another signer's head is ignored, not merged.
     assert!(gateways(&[grant(&keys("55"), gw, NOW, NOW + DAY)], &[], &[]).is_empty());
 }
@@ -329,7 +332,7 @@ fn signed_grant_and_delegate_verifier_bind_the_owner_signature() {
     assert!(is_live_delegate(
         owner.public_key(),
         gateway.public_key(),
-        &[event.clone()],
+        std::slice::from_ref(&event),
         &[],
         now
     ));

@@ -75,11 +75,19 @@ pub(crate) async fn fake_relay() -> FakeRelay {
                     .ok()
                     .and_then(|filters| filters.into_iter().next())
                     .unwrap_or_default();
-                assert_eq!(
-                    filter["consistency"],
-                    json!("strong"),
-                    "authority reads must bypass replicas"
-                );
+                let gateway_profile_read = filter["authors"].as_array().is_some_and(|authors| {
+                    heads.lock().unwrap().iter().any(|head| {
+                        buzz_sdk::gateway::Delegation::parse(head)
+                            .is_ok_and(|(grant, _)| authors.contains(&json!(grant.gateway)))
+                    })
+                });
+                if filter["kinds"] == json!([30181]) || gateway_profile_read {
+                    assert_eq!(
+                        filter["consistency"],
+                        json!("strong"),
+                        "authority reads must bypass replicas"
+                    );
+                }
                 let (status, payload) = if fail.load(Ordering::SeqCst) {
                     ("403 Forbidden", "{}".to_string())
                 } else if filter["kinds"] == json!([30181]) {
