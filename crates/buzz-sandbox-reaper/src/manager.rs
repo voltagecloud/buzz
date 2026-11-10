@@ -463,22 +463,28 @@ impl Manager {
     }
 
     /// Reuse mobile start validation without manufacturing an owner control event.
+    /// Start the agent for one mention. The trigger's signer is the owner, a
+    /// live owner-delegated gateway (`delegation`, freshly verified by the
+    /// caller for this trigger), or a shared-task requester.
     pub(crate) async fn start_mention(
         &self,
         owner: PublicKey,
         agent: PublicKey,
         relay: &str,
         event: &Event,
+        delegation: Option<&buzz_sdk::gateway::Live>,
     ) -> serde_json::Value {
         let Some(developer) = self.config.developer(&owner) else {
             return refusal(ErrorCode::UnauthorizedOwner, "owner is not configured");
         };
+        let payload =
+            serde_json::json!({"agent_pubkey": agent, "relay_url": relay, "trigger": event});
+        let delegation =
+            delegation.filter(|live| live.owner() == owner && live.gateway() == event.pubkey);
         let admitted = if event.pubkey == owner {
-            Start::admit(
-                serde_json::json!({"agent_pubkey": agent, "relay_url": relay, "trigger": event}),
-                owner,
-                Timestamp::now().as_secs(),
-            )
+            Start::admit(payload, owner, Timestamp::now().as_secs())
+        } else if let Some(delegation) = delegation {
+            Start::delegated(payload, delegation, Timestamp::now().as_secs())
         } else {
             let request = crate::shared_tasks::Request {
                 relay_url: relay.into(),

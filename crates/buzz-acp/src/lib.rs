@@ -11,6 +11,7 @@ mod config;
 mod edit_routing;
 mod engram_fetch;
 mod filter;
+mod gateway;
 mod isolated_execution;
 mod observer;
 mod pool;
@@ -570,6 +571,7 @@ mod inbound_author_gate {
         // None means no authoritative NIP-11 result yet, including at startup.
         refreshed_generation: Option<u64>,
         sharing: Option<std::sync::Arc<crate::sharing::Client>>,
+        gateways: Option<std::sync::Arc<crate::gateway::GatewayAccess>>,
     }
 
     pub(crate) fn refresh_needed(refreshed_generation: Option<u64>, event_generation: u64) -> bool {
@@ -589,6 +591,7 @@ mod inbound_author_gate {
                 relay_self,
                 refreshed_generation: completed.then_some(0),
                 sharing: None,
+                gateways: None,
             }
         }
 
@@ -660,7 +663,7 @@ mod inbound_author_gate {
             } else {
                 effective_prompt_author(event, self.relay_self.as_deref(), &self.agent_pubkey_hex)
             };
-            let allowed = author_allowed(
+            let mut allowed = author_allowed(
                 respond_to,
                 allowlist,
                 &effective_author,
@@ -669,11 +672,36 @@ mod inbound_author_gate {
                 rest_client,
             )
             .await;
+            // Strict owner mode also admits a live owner-delegated gateway, in
+            // channels only. The raw signer is the effective author here, and
+            // the owner's DMs are never delegated.
+            if !allowed && !is_dm && matches!(respond_to, RespondTo::Owner) {
+                if let Some(gateways) = &self.gateways {
+                    allowed = match gateways.is_live(&event.pubkey).await {
+                        Ok(live) => live,
+                        Err(error) => {
+                            tracing::warn!(
+                                author = %event.pubkey,
+                                "gateway check failed; refusing this event: {error}"
+                            );
+                            false
+                        }
+                    };
+                }
+            }
             InboundAuthorGateDecision {
                 effective_author,
                 allowed,
                 is_dm,
             }
+        }
+
+        /// Admit live owner-delegated gateways in strict owner mode.
+        pub(crate) fn enable_gateways(
+            &mut self,
+            gateways: Option<std::sync::Arc<crate::gateway::GatewayAccess>>,
+        ) {
+            self.gateways = gateways;
         }
 
         pub(crate) fn enable_sharing(
@@ -1398,8 +1426,8 @@ fn spawn_relay_observer_publisher(
     publisher: RelayEventPublisher,
     keys: nostr::Keys,
     agent_pubkey_hex: String,
-    owner_pubkey_hex: String,
     owner_pubkey: PublicKey,
+    gateways: Option<Arc<gateway::GatewayAccess>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         // Subscribe BEFORE snapshotting so an event emitted between the two
@@ -1414,22 +1442,31 @@ fn spawn_relay_observer_publisher(
             publisher,
             keys,
             agent_pubkey_hex,
-            owner_pubkey_hex,
             owner_pubkey,
+            gateways,
         )
         .await;
     })
 }
 
+/// Publish observer telemetry to the owner and every live owner-delegated
+/// gateway.
+///
+/// Each frame is encrypted once per recipient. To keep the agent's relay
+/// message budget flat, a frame sent to `n` recipients is followed by `n - 1`
+/// idle ticks, so telemetry still costs at most one relay frame per tick. A
+/// gateway lookup failure sends that frame to the owner only.
+#[allow(clippy::too_many_arguments)]
 async fn run_relay_observer_publisher(
     snapshot: Vec<observer::ObserverEvent>,
     mut rx: tokio::sync::broadcast::Receiver<observer::ObserverEvent>,
     publisher: RelayEventPublisher,
     keys: nostr::Keys,
     agent_pubkey_hex: String,
-    owner_pubkey_hex: String,
     owner_pubkey: PublicKey,
+    gateways: Option<Arc<gateway::GatewayAccess>>,
 ) {
+    let mut idle_ticks = 0usize;
     let mut queue = ObserverPublishQueue::default();
     let max_snapshot_seq = snapshot.iter().map(|event| event.seq).max().unwrap_or(0);
     for event in snapshot {
@@ -1472,11 +1509,25 @@ async fn run_relay_observer_publisher(
                 }
             }
             _ = publish_tick.tick() => {
-                if let Some(frame) = queue.next_frame() {
-                    publish_relay_observer_event(
-                        &publisher, &keys, &agent_pubkey_hex,
-                        &owner_pubkey_hex, &owner_pubkey, frame,
-                    ).await;
+                if idle_ticks > 0 {
+                    idle_ticks -= 1;
+                } else if let Some(frame) = queue.next_frame() {
+                    let mut recipients = vec![owner_pubkey];
+                    if let Some(gateways) = &gateways {
+                        match gateways.live().await {
+                            Ok(live) => recipients.extend(live),
+                            Err(error) => tracing::warn!(
+                                "observer telemetry to gateways skipped: {error}"
+                            ),
+                        }
+                    }
+                    idle_ticks = recipients.len() - 1;
+                    for recipient in &recipients {
+                        publish_relay_observer_event(
+                            &publisher, &keys, &agent_pubkey_hex,
+                            &recipient.to_hex(), recipient, frame.clone(),
+                        ).await;
+                    }
                 }
                 if closed && queue.is_empty() {
                     break;
@@ -1858,29 +1909,77 @@ async fn publish_relay_observer_event(
 /// Maximum age (seconds) for an observer control frame to be considered fresh.
 const OBSERVER_CONTROL_FRESHNESS_SECS: i64 = 300;
 
-fn handle_relay_observer_control_event(
-    keys: &nostr::Keys,
-    event: nostr::Event,
-    pool: &mut AgentPool,
-    observer: Option<&observer::ObserverHandle>,
+/// Build gateway access when this harness may honour owner-delegated gateways:
+/// strict owner mode with a resolved owner and a bound channel thread.
+/// Direct-message and unbound sessions never delegate telemetry or control.
+fn gateway_access_for(
+    config: &Config,
+    owner_hex: Option<&str>,
+    rest: relay::RestClient,
+) -> Option<Arc<gateway::GatewayAccess>> {
+    if !matches!(config.respond_to, RespondTo::Owner)
+        || !matches!(
+            config.bound_session,
+            Some(config::BoundSession::Thread { .. })
+        )
+    {
+        return None;
+    }
+    let owner = PublicKey::from_hex(owner_hex?).ok()?;
+    Some(Arc::new(gateway::GatewayAccess::new(
+        owner,
+        config.keys.public_key(),
+        rest,
+    )))
+}
+
+/// The sender of an observer control frame when it is a live gateway of this
+/// agent's owner, else `None`. The owner's own frames and every lookup
+/// failure yield `None`; the handler then accepts only the owner.
+async fn delegated_control_sender(
+    gateways: Option<&gateway::GatewayAccess>,
+    event: &nostr::Event,
     owner_pubkey_hex: &str,
-    event_publisher: RelayEventPublisher,
-    bound_channel: Option<Uuid>,
-) {
+) -> Option<PublicKey> {
+    let gateways = gateways?;
+    if event.pubkey.to_hex() == owner_pubkey_hex {
+        return None;
+    }
+    match gateways.is_live(&event.pubkey).await {
+        Ok(true) => Some(event.pubkey),
+        Ok(false) => None,
+        Err(error) => {
+            tracing::warn!(sender = %event.pubkey, "observer control gateway check failed: {error}");
+            None
+        }
+    }
+}
+
+/// Verify one observer control frame and return its decrypted payload when
+/// the sender may issue it: the owner may send any command; the verified live
+/// gateway named by `gateway` may send only `cancel_turn`.
+fn authorized_control_payload(
+    keys: &nostr::Keys,
+    event: &nostr::Event,
+    owner_pubkey_hex: &str,
+    gateway: Option<PublicKey>,
+) -> Option<serde_json::Value> {
     // Defense-in-depth: verify signature even though the relay already checked.
-    if let Err(e) = buzz_core::verify_event(&event) {
+    if let Err(e) = buzz_core::verify_event(event) {
         tracing::warn!(error = %e, "observer control frame failed signature verification");
-        return;
+        return None;
     }
 
-    // Defense-in-depth: verify the sender is the resolved owner.
-    if event.pubkey.to_hex() != owner_pubkey_hex {
+    let from_gateway = gateway == Some(event.pubkey);
+    // Defense-in-depth: verify the sender is the resolved owner or the
+    // verified live gateway.
+    if event.pubkey.to_hex() != owner_pubkey_hex && !from_gateway {
         tracing::warn!(
             sender = %event.pubkey,
             expected = %owner_pubkey_hex,
             "observer control frame from non-owner — dropping"
         );
-        return;
+        return None;
     }
 
     // Freshness: reject stale/replayed frames outside ±5 minute window.
@@ -1892,17 +1991,47 @@ fn handle_relay_observer_control_event(
             now,
             "observer control frame outside freshness window — dropping"
         );
-        return;
+        return None;
     }
 
-    let payload = match decrypt_observer_payload::<serde_json::Value>(keys, &event) {
+    let payload = match decrypt_observer_payload::<serde_json::Value>(keys, event) {
         Ok(payload) => payload,
         Err(error) => {
             tracing::warn!("failed to decrypt observer control frame: {error}");
-            return;
+            return None;
         }
     };
 
+    let command_type = payload.get("type").and_then(|value| value.as_str());
+    if from_gateway && command_type != Some("cancel_turn") {
+        tracing::warn!(
+            sender = %event.pubkey,
+            command = ?command_type,
+            "gateway observer control is limited to cancel_turn — dropping"
+        );
+        return None;
+    }
+    Some(payload)
+}
+
+/// Handle one observer control frame from the owner or, when `gateway` names
+/// its verified sender, from a live owner-delegated gateway. A gateway may
+/// only `cancel_turn`: model switches change the owner's cost and settings,
+/// and project announcements publish owner-authored content.
+#[allow(clippy::too_many_arguments)]
+fn handle_relay_observer_control_event(
+    keys: &nostr::Keys,
+    event: nostr::Event,
+    pool: &mut AgentPool,
+    observer: Option<&observer::ObserverHandle>,
+    owner_pubkey_hex: &str,
+    gateway: Option<PublicKey>,
+    event_publisher: RelayEventPublisher,
+    bound_channel: Option<Uuid>,
+) {
+    let Some(payload) = authorized_control_payload(keys, &event, owner_pubkey_hex, gateway) else {
+        return;
+    };
     let command_type = payload.get("type").and_then(|value| value.as_str());
     match command_type {
         Some("cancel_turn") => {
@@ -3046,6 +3175,9 @@ async fn run_harness(
         }
     }
     let owner_cache = OwnerCache::new(startup_owner.clone());
+    // Owner-delegated gateways are honoured only in strict owner mode, the mode
+    // every remote sandbox session runs in. Other modes never consult them.
+    let gateway_access = gateway_access_for(config, startup_owner.as_deref(), relay.rest_client());
 
     let mut relay_observer_control_rx = None;
     let mut relay_observer_publisher_task = None;
@@ -3111,7 +3243,7 @@ async fn run_harness(
         }
     }
 
-    if let Some((observer, publisher, keys, agent_pubkey, owner_pubkey, owner)) =
+    if let Some((observer, publisher, keys, agent_pubkey, _owner_pubkey, owner)) =
         relay_observer_publisher.take()
     {
         relay_observer_publisher_task = Some(spawn_relay_observer_publisher(
@@ -3119,8 +3251,8 @@ async fn run_harness(
             publisher,
             keys,
             agent_pubkey,
-            owner_pubkey,
             owner,
+            gateway_access.clone(),
         ));
     }
 
@@ -3150,12 +3282,15 @@ async fn run_harness(
         );
     }
 
-    let ctx = Arc::new(runtime.prompt_context(
+    let mut prompt_context = runtime.prompt_context(
         relay.rest_client(),
         channel_info_map,
         SessionMode::Conversation,
-    )?);
+    )?;
+    prompt_context.gateways = gateway_access.clone();
+    let ctx = Arc::new(prompt_context);
     author_gate_ctx.enable_sharing(ctx.sharing.clone());
+    author_gate_ctx.enable_gateways(ctx.gateways.clone());
     let _shared_notice_worker = ctx
         .sharing
         .as_ref()
@@ -3550,12 +3685,19 @@ async fn run_harness(
                     match control_event {
                         Some(event) => {
                             if let Some(ref owner_hex) = owner_cache.pubkey {
+                                let gateway = delegated_control_sender(
+                                    gateway_access.as_deref(),
+                                    &event,
+                                    owner_hex,
+                                )
+                                .await;
                                 handle_relay_observer_control_event(
                                     &config.keys,
                                     event,
                                     &mut pool,
                                     observer.as_ref(),
                                     owner_hex,
+                                    gateway,
                                     relay.event_publisher(),
                                     config.bound_session.as_ref().map(|binding| binding.channel_id()),
                                 );
@@ -9637,8 +9779,8 @@ mod observer_snapshot_race_tests {
             publisher,
             agent_keys.clone(),
             agent_keys.public_key().to_hex(),
-            owner_keys.public_key().to_hex(),
             owner_keys.public_key(),
+            None,
         )
         .await;
 
@@ -10361,8 +10503,8 @@ mod observer_publish_cadence_tests {
             publisher,
             agent_keys.clone(),
             agent_keys.public_key().to_hex(),
-            owner_keys.public_key().to_hex(),
             owner_keys.public_key(),
+            None,
         ));
 
         // t=0: nothing may publish, no matter how full the snapshot was.
@@ -10440,8 +10582,8 @@ mod observer_publish_cadence_tests {
             publisher,
             agent_keys.clone(),
             agent_keys.public_key().to_hex(),
-            owner_keys.public_key().to_hex(),
             owner_keys.public_key(),
+            None,
         ));
 
         settle().await;
@@ -10506,8 +10648,8 @@ mod observer_publish_cadence_tests {
             publisher,
             agent_keys.clone(),
             agent_keys.public_key().to_hex(),
-            owner_keys.public_key().to_hex(),
             owner_keys.public_key(),
+            None,
         ));
         settle().await;
 

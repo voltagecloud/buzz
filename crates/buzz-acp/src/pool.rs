@@ -936,6 +936,9 @@ pub struct PromptContext {
     pub memory_enabled: bool,
     /// Fresh authorization for bound shared-channel tasks.
     pub sharing: Option<Arc<crate::sharing::Client>>,
+    /// Live owner-delegated gateways, set only in strict owner mode. A queued
+    /// gateway turn is rechecked against it at dispatch.
+    pub(crate) gateways: Option<Arc<crate::gateway::GatewayAccess>>,
     /// Harness identity string for NIP-AM `harness` field. Derived from the
     /// configured `agent_command` at startup (e.g. `"goose"`, `"buzz-agent"`).
     pub harness_name: String,
@@ -2514,24 +2517,10 @@ pub async fn run_prompt_task(
 
     // Queueing may outlive a grant. Recheck before session creation, memory
     // fetches, or any ACP prompt; the listener separately guards native steering.
-    if let (Some(sharing), Some(pending)) = (&ctx.sharing, &batch) {
-        let mut denied = None;
-        for item in &pending.events {
-            if Some(item.event.pubkey) == ctx.agent_owner_pubkey {
-                continue;
-            }
-            match sharing.authorize(&item.event).await {
-                Ok(crate::sharing::Admission::Allowed(_)) => {}
-                Ok(crate::sharing::Admission::Refused(reason)) => {
-                    denied = Some(reason);
-                    break;
-                }
-                Err(error) => {
-                    denied = Some(error.to_string());
-                    break;
-                }
-            }
-        }
+    // A gateway turn is rechecked the same way: a revocation or expiry blocks
+    // it here even when it was admitted before.
+    if let (true, Some(pending)) = (ctx.sharing.is_some() || ctx.gateways.is_some(), &batch) {
+        let denied = dispatch_refusal(&ctx, pending).await;
         if let Some(reason) = denied {
             send_prompt_result(
                 &result_tx,
@@ -4939,6 +4928,39 @@ fn parse_nostr_dm_response(json: serde_json::Value, limit: u32) -> Option<Conver
         total,
         truncated,
     })
+}
+
+/// Why a queued batch may no longer reach the model, if it may not.
+///
+/// The owner's events always pass. A live owner-delegated gateway passes; a
+/// gateway lookup failure falls through to sharing when that is enabled, and
+/// otherwise refuses the batch (it is requeued under the normal bounded retry).
+/// Every other author needs a fresh sharing admission.
+pub(crate) async fn dispatch_refusal(ctx: &PromptContext, pending: &FlushBatch) -> Option<String> {
+    for item in &pending.events {
+        if Some(item.event.pubkey) == ctx.agent_owner_pubkey {
+            continue;
+        }
+        let mut gateway_error = None;
+        if let Some(gateways) = &ctx.gateways {
+            match gateways.is_live(&item.event.pubkey).await {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(error) => gateway_error = Some(error.to_string()),
+            }
+        }
+        let Some(sharing) = &ctx.sharing else {
+            return Some(gateway_error.unwrap_or_else(|| {
+                "the requester is not the owner or a live owner-delegated gateway".into()
+            }));
+        };
+        match sharing.authorize(&item.event).await {
+            Ok(crate::sharing::Admission::Allowed(_)) => {}
+            Ok(crate::sharing::Admission::Refused(reason)) => return Some(reason),
+            Err(error) => return Some(error.to_string()),
+        }
+    }
+    None
 }
 
 /// Return the batch for requeue only in Queue mode; drop it in Drop mode.
@@ -10526,6 +10548,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             agent_owner_pubkey: owner_pubkey,
             memory_enabled: false,
             sharing: None,
+            gateways: None,
             harness_name: "goose".to_string(),
             relay_url: "ws://127.0.0.1:3000".to_string(),
         }

@@ -1417,7 +1417,30 @@ async fn handle_agent_observer_event(
             }
         }
     };
-    if !is_owner {
+    // Not the owner: the counterpart may still be a live gateway the agent's
+    // owner delegated (control from it, telemetry to it). A lookup failure
+    // refuses the frame.
+    let is_authorized = is_owner
+        || match gateway_observer_authorized(
+            &state,
+            conn.tenant.community(),
+            route.agent,
+            route.owner,
+        )
+        .await
+        {
+            Ok(authorized) => authorized,
+            Err(e) => {
+                warn!(conn_id = %conn_id, event_id = %event_id_hex, "agent observer gateway check failed: {e}");
+                conn.send(RelayMessage::ok(
+                    event_id_hex,
+                    false,
+                    "error: internal server error",
+                ));
+                return;
+            }
+        };
+    if !is_authorized {
         reject("auth");
         conn.send(RelayMessage::ok(
             event_id_hex,
@@ -1465,6 +1488,85 @@ async fn handle_agent_observer_event(
     fan_out_event_to_local_subscribers(&state, conn.tenant.community(), &stored_event).await;
 
     conn.send(RelayMessage::ok(event_id_hex, true, ""));
+}
+
+/// Longest a cached observer gateway verdict is trusted, which bounds how long
+/// a revoked delegation keeps routing frames on another replica.
+pub(crate) const GATEWAY_VERDICT_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Whether `gateway` may exchange observer frames with `agent`: the agent's
+/// recorded owner has a live kind 30181 delegation naming `gateway`, and
+/// `gateway` is not itself an agent the relay has recorded. An owned agent
+/// therefore never passes as a gateway, and an agent without a recorded owner
+/// has none. Any lookup failure propagates and the caller refuses the frame.
+async fn gateway_observer_authorized(
+    state: &AppState,
+    community: CommunityId,
+    agent: PublicKey,
+    gateway: PublicKey,
+) -> Result<bool, buzz_db::DbError> {
+    let now = chrono::Utc::now().timestamp().max(0) as u64;
+    let agent_bytes = agent.to_bytes().to_vec();
+    let gateway_bytes = gateway.to_bytes().to_vec();
+    let key = (community, agent_bytes.clone(), gateway_bytes.clone());
+    // Read the generation before any lookup: a head stored meanwhile bumps it,
+    // so the verdict computed below is ignored on the next frame.
+    let generation = state
+        .gateway_generation
+        .load(std::sync::atomic::Ordering::Acquire);
+    if let Some(cached) = state.observer_gateway_cache.get(&key) {
+        if cached.generation == generation && cached.valid_until > now {
+            return Ok(cached.authorized);
+        }
+    }
+    let users = state
+        .db
+        .get_agent_channel_policies(community, &[agent_bytes.clone(), gateway_bytes.clone()])
+        .await?;
+    let owner = users
+        .get(&agent_bytes)
+        .and_then(|(_, owner)| owner.as_deref())
+        .and_then(|owner| PublicKey::from_slice(owner).ok());
+    let gateway_is_agent = users
+        .get(&gateway_bytes)
+        .is_some_and(|(_, owner)| owner.is_some());
+    let live = match owner {
+        Some(owner) if !gateway_is_agent => {
+            let heads = state
+                .db
+                .query_events(&buzz_db::EventQuery {
+                    kinds: Some(vec![buzz_core::kind::KIND_AGENT_GATEWAY_DELEGATION as i32]),
+                    authors: Some(vec![owner.to_bytes().to_vec()]),
+                    limit: Some(buzz_sdk::gateway::LOOKUP_LIMIT as i64),
+                    global_only: true,
+                    ..buzz_db::EventQuery::for_community(community)
+                })
+                .await?;
+            let heads: Vec<Event> = heads.into_iter().map(|stored| stored.event).collect();
+            buzz_sdk::gateway::resolve(owner, &heads, &[], &[owner, agent], now)
+                .into_iter()
+                .find(|live| live.gateway() == gateway)
+        }
+        _ => None,
+    };
+    let cached = GatewayVerdict {
+        authorized: live.is_some(),
+        generation,
+        // A positive verdict never outlives the delegation's own expiry.
+        valid_until: live.map_or(u64::MAX, |live| live.expires_at()),
+    };
+    state.observer_gateway_cache.insert(key, cached);
+    Ok(cached.authorized)
+}
+
+/// A cached observer gateway verdict; see [`gateway_observer_authorized`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct GatewayVerdict {
+    authorized: bool,
+    /// [`AppState::gateway_generation`] read before the lookup.
+    generation: u64,
+    /// Unix seconds after which the verdict is recomputed.
+    valid_until: u64,
 }
 
 fn agent_observer_route(event: &Event) -> Result<Option<AgentObserverRoute>, String> {
@@ -3967,6 +4069,182 @@ mod tests {
                 frame.contains("false") && frame.contains("blocked: you are banned"),
                 "banned owner's agent observer frame must be refused; got {frame}"
             );
+        }
+
+        /// Every observer path a delegated gateway gets, and the boundaries
+        /// around it: control from the gateway and telemetry to it route only
+        /// while the agent's recorded owner has a live kind 30181 head naming
+        /// it; an owned agent never passes as a gateway; another owner's agent
+        /// is unreachable; a newer disabled head revokes at once; NIP-09
+        /// deletion cannot empty the coordinate for a replayed old grant.
+        /// Mutations: return `is_owner` alone (no gateway branch) → RED at
+        /// "live gateway"; drop `!gateway_is_agent` → RED at "sibling";
+        /// drop the generation bump → RED at "revoked"; drop the deletion
+        /// guard → RED at "replay".
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn gateway_observer_frames_follow_the_live_delegation() {
+            use buzz_core::kind::{KIND_AGENT_GATEWAY_DELEGATION, KIND_AGENT_OBSERVER_FRAME};
+            use buzz_sdk::gateway::Delegation;
+            use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+            let state = crate::state::tests::test_state().await;
+            let host = format!("ws-gateway-{}.test", uuid::Uuid::new_v4().simple());
+            let community = state
+                .db
+                .ensure_configured_community(&host)
+                .await
+                .expect("ensure community")
+                .id;
+            let tenant = buzz_core::tenant::TenantContext::resolved(community, host);
+            let (owner, agent, sibling, gateway, stranger, foreign_agent) = (
+                Keys::generate(),
+                Keys::generate(),
+                Keys::generate(),
+                Keys::generate(),
+                Keys::generate(),
+                Keys::generate(),
+            );
+            for keys in [
+                &owner,
+                &agent,
+                &sibling,
+                &gateway,
+                &stranger,
+                &foreign_agent,
+            ] {
+                state
+                    .db
+                    .ensure_user(community, keys.public_key().as_bytes())
+                    .await
+                    .expect("ensure user");
+            }
+            for (owned, by) in [(&agent, &owner), (&foreign_agent, &stranger)] {
+                state
+                    .db
+                    .set_agent_owner(
+                        community,
+                        owned.public_key().as_bytes(),
+                        by.public_key().as_bytes(),
+                    )
+                    .await
+                    .expect("set agent owner");
+            }
+            let frame = |from: &Keys, to: &Keys, agent: &Keys, direction: &str| {
+                let content = super::encrypt_observer_payload(
+                    from,
+                    &to.public_key(),
+                    &serde_json::json!({"type": "cancel_turn"}),
+                )
+                .expect("encrypt");
+                EventBuilder::new(Kind::Custom(KIND_AGENT_OBSERVER_FRAME as u16), content)
+                    .tags([
+                        Tag::parse(["p", &to.public_key().to_hex()]).unwrap(),
+                        Tag::parse([super::OBSERVER_AGENT_TAG, &agent.public_key().to_hex()])
+                            .unwrap(),
+                        Tag::parse([super::OBSERVER_FRAME_TAG, direction]).unwrap(),
+                    ])
+                    .sign_with_keys(from)
+                    .expect("sign frame")
+            };
+            let control =
+                |from: &Keys, to: &Keys| frame(from, to, to, super::OBSERVER_FRAME_CONTROL);
+            let telemetry =
+                |from: &Keys, to: &Keys| frame(from, to, from, super::OBSERVER_FRAME_TELEMETRY);
+            let accepted = |text: &str| text.contains(",true,");
+            async fn ok_frame_scoped_owner(
+                state: &std::sync::Arc<crate::state::AppState>,
+                tenant: &buzz_core::tenant::TenantContext,
+                keys: &Keys,
+                event: nostr::Event,
+            ) -> String {
+                ok_frame_scoped(
+                    state,
+                    tenant,
+                    keys,
+                    event,
+                    buzz_auth::Scope::all_non_admin(),
+                )
+                .await
+            }
+            let now = Timestamp::now().as_secs();
+            let grant = |to: &Keys, created_at: u64| {
+                Delegation::grant(to.public_key(), created_at + 3_600, created_at)
+                    .unwrap()
+                    .sign_with_keys(&owner)
+                    .unwrap()
+            };
+
+            let text = ok_frame(&state, &tenant, &gateway, control(&gateway, &agent)).await;
+            assert!(!accepted(&text), "undelegated gateway control: {text}");
+
+            let old_grant = grant(&gateway, now - 10);
+            let text = ok_frame_scoped_owner(&state, &tenant, &owner, old_grant.clone()).await;
+            assert!(accepted(&text), "grant stored: {text}");
+            let text = ok_frame(&state, &tenant, &gateway, control(&gateway, &agent)).await;
+            assert!(accepted(&text), "live gateway control: {text}");
+            let text = ok_frame(&state, &tenant, &agent, telemetry(&agent, &gateway)).await;
+            assert!(accepted(&text), "live gateway telemetry: {text}");
+            let text = ok_frame(&state, &tenant, &gateway, control(&gateway, &foreign_agent)).await;
+            assert!(!accepted(&text), "another owner's agent: {text}");
+
+            let text =
+                ok_frame_scoped_owner(&state, &tenant, &owner, grant(&sibling, now - 9)).await;
+            assert!(accepted(&text), "sibling grant stored: {text}");
+            // Becoming an agent after the grant still prevents gateway use.
+            state
+                .db
+                .set_agent_owner(
+                    community,
+                    sibling.public_key().as_bytes(),
+                    owner.public_key().as_bytes(),
+                )
+                .await
+                .unwrap();
+            let text =
+                ok_frame_scoped_owner(&state, &tenant, &owner, grant(&sibling, now - 8)).await;
+            assert!(
+                !accepted(&text),
+                "known agent cannot receive a new delegation: {text}"
+            );
+            let text = ok_frame(&state, &tenant, &sibling, control(&sibling, &agent)).await;
+            assert!(
+                !accepted(&text),
+                "sibling must not pass as a gateway: {text}"
+            );
+
+            let revocation = Delegation::revoke(gateway.public_key(), now - 5)
+                .unwrap()
+                .sign_with_keys(&owner)
+                .unwrap();
+            let text = ok_frame_scoped_owner(&state, &tenant, &owner, revocation).await;
+            assert!(accepted(&text), "revocation stored: {text}");
+            let text = ok_frame(&state, &tenant, &gateway, control(&gateway, &agent)).await;
+            assert!(!accepted(&text), "revoked gateway control: {text}");
+
+            let coordinate = format!(
+                "{KIND_AGENT_GATEWAY_DELEGATION}:{}:{}",
+                owner.public_key().to_hex(),
+                gateway.public_key().to_hex()
+            );
+            let deletion = EventBuilder::new(Kind::EventDeletion, "")
+                .tag(Tag::parse(["a", &coordinate]).unwrap())
+                .sign_with_keys(&owner)
+                .unwrap();
+            let _ = ok_frame_scoped_owner(&state, &tenant, &owner, deletion).await;
+            let _ = ok_frame_scoped_owner(&state, &tenant, &owner, old_grant).await;
+            let text = ok_frame(&state, &tenant, &gateway, control(&gateway, &agent)).await;
+            assert!(
+                !accepted(&text),
+                "replayed old grant after deletion: {text}"
+            );
+
+            let malformed =
+                EventBuilder::new(Kind::Custom(KIND_AGENT_GATEWAY_DELEGATION as u16), "{}")
+                    .tag(Tag::parse(["d", &gateway.public_key().to_hex()]).unwrap())
+                    .sign_with_keys(&owner)
+                    .unwrap();
+            let text = ok_frame_scoped_owner(&state, &tenant, &owner, malformed).await;
+            assert!(!accepted(&text), "malformed head refused at ingest: {text}");
         }
 
         /// Fresh community with one unrestricted user.

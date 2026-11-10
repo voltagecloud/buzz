@@ -3351,6 +3351,11 @@ async fn handle_a_tag_deletion(
         super::push_lease::KIND_PUSH_LEASE => {
             tracing::debug!(d_tag, "NIP-09 deletion ignored for push lease");
         }
+        // Revocation is exclusively a newer disabled head. Deleting a head would
+        // empty the coordinate and let anyone replay an older signed grant.
+        buzz_core::kind::KIND_AGENT_GATEWAY_DELEGATION => {
+            tracing::debug!(d_tag, "NIP-09 deletion ignored for gateway delegation");
+        }
         buzz_core::kind::KIND_WORKFLOW_DEF => {
             // Workflow deletion belongs to the atomic persistence path in ingest.
             return Err(anyhow::anyhow!(
@@ -3545,6 +3550,13 @@ async fn plan_standard_deletion_targets(
             tracing::debug!(
                 target_id = %hex::encode(&target_id),
                 "NIP-09 deletion ignored for push lease"
+            );
+            continue;
+        }
+        if u32::from(target.event.kind.as_u16()) == buzz_core::kind::KIND_AGENT_GATEWAY_DELEGATION {
+            tracing::debug!(
+                target_id = %hex::encode(&target_id),
+                "NIP-09 deletion ignored for gateway delegation"
             );
             continue;
         }

@@ -175,7 +175,10 @@ async fn connection(
                         assert!(author.is_some());
                         let id = input[1].as_str().unwrap().to_string();
                         let filter = input[2].clone();
-                        let allowed = |event: &Event| matches!(event.kind.as_u16(), 24210 | 30177) || event.tags.iter().any(|tag| tag.as_slice() == ["h", CHANNEL] || tag.as_slice() == ["d", CHANNEL]);
+                        if matches!(id.as_str(), "mention-gateways" | "mention-gateway-profiles") {
+                            assert_eq!(filter["consistency"], json!("strong"));
+                        }
+                        let allowed = |event: &Event| matches!(event.kind.as_u16(), 0 | 24210 | 30177 | 30181) || event.tags.iter().any(|tag| tag.as_slice() == ["h", CHANNEL] || tag.as_slice() == ["d", CHANNEL]);
                         let mut history: Vec<_> = stored.lock().unwrap().iter().filter(|e| matches(&filter,e) && allowed(e)).cloned().collect();
                         history.sort_by_key(|e| std::cmp::Reverse((e.created_at, e.id)));
                         history.truncate(filter["limit"].as_u64().unwrap_or(1000) as usize);
