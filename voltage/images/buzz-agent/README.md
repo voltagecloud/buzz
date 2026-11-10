@@ -193,6 +193,10 @@ The bootstrap refuses an inherited `OPENAI_API_KEY`, `CODEX_API_KEY`, `CODEX_ACC
 Model credentials stay in process environments and are never written to workspace files. Tools that the agent runs inherit them: the agent's tool shell starts from a cleared environment, so the bootstrap lists them in `BUZZ_ACP_MCP_FORWARD_ENV`, which `buzz-acp` forwards into that shell. `buzz-agent-review` uses them to run its reviewer.
 The checkpoint secret scan also refuses Claude subscription tokens.
 
+When the manager config sets `paseo_daemons`, it generates pairing and gateway credentials only in the narrow Secret `paseo-daemon-<id>`.
+The profile carries no Paseo or gateway fields. Sandbox images need no profile-schema change for daemon provisioning.
+The manager preserves existing credentials on enrollment and returns only the password, server ID, offer URL, and gateway public key.
+
 ### Commit signing
 
 Every commit and tag is signed with an agent-only SSH key, `git.ssh_signing_key` in the profile: one OpenSSH Ed25519 private key.

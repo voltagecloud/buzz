@@ -244,6 +244,12 @@ pub enum ErrorCode {
     GithubLoginMismatch,
     /// The profile could not be written to the developer's secret.
     ProfileStoreFailed,
+    /// The developer's Paseo daemon Secret could not be written. For
+    /// `enroll` it is the refusal, given before the profile is stored, so the
+    /// profile is unchanged and repeating the enroll retries it. For `deploy`
+    /// it never refuses: the deploy stays `ok`, and the failed agent-list
+    /// refresh is reported under `paseo_sync`; enroll again to refresh it.
+    PaseoStoreFailed,
     /// No saved launch exists for this owner, community and agent.
     LaunchNotRegistered,
     /// A saved launch could not be read or durably updated.

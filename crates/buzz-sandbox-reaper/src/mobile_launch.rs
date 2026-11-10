@@ -15,6 +15,10 @@ use crate::manager::refusal;
 
 pub(crate) const DATA_KEY: &str = "launch.json";
 pub(crate) const LABEL: &str = "buzz.voltage.cloud/mobile-launch";
+/// The channel of the agent's latest channel-thread deploy, for its owner's
+/// Paseo daemon (`paseo.rs`). An annotation, not a payload field, so a
+/// manager without it still reads the registration.
+pub(crate) const CHANNEL_ANNOTATION: &str = "buzz.voltage.cloud/paseo-channel";
 
 fn store_failed() -> Value {
     refusal(
@@ -37,6 +41,11 @@ pub(crate) fn relay_endpoint(text: &str) -> Result<String, Value> {
     }
 }
 
+/// A channel ID as the relay writes it: a lowercase, hyphenated UUID.
+pub(crate) fn is_channel_id(id: &str) -> bool {
+    uuid::Uuid::parse_str(id).is_ok_and(|uuid| uuid.hyphenated().to_string() == id)
+}
+
 fn invalid() -> Value {
     refusal(
         wire::ErrorCode::InvalidStart,
@@ -54,6 +63,9 @@ pub(crate) struct Registration {
     pub(crate) agent: PublicKey,
     pub(crate) relay: String,
     pub(crate) payload: Value,
+    /// Saved as [`CHANNEL_ANNOTATION`]; `None` keeps the saved one.
+    #[serde(skip)]
+    pub(crate) channel: Option<String>,
 }
 
 impl Registration {
@@ -74,7 +86,18 @@ impl Registration {
             agent,
             relay,
             payload,
+            channel: None,
         })
+    }
+
+    /// Remember the deploy's channel when it is bound to a channel thread.
+    /// A direct-message deploy names no channel another key could post in.
+    pub fn in_channel(mut self, provider_config: &Value) -> Self {
+        self.channel = provider_config["sandbox"]["channel_id"]
+            .as_str()
+            .filter(|id| is_channel_id(id))
+            .map(str::to_owned);
+        self
     }
 
     pub(crate) fn name(owner: PublicKey, agent: PublicKey, relay: &str) -> String {
@@ -111,6 +134,15 @@ impl Registration {
             secret.metadata.name = Some(name.clone());
             secret.metadata.namespace = Some(namespace.into());
             secret.metadata.labels = Some(BTreeMap::from([(LABEL.into(), "v1".into())]));
+            let channel = self.channel.clone().or_else(|| {
+                prior
+                    .as_ref()
+                    .and_then(|s| s.metadata.annotations.as_ref())
+                    .and_then(|a| a.get(CHANNEL_ANNOTATION))
+                    .cloned()
+            });
+            secret.metadata.annotations =
+                channel.map(|channel| BTreeMap::from([(CHANNEL_ANNOTATION.into(), channel)]));
             secret.metadata.resource_version = prior
                 .as_ref()
                 .and_then(|s| s.metadata.resource_version.clone());

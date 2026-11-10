@@ -14,6 +14,7 @@ pub mod messages;
 pub mod moderation;
 pub mod notes;
 pub mod pack;
+pub(crate) mod paseo;
 pub mod patches;
 pub mod pr;
 pub mod project_channel;

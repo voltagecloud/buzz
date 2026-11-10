@@ -28,6 +28,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::enroll::{self, Enrollment, SecretsManagerStore};
 use crate::manager::{response_value, Admission, Job, Manager, ManagerConfig, Waiter};
+use crate::paseo::DaemonSecrets;
 use crate::shutdown;
 
 /// Bound on connecting, authenticating and subscribing.
@@ -96,6 +97,13 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
     let text = std::fs::read_to_string(&args.config)
         .with_context(|| format!("read config {}", args.config.display()))?;
     let config = ManagerConfig::parse(&text)?;
+    if config.paseo_daemons() && config.len() > crate::paseo::MAX_DAEMON_IDENTITIES {
+        anyhow::bail!(
+            "Paseo daemons support at most {} configured developers; found {}",
+            crate::paseo::MAX_DAEMON_IDENTITIES,
+            config.len()
+        );
+    }
     let defaults = sandbox_defaults(args.sandbox_provider_config.as_deref())?;
     let keys = load_keys(args.private_key_file.as_deref())?;
     let auth_tag = args
@@ -108,13 +116,22 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("BUZZ_GITHUB_API_URL: {e}"))?;
     let store = Arc::new(SecretsManagerStore::new().await);
     let broker = CodexLoginServer::prepare(args.codex, store.clone(), config.developers()).await?;
+    let client = kube::Client::try_default()
+        .await
+        .context("build in-cluster Kubernetes client")?;
     let mut enrollment = Enrollment::new(github, store);
     if let Some(server) = &broker {
         enrollment = enrollment.with_broker(Arc::clone(&server.broker));
     }
-    let client = kube::Client::try_default()
-        .await
-        .context("build in-cluster Kubernetes client")?;
+    if config.paseo_daemons() {
+        let secrets = DaemonSecrets::new(
+            client.clone(),
+            config.paseo_relay_endpoint(),
+            &args.relay_url,
+        )
+        .map_err(|crate::paseo::Failed(label)| anyhow::anyhow!("Paseo daemons: {label}"))?;
+        enrollment = enrollment.with_paseo(secrets);
+    }
     let developers = config.len();
     let manager =
         Arc::new(Manager::new(keys, config, client, enrollment).with_sandbox_defaults(defaults));

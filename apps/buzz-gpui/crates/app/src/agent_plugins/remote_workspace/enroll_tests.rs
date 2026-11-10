@@ -455,3 +455,55 @@ fn the_profile_reply_names_what_is_on_file() {
     );
     assert_eq!(OnFile::Nothing.text(), "Nothing enrolled yet.");
 }
+
+#[test]
+fn paseo_token_is_separate_from_the_profile_and_cleared_on_submit() {
+    let token = "github_pat_selected_repositories_fixture";
+    let mut form = values();
+    form.set(Field::PaseoGithubReadToken, token.into());
+    let submitted = form.submit();
+    assert!(Field::PaseoGithubReadToken.secret());
+    assert!(form.get(Field::PaseoGithubReadToken).is_empty());
+    assert_eq!(paseo_git_token(&submitted).unwrap().as_deref(), Some(token));
+    let profile = built(&submitted, OWNER).unwrap();
+    assert!(!profile.to_string().contains(token));
+    assert!(profile.get("paseo").is_none());
+}
+
+#[test]
+fn a_paseo_token_can_be_the_only_enrollment_change() {
+    let mut form = Values::default();
+    form.set(
+        Field::PaseoGithubReadToken,
+        "github_pat_selected_fixture".into(),
+    );
+    assert_eq!(
+        partial(&form, OWNER, Changes::default()).unwrap(),
+        json!({"version":1,"developer":"","owner_pubkey":OWNER})
+    );
+    form.set(Field::PaseoGithubReadToken, String::new());
+    assert!(partial(&form, OWNER, Changes::default()).is_err());
+    assert_eq!(paseo_git_token(&form).unwrap(), None);
+}
+
+#[test]
+fn paseo_requires_a_bounded_fine_grained_token_without_echoing_values() {
+    for token in [
+        "gho_broad_fixture".to_owned(),
+        "ghp_classic_fixture".into(),
+        "github_pat_".into(),
+        "github_pat_two words".into(),
+        "github_pat_read!".into(),
+        "github_pat_read-token".into(),
+        "github_pat_read$()".into(),
+        "github_pat_\u{7f}".into(),
+        "github_pat_非ascii".into(),
+        format!("github_pat_{}", "x".repeat(4096)),
+    ] {
+        let mut form = Values::default();
+        form.set(Field::PaseoGithubReadToken, token.clone());
+        let error = paseo_git_token(&form).unwrap_err();
+        assert!(!error.contains(&token));
+        assert!(error.contains("fine-grained"));
+    }
+}
