@@ -98,6 +98,53 @@ only after retiring its community membership.
 An operator then deletes the daemon Secret. The owner enrolls again to generate
 new credentials. Admit the new public key, join its channels, and grant access.
 
+## Gateway-owned scheduled workflows
+
+A live gateway can create workflows that send literal prompts to its owner's
+remote agents. Only a workflow with a `schedule` trigger can confer gateway
+prompt authority. The prompt template must contain no `{{` substitution syntax.
+Message, reaction, diff, and webhook triggers do not confer this authority.
+The owner's manual `buzz workflows trigger` of such a workflow runs it at once
+with the same authority as a scheduled fire, and is not subject to the interval
+floor below; Paseo asks the developer to approve each manual trigger.
+
+The executor captures the stored schedule trigger in its durable run context.
+Client inputs and webhook fields cannot set that origin. Before posting, it
+checks the stored step ID and exact original template again.
+The relay signs `["buzz:workflow-schedule", "literal-v1"]` only for that case.
+Harness and launcher require this assertion, the existing signed workflow-owner
+proof, an explicit agent mention, live delegation, and bound-channel membership.
+A member cannot forge relay authority by copying those tags.
+
+Scheduled intervals must be at least 60 seconds. Cron schedules run on the existing
+60-second scheduler tick. Overlapping fires create separate bound threads.
+They consume the owner's existing session quota; they do not replace prior work.
+Staging currently caps primary sessions at 10 per developer, plus five workers,
+under an aggregate 15-Pod quota. Capacity refusal uses the existing manager error.
+Workflow message dispatch success does not prove that a Sandbox started.
+No new quota or capacity is requested by this feature.
+
+```sh
+buzz workflows create --channel "$CHANNEL" --yaml - <<EOF_WORKFLOW
+name: Daily agent check
+trigger:
+  on: schedule
+  interval: 24h
+steps:
+  - id: check
+    action: send_message
+    text: '@AgentName read the repository and report the current status'
+EOF_WORKFLOW
+```
+
+Paseo asks for human approval before creating, updating, or triggering workflows.
+List and delete schedules through the existing workflow commands.
+Stored relay schedules survive daemon replacement; local Paseo schedules do not.
+Queued prompts are checked again before dispatch. Revocation, expiry, or channel
+removal stop further delegated prompts under the same bounds as direct gateway use.
+Use the matching manager's managed-key restriction to prevent human-sharing fallback.
+Workflows cannot grant owner administration, model changes, or owner DM access.
+
 ## Revocation and failure behavior
 
 Revocation uses a newer disabled replacement, without expiration. The relay

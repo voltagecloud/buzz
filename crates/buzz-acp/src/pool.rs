@@ -4947,9 +4947,9 @@ async fn dispatch_admission(ctx: &PromptContext, event: &nostr::Event) -> Dispat
     }
     let mut gateway_error = None;
     if let Some(gateways) = &ctx.gateways {
-        match gateways.is_live(&event.pubkey).await {
-            Ok(true) => return DispatchAdmission::Allowed,
-            Ok(false) => {}
+        match gateways.prompt_author(event).await {
+            Ok(Some(_)) => return DispatchAdmission::Allowed,
+            Ok(None) => {}
             Err(error) => gateway_error = Some(error.to_string()),
         }
     }

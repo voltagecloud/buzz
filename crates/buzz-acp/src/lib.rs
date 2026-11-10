@@ -658,7 +658,7 @@ mod inbound_author_gate {
             owner_cache: &OwnerCache,
             rest_client: &relay::RestClient,
         ) -> InboundAuthorGateDecision {
-            let effective_author = if matches!(respond_to, RespondTo::Owner) {
+            let mut effective_author = if matches!(respond_to, RespondTo::Owner) {
                 event.pubkey.to_hex()
             } else {
                 effective_prompt_author(event, self.relay_self.as_deref(), &self.agent_pubkey_hex)
@@ -673,12 +673,16 @@ mod inbound_author_gate {
             )
             .await;
             // Strict owner mode also admits a live owner-delegated gateway, in
-            // channels only. The raw signer is the effective author here, and
-            // the owner's DMs are never delegated.
+            // channels only. A relay workflow must cryptographically prove
+            // its gateway owner and signed agent/channel scope.
             if !allowed && !is_dm && matches!(respond_to, RespondTo::Owner) {
                 if let Some(gateways) = &self.gateways {
-                    allowed = match gateways.is_live(&event.pubkey).await {
-                        Ok(live) => live,
+                    allowed = match gateways.prompt_author(event).await {
+                        Ok(Some(author)) => {
+                            effective_author = author.to_hex();
+                            true
+                        }
+                        Ok(None) => false,
                         Err(error) => {
                             tracing::warn!(
                                 author = %event.pubkey,

@@ -905,6 +905,7 @@ async fn handle_workflow_trigger(
 
     // 4. Execute: create workflow run
     let mut trigger_ctx = TriggerContext {
+        scheduled: matches!(def.trigger, buzz_workflow::TriggerDef::Schedule { .. }),
         channel_id: workflow
             .channel_id
             .map(|id| id.to_string())
