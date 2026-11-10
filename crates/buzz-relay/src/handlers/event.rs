@@ -1884,6 +1884,18 @@ mod tests {
             (community_b, agent_bytes.clone(), owner_bytes.clone()),
             false,
         );
+        // A failed owner check now tries gateway authority too. Keep this
+        // no-database test on the production cached-denial path in B.
+        state.observer_gateway_cache.insert(
+            (community_b, agent_bytes.clone(), owner_bytes.clone()),
+            super::GatewayVerdict {
+                authorized: false,
+                generation: state
+                    .gateway_generation
+                    .load(std::sync::atomic::Ordering::Acquire),
+                valid_until: u64::MAX,
+            },
+        );
 
         let encrypted = encrypt_observer_payload(
             &agent,
