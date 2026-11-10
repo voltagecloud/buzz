@@ -1,0 +1,70 @@
+version = 1
+
+[providers.onepassword]
+type = "1password"
+account = "teamvoltage.1password.com"
+
+[services.grafana-staging]
+description = "Staging Grafana HTTP API access through a service account token"
+hint = "via grafana-staging api /api/org"
+provider = "onepassword"
+
+[services.grafana-staging.secrets]
+token = "op://Buzz Agents Dev/Via Grafana Staging/via-token"
+
+[services.grafana-staging.commands.api]
+description = "Call the staging Grafana HTTP API with a service account token."
+mode = "rest"
+base_url = "http://grafana.monitoring.svc.cluster.local"
+method_default = "GET"
+
+[services.grafana-staging.commands.api.auth]
+type = "bearer"
+secret = "token"
+
+[services.grafana-staging.commands.api.headers]
+Accept = "application/json"
+
+[services.linear]
+description = "Linear app-actor API access through OAuth"
+hint = "via linear api POST /graphql --json '{\"query\":\"{ viewer { id name } }\"}'"
+provider = "onepassword"
+
+[services.linear.secrets]
+oauth = "op://Buzz Agents Dev/Via Linear App Voltage/text"
+
+[services.linear.commands.api]
+description = "Call configured Linear API endpoints with an app-actor OAuth bearer token."
+mode = "rest"
+base_url = "https://api.linear.app"
+method_default = "GET"
+
+[services.linear.commands.api.auth]
+type = "oauth"
+credential = "oauth"
+
+[services.depot]
+description = "Depot build cache (sccache, Turborepo, Go) shared by every developer's agents"
+provider = "onepassword"
+
+[services.depot.secrets]
+organization = "op://Buzz Agents Dev/Depot/organization"
+token = "op://Buzz Agents Dev/Depot/credential"
+
+[services.argocd-staging]
+description = "Staging Argo CD API: every app's status, resource tree and logs; sync and restart in application projects"
+hint = "via argocd-staging api /api/v1/applications --query fields=items.metadata.name,items.spec.project,items.status.sync.status,items.status.health.status"
+provider = "onepassword"
+
+[services.argocd-staging.secrets]
+token = "op://Buzz Agents Dev/Argo CD Staging/credential"
+
+[services.argocd-staging.commands.api]
+description = "Call the staging Argo CD API with the buzz-agents account token."
+mode = "rest"
+base_url = "http://argocd-server.argo.svc.cluster.local"
+method_default = "GET"
+
+[services.argocd-staging.commands.api.auth]
+type = "bearer"
+secret = "token"

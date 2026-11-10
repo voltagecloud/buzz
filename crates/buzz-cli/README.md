@@ -20,6 +20,28 @@ export BUZZ_PRIVATE_KEY="nsec1..."
 buzz channels list
 ```
 
+## Onboarding (`buzz onboard`)
+
+`buzz onboard` is an interactive wizard that sets up a developer for Remote
+workspace agents without the Buzz app: a Buzz identity (generated, or imported
+with `--import-key`), the community invite, GitHub, model and 1Password
+credentials, agents from presets in a workspace channel, the encrypted profile
+enrollment, and the Paseo pairing. It sends the same events and Sandbox manager
+requests as the Buzz app, so the result works in every Buzz app.
+
+```bash
+buzz onboard                                   # interactive
+buzz onboard --yes --agents brokkr,bifrost     # no prompts; secrets from BUZZ_ONBOARD_* env vars
+buzz onboard --reenroll                        # change a stored credential
+```
+
+It does not need `BUZZ_PRIVATE_KEY` and ignores `BUZZ_RELAY_URL`: the relay is
+`--relay` (default `wss://buzz.voltage.cloud`, `wss://` only). The owner key is
+saved to `<config dir>/buzz/identity.nsec` and progress to `onboard.json` (both
+mode `0600`); a re-run does only what is missing. Credentials are never saved
+or printed. Progress goes to stderr and a JSON summary without secrets to
+stdout. See [voltage/remote-agents.md](../../voltage/remote-agents.md#set-up-with-paseo-no-buzz-app).
+
 ## Usage
 
 All output is JSON on stdout. Errors are JSON on stderr. Exit codes: 0=ok, 1=user error, 2=network, 3=auth, 4=other, 5=write conflict.
@@ -131,6 +153,7 @@ The table below mirrors that tree for readers who are not at a terminal.
 
 | Group | Subcommand | Description |
 |-------|-----------|-------------|
+| `onboard` | | Set up identity, credentials and Remote workspace agents without the Buzz app |
 | `messages` | `send` | Send a message to a channel |
 | | `send-diff` | Send a code diff with metadata |
 | | `edit` | Edit a message you sent |

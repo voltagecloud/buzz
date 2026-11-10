@@ -6,7 +6,7 @@ Your agents use your GitHub account, your model subscriptions, and a shared set 
 Every commit an agent makes is signed with a key that is on your GitHub account, so GitHub shows it as **Verified**.
 
 - **Admins:** start at [Onboard a developer](#onboard-a-developer).
-- **Developers:** start at [Set up your agents](#set-up-your-agents).
+- **Developers:** start at [Set up your agents](#set-up-your-agents) to use the Buzz app, or at [Set up with Paseo (no Buzz app)](#set-up-with-paseo-no-buzz-app) to use one terminal command.
 
 A Paseo daemon uses its own gateway key. Follow
 [Gateway keys](../docs/agent-gateway-key.md) to admit that key and grant access
@@ -114,7 +114,7 @@ sequenceDiagram
 
 | Credential | You enter it | Stored in | Used by |
 |---|---|---|---|
-| Buzz identity | Buzz app sign-in | Your machine | The app, to sign requests |
+| Buzz identity | Buzz app sign-in, or `buzz onboard` | Your machine (`buzz onboard`: `~/.config/buzz/identity.nsec`, mode `0600`) | The app or `buzz`, to sign requests |
 | GitHub token | Enroll form | Profile (Secrets Manager) | The Sandbox: clone, push, PRs |
 | Agent signing key | Created by the app | Profile; public half on GitHub | The Sandbox: sign commits |
 | 1Password service account token | Enroll form | Profile | The Sandbox: read the Buzz Agents Dev vault |
@@ -151,6 +151,76 @@ Do these steps once for each new developer. You need the staging VPN for step 2.
 5. **Check their model seats.** Codex access tokens need a ChatGPT Business or Enterprise seat. The workspace owner must allow access tokens. Claude needs a Claude seat.
 
 The developer's Buzz identity must be a member of the `buzz.voltage.cloud` community.
+
+## Set up with Paseo (no Buzz app)
+
+Use this path if you use [Paseo](https://paseo.sh) as your interface. You need Paseo and one terminal command, `buzz onboard`. You do not need the Buzz app.
+The command sends the same events and Sandbox manager requests as the Buzz app. Agents, profiles, and channels that you create with it appear in the Buzz apps, and agents that you create in a Buzz app appear to `buzz onboard`. You can change to the Buzz app at any time.
+
+Before you start:
+
+1. An admin must do [Onboard a developer](#onboard-a-developer) for your Buzz owner key. If you do not have a key yet, run `buzz onboard` once. It creates a key and shows the hex public key to give to your admin.
+2. Get an invite to `buzz.voltage.cloud`, if your key is not a member yet.
+3. Get your credentials: see [Get your credentials](#2-get-your-credentials). Install `gh` and run `gh auth login`, so that the command can add your agents' signing key to GitHub.
+
+Install the CLI and run the wizard:
+
+```sh
+cargo install --locked --git https://github.com/voltagecloud/buzz buzz-cli
+buzz onboard
+```
+
+The wizard asks one question at a time, and hides each secret as you type it. It does these steps:
+
+| Step | What it does | Same as in the Buzz app |
+|---|---|---|
+| 1. Identity | Creates a key, or imports your Buzz app key with `--import-key`. Joins the community with your invite. Publishes your profile. | Sign in, join a community |
+| 2. GitHub | Reads your token from `gh auth token`, or asks for one. Reads your Git email. Creates the agent-only Ed25519 signing key with `ssh-keygen`. | Enroll form: GitHub token, Git email |
+| 3. Models | Can run `claude setup-token`. Asks for a Claude subscription token, a Codex access token, and an OpenRouter API key. Checks them with the enroll form's rules. | Enroll form: model credentials |
+| 4. 1Password | Asks for the service account token. Uses the [shared via profile](#shared-via-profile). | Enroll form: 1Password token, via profile |
+| 5. Agents | Creates agents from presets (Brokkr, Frigg, Bifrost, Forseti, or an OpenRouter agent), lists them, and adds them to a private workspace channel. | **Create agent → Remote workspace** |
+| 6. Enroll | Sends the encrypted enroll request. Adds the signing key to GitHub with `gh`. Starts each new agent once, so that the Sandbox manager registers it. Shows your Paseo pairing. | **Enroll profile**, then the first mention |
+| 7. Next steps | Tells you how to pair Paseo and how to use the Buzz app instead. | |
+
+Each step is saved when it completes. If a step fails, the wizard tells you why. Run `buzz onboard` again: it does only the steps that are not complete.
+The command never saves or shows your credentials. It sends them only in the encrypted enroll request. It keeps your key and its progress in `~/.config/buzz` (mode `0700`; files mode `0600`). Each agent's key is in `onboard.json`, as the Buzz app keeps agent keys on its device.
+
+### Pair Paseo
+
+If an admin enabled Paseo daemons, step 6 shows your daemon's password, an offer link (`https://app.paseo.sh/#offer=…`), and the same link as a QR code. If not, it says that Paseo is not provisioned yet. Run `buzz onboard` again after an admin enables it.
+
+- **Paseo desktop:** open the offer link on that computer, then enter the password.
+- **Paseo mobile:** scan the QR code, then enter the password.
+
+The command does not save the password. To show it again, run `buzz onboard`.
+
+### Run without prompts
+
+Use `--yes` to never prompt. Give secrets in environment variables, never in flags:
+
+```sh
+BUZZ_ONBOARD_INVITE='https://buzz.voltage.cloud/invite/v2.…' \
+BUZZ_ONBOARD_GITHUB_TOKEN='github_pat_…' \
+BUZZ_ONBOARD_OP_TOKEN='ops_…' \
+BUZZ_ONBOARD_CLAUDE_TOKEN='sk-ant-oat01-…' \
+buzz onboard --yes --name 'Your Name' --git-email you@example.com --agents brokkr,bifrost
+```
+
+The other secret variables are `BUZZ_ONBOARD_CODEX_TOKEN`, `BUZZ_ONBOARD_OPENROUTER_KEY`, `BUZZ_ONBOARD_OPENAI_API_KEY`, and `BUZZ_ONBOARD_ANTHROPIC_API_KEY`. Run `buzz onboard --help` for every flag.
+
+### Use the Buzz app with the same agents
+
+- Sign in to the Buzz app with the key in `~/.config/buzz/identity.nsec`. Your agents appear under **Agents**. Mention one in your workspace channel to start a session.
+- The app shows agents from `buzz onboard` as running on another device, because their keys are not in the app. The Sandbox manager starts them for your mentions from any Buzz app.
+- `buzz onboard` lists agents that you created in the app, and does not create a second agent with the same name.
+- To change one credential later, run `buzz onboard --reenroll` and fill in only what changes. Or use the enroll form in the app.
+
+### Not available yet
+
+These steps come in later changes. The wizard lists them as not available:
+
+- Give your Paseo daemon a gateway key (`buzz gateway grant`).
+- Register your Paseo daemon, so that it can give work to your agents.
 
 ## Set up your agents
 
@@ -490,6 +560,8 @@ CAUTION: An agent runs with full tool access in its Sandbox, and it reads untrus
 
 | What you see | What to do |
 |---|---|
+| `buzz onboard` says *Could not check what is enrolled* | Check that you can reach `wss://buzz.voltage.cloud`, then run `buzz onboard` again. |
+| `buzz onboard` says *N agent(s) did not start* | Run `buzz onboard` again. It retries only the agents that did not start. |
 | *This Buzz identity is not a configured developer.* | Ask an admin to do [Onboard a developer](#onboard-a-developer), including the restart in step 3. |
 | *Join the community at the relay to enroll through it.* | Join `buzz.voltage.cloud` in the app, then enroll again. |
 | *GitHub did not accept the token.* | Make a new fine-grained token, then enroll again. |
