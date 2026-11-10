@@ -289,7 +289,7 @@ impl<P: Prompter, R: Relay, T: ControlTransport, X: Tools> Wizard<P, R, T, X> {
             for index in &pending {
                 let name = self.state.agents[*index].name.clone();
                 self.actions.push(format!(
-                    "{name} is not registered with the Sandbox manager yet: run buzz onboard without --skip-first-start."
+                    "{name} is not registered with the Sandbox manager yet, so mentions do not start it and your Paseo daemon does not list it: run buzz onboard without --skip-first-start."
                 ));
             }
             return Ok(());

@@ -12,12 +12,13 @@ use nostr::{Keys, ToBech32};
 use serde_json::{json, Value};
 use zeroize::Zeroizing;
 
+use super::gateway::{self, GatewayGrants};
 use super::profile::{self, GitHubIdentity};
 use super::state::{Secret, Store};
 use super::steps_credentials::SHARED_VIA_PROFILE;
-use super::{agents, canonical_relay, steps_identity, EnvSecrets, OnboardArgs, Wizard};
+use super::{agents, canonical_relay, paseo, steps_identity, EnvSecrets, OnboardArgs, Wizard};
 use crate::error::CliError;
-use fakes::{strings, Answer, FakeManager, FakeRelay, FakeTools, ScriptPrompter};
+use fakes::{strings, Answer, FakeGrants, FakeManager, FakeRelay, FakeTools, ScriptPrompter};
 
 const GITHUB: &str = "ghp_SECRETGITHUBTOKEN";
 const GH_CLI: &str = "gho_SECRETGHCLITOKEN";
@@ -74,9 +75,14 @@ fn tools() -> FakeTools {
     }
 }
 
-fn paseo() -> Value {
-    json!({"password": PASSWORD, "server_id": "srv-1",
-        "offer_url": "https://app.paseo.sh/#offer=eyJ2IjoyfQ"})
+/// A pairing as the manager returns it; `gateway` empty leaves the key out.
+fn paseo(gateway: &str) -> Value {
+    let mut pairing = json!({"password": PASSWORD, "server_id": "srv-1",
+        "offer_url": "https://app.paseo.sh/#offer=eyJ2IjoyfQ"});
+    if !gateway.is_empty() {
+        pairing["gateway_pubkey"] = json!(gateway);
+    }
+    pairing
 }
 
 async fn onboard(
@@ -87,9 +93,29 @@ async fn onboard(
     manager: &FakeManager,
     tools: &FakeTools,
 ) -> Result<Value, CliError> {
+    onboard_with(None, args, env, prompter, relay, manager, tools).await
+}
+
+/// [`onboard`] with `grants` in place of this build's [`gateway::Unreleased`].
+async fn onboard_with(
+    grants: Option<Box<dyn GatewayGrants + Send + Sync>>,
+    args: OnboardArgs,
+    env: EnvSecrets,
+    prompter: &mut ScriptPrompter,
+    relay: &FakeRelay,
+    manager: &FakeManager,
+    tools: &FakeTools,
+) -> Result<Value, CliError> {
     let store = Store::new(args.state_dir.clone().unwrap());
     let mut wizard = Wizard::new(args, env, store, prompter, relay, manager, tools)?;
+    if let Some(grants) = grants {
+        wizard.grants = grants;
+    }
     wizard.run().await
+}
+
+fn now() -> u64 {
+    u64::try_from(chrono::Utc::now().timestamp()).unwrap()
 }
 
 fn tag<'a>(event: &'a Value, name: &str) -> Vec<&'a str> {
@@ -138,7 +164,8 @@ async fn first_run_sets_up_like_the_app_and_a_rerun_is_a_no_op() {
         age_attestation_required: false,
     });
     let manager = FakeManager::for_developer(&owner_hex);
-    manager.state().paseo = Some(paseo());
+    let gateway = Keys::generate().public_key().to_hex();
+    manager.state().paseo = Some(paseo(&gateway));
     let tools = tools();
     let extra = [
         "--yes",
@@ -152,7 +179,8 @@ async fn first_run_sets_up_like_the_app_and_a_rerun_is_a_no_op() {
         "brokkr,bifrost",
     ];
     let mut prompter = ScriptPrompter::quiet();
-    let summary = onboard(
+    let summary = onboard_with(
+        Some(Box::new(FakeGrants)),
         args(&state_dir, &manager, &extra),
         env(&owner),
         &mut prompter,
@@ -255,7 +283,20 @@ async fn first_run_sets_up_like_the_app_and_a_rerun_is_a_no_op() {
     assert_eq!(transcript.matches(PASSWORD).count(), 1);
     assert!(transcript.contains("https://app.paseo.sh/#offer="));
     assert!(transcript.contains('█') || transcript.contains('▀'));
+    assert!(transcript.contains("app.paseo.sh"));
     assert_eq!(summary["paseo"]["provisioned"], true);
+    assert_eq!(summary["paseo"]["gateway_pubkey"], gateway);
+
+    // Gateway: one owner-signed grant of the daemon's key for 90 days.
+    let grants = relay.of_kind(30181);
+    assert_eq!(grants.len(), 1);
+    assert_eq!(grants[0]["pubkey"], owner_hex);
+    assert_eq!(tag(&grants[0], "d"), [gateway.as_str()]);
+    assert_eq!(tag(&grants[0], "p"), [gateway.as_str()]);
+    let expires: u64 = tag(&grants[0], "expiration")[0].parse().unwrap();
+    assert!(expires.abs_diff(now() + 90 * 86_400) < 120, "{expires}");
+    assert_eq!(summary["gateway_grant"]["expires_at"], expires);
+    assert!(transcript.contains("Granted your Paseo daemon's gateway key until"));
 
     // Secrets: never shown, summarised, or saved beyond the key files.
     let saved = std::fs::read_to_string(state_dir.join("onboard.json")).unwrap();
@@ -282,7 +323,8 @@ async fn first_run_sets_up_like_the_app_and_a_rerun_is_a_no_op() {
     // Re-run with no secrets and no flags: nothing is sent again.
     let published = relay.state().published;
     let mut prompter = ScriptPrompter::quiet();
-    let again = onboard(
+    let again = onboard_with(
+        Some(Box::new(FakeGrants)),
         args(&state_dir, &manager, &["--yes"]),
         EnvSecrets::default(),
         &mut prompter,
@@ -299,6 +341,31 @@ async fn first_run_sets_up_like_the_app_and_a_rerun_is_a_no_op() {
     assert_eq!(tools.gh_added.lock().unwrap().len(), 1);
     assert_eq!(again["agents"], summary["agents"]);
     assert_eq!(again["channel"], summary["channel"]);
+    assert!(prompter.transcript.join("\n").contains("is granted until"));
+
+    // A grant near its expiry is renewed, once.
+    let store = Store::new(state_dir.clone());
+    let mut state = store.load().unwrap();
+    state.gateway_grant.as_mut().unwrap().expires_at = now() + 86_400;
+    store.save(&state).unwrap();
+    for _ in 0..2 {
+        let mut prompter = ScriptPrompter::quiet();
+        onboard_with(
+            Some(Box::new(FakeGrants)),
+            args(&state_dir, &manager, &["--yes", "--gateway-expires", "2w"]),
+            EnvSecrets::default(),
+            &mut prompter,
+            &relay,
+            &manager,
+            &tools,
+        )
+        .await
+        .unwrap();
+    }
+    let grants = relay.of_kind(30181);
+    assert_eq!(grants.len(), 2);
+    let renewed: u64 = tag(&grants[1], "expiration")[0].parse().unwrap();
+    assert!(renewed.abs_diff(now() + 14 * 86_400) < 120, "{renewed}");
 }
 
 /// The interactive path: a generated key, gh's token, prompts for every
@@ -421,24 +488,40 @@ async fn failures_are_reported_and_resume_without_duplicates() {
     assert!(state.agents[0].profile_published && !state.agents[0].listed);
 
     // Second run: the listing lands, enrollment happens, the start fails.
+    // Third run: the manager starts it but cannot update the Paseo
+    // daemon's agent list, so the start stays pending.
     let agent = state.agents[0].pubkey.clone();
-    manager.state().failing_deploys.insert(agent.clone());
-    let mut prompter = ScriptPrompter::quiet();
-    let error = onboard(
-        args(&state_dir, &manager, &["--yes"]),
-        env(&owner),
-        &mut prompter,
-        &relay,
-        &manager,
-        &tools,
-    )
-    .await
-    .unwrap_err();
-    assert!(error.to_string().contains("did not start"), "{error}");
-    assert!(prompter.transcript.join("\n").contains("manager_timeout"));
-    assert!(!Store::new(state_dir.clone()).load().unwrap().agents[0].registered);
+    for (index, code) in ["manager_timeout", "paseo_store_failed"].iter().enumerate() {
+        manager
+            .state()
+            .failing_deploys
+            .insert(agent.clone(), (*code).to_owned());
+        let mut prompter = ScriptPrompter::quiet();
+        let error = onboard(
+            args(&state_dir, &manager, &["--yes"]),
+            if index == 0 {
+                env(&owner)
+            } else {
+                EnvSecrets::default()
+            },
+            &mut prompter,
+            &relay,
+            &manager,
+            &tools,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("did not start"), "{error}");
+        let transcript = prompter.transcript.join("\n");
+        assert!(transcript.contains(code), "{transcript}");
+        assert_eq!(
+            transcript.contains("agent list was not updated"),
+            *code == "paseo_store_failed"
+        );
+        assert!(!Store::new(state_dir.clone()).load().unwrap().agents[0].registered);
+    }
 
-    // Third run: only the start is retried.
+    // Fourth run: only the start is retried.
     let mut prompter = ScriptPrompter::quiet();
     onboard(
         args(&state_dir, &manager, &["--yes"]),
@@ -459,7 +542,7 @@ async fn failures_are_reported_and_resume_without_duplicates() {
     assert_eq!(profiles, 1);
     assert_eq!(relay.of_kind(30177).len(), 1);
     assert_eq!(relay.of_kind(9000).len(), 1);
-    assert_eq!(relay.of_kind(9).len(), 2, "one kickoff per start attempt");
+    assert_eq!(relay.of_kind(9).len(), 3, "one kickoff per start attempt");
     assert_eq!(manager.state().versions, 1);
 }
 
@@ -513,6 +596,7 @@ async fn app_agents_are_kept_and_exclusive_credentials_refused() {
     let manager = FakeManager::for_developer(&owner_hex);
     manager.state().paseo =
         Some(json!({"password": "x", "server_id": "s", "offer_url": "https://example.com"}));
+    let malformed = "The Sandbox manager's Paseo pairing was malformed.";
     let tools = tools();
     let mut secrets = env(&owner);
     secrets.openai_api_key = secret("sk-openai");
@@ -565,12 +649,258 @@ async fn app_agents_are_kept_and_exclusive_credentials_refused() {
         .transcript
         .join("\n")
         .contains("Already in your Buzz app: Brokkr"));
-    assert!(summary["action_needed"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|a| a.as_str().unwrap().contains("Paseo pairing was malformed")));
+    let actions = summary["action_needed"].as_array().unwrap();
+    assert_eq!(actions.iter().filter(|a| *a == malformed).count(), 1);
     assert_eq!(summary["paseo"]["provisioned"], false);
+}
+
+/// Without the gateway SDK the grant is never faked: the exact command is
+/// printed and listed, nothing is published or saved as granted, and a
+/// daemon key that is the owner's own is refused.
+#[tokio::test]
+async fn the_gateway_grant_is_never_faked_before_the_sdk_lands() {
+    let dir = tempfile::tempdir().unwrap();
+    let state_dir = dir.path().join("buzz");
+    let owner = Keys::generate();
+    let owner_hex = owner.public_key().to_hex();
+    let relay = FakeRelay::with_invite(INVITE);
+    let manager = FakeManager::for_developer(&owner_hex);
+    let gateway = Keys::generate().public_key().to_hex();
+    manager.state().paseo = Some(paseo(&gateway));
+    let tools = tools();
+    let extra = [
+        "--yes",
+        "--import-key",
+        "--invite",
+        INVITE,
+        "--name",
+        "O",
+        "--agents",
+        "brokkr",
+        "--gateway-expires",
+        "30D",
+    ];
+    for _ in 0..2 {
+        let mut prompter = ScriptPrompter::quiet();
+        let summary = onboard(
+            args(&state_dir, &manager, &extra),
+            env(&owner),
+            &mut prompter,
+            &relay,
+            &manager,
+            &tools,
+        )
+        .await
+        .unwrap();
+        let command = format!("buzz gateway grant {gateway} --expires 30d");
+        let transcript = prompter.transcript.join("\n");
+        assert!(transcript.contains("not available in this build yet"));
+        assert!(transcript.contains(&command));
+        assert!(transcript.contains(&format!(
+            "buzz-admin add-member --pubkey {gateway} --role member"
+        )));
+        assert!(transcript.contains(&format!(
+            "--pubkey {gateway}. The grant does not add membership."
+        )));
+        let actions = summary["action_needed"].as_array().unwrap();
+        assert!(actions
+            .iter()
+            .any(|a| a.as_str().unwrap().ends_with(&command)));
+        assert!(summary["gateway_grant"].is_null());
+        assert!(relay.of_kind(30181).is_empty());
+        assert!(Store::new(state_dir.clone())
+            .load()
+            .unwrap()
+            .gateway_grant
+            .is_none());
+    }
+
+    // A daemon key that is the owner's own is refused, even with the SDK.
+    manager.state().paseo = Some(paseo(&owner_hex));
+    let mut prompter = ScriptPrompter::quiet();
+    let summary = onboard_with(
+        Some(Box::new(FakeGrants)),
+        args(&state_dir, &manager, &["--yes"]),
+        EnvSecrets::default(),
+        &mut prompter,
+        &relay,
+        &manager,
+        &tools,
+    )
+    .await
+    .unwrap();
+    assert!(relay.of_kind(30181).is_empty());
+    assert!(summary["action_needed"][0]
+        .as_str()
+        .unwrap()
+        .contains("is your own or an agent's key"));
+
+    // Declining in the terminal grants nothing and says how to grant later.
+    manager.state().paseo = Some(paseo(&gateway));
+    let mut prompter = ScriptPrompter::scripted(vec![
+        Answer::Secret(String::new()), // keep the Claude token on file
+        Answer::Secret(String::new()), // no Codex token
+        Answer::Secret(String::new()), // no OpenRouter key
+        Answer::Text("n"),             // do not grant the gateway key
+    ]);
+    onboard_with(
+        Some(Box::new(FakeGrants)),
+        args(&state_dir, &manager, &[]),
+        EnvSecrets::default(),
+        &mut prompter,
+        &relay,
+        &manager,
+        &tools,
+    )
+    .await
+    .unwrap();
+    assert!(prompter.answers.is_empty());
+    assert!(relay.of_kind(30181).is_empty());
+    assert!(prompter.transcript.join("\n").contains(&format!(
+        "Skipped. To grant it later, run: buzz gateway grant {gateway} --expires 90d"
+    )));
+}
+
+/// Every enroll refusal, `paseo_store_failed` included, fails the run with
+/// its code and guidance, adds no signing key to GitHub (the app adds it
+/// only after the manager stores it), saves nothing as enrolled, and a
+/// plain re-run then enrolls once.
+#[tokio::test]
+async fn every_enroll_refusal_is_reported_and_resumes() {
+    let codes = profile::REFUSALS
+        .iter()
+        .map(|(code, _)| *code)
+        .chain(["something_new"]);
+    for code in codes {
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path().join("buzz");
+        let owner = Keys::generate();
+        let relay = FakeRelay::with_invite(INVITE);
+        let manager = FakeManager::for_developer(&owner.public_key().to_hex());
+        manager.state().paseo = Some(paseo(""));
+        manager.state().enroll_refusal = Some(code.to_owned());
+        let tools = tools();
+        let extra = [
+            "--yes",
+            "--import-key",
+            "--invite",
+            INVITE,
+            "--name",
+            "O",
+            "--agents",
+            "brokkr",
+        ];
+        let mut prompter = ScriptPrompter::quiet();
+        let error = onboard(
+            args(&state_dir, &manager, &extra),
+            env(&owner),
+            &mut prompter,
+            &relay,
+            &manager,
+            &tools,
+        )
+        .await
+        .unwrap_err();
+        let text = error.to_string();
+        assert!(
+            text.contains(&format!("Refused ({code})")),
+            "{code}: {text}"
+        );
+        let reason = profile::REFUSALS.iter().find(|(known, _)| *known == code);
+        if let Some((_, reason)) = reason {
+            assert!(text.contains(reason), "{code}: {text}");
+        }
+        assert_eq!(
+            matches!(error, CliError::Auth(_)),
+            code == "unauthorized_owner",
+            "{code}"
+        );
+        assert!(tools.gh_added.lock().unwrap().is_empty(), "{code}");
+        let state = Store::new(state_dir.clone()).load().unwrap();
+        assert!(
+            state.enrolled_version.is_none() && state.pending_key.is_none(),
+            "{code}"
+        );
+        assert!(!prompter.transcript.join("\n").contains(PASSWORD), "{code}");
+
+        let mut prompter = ScriptPrompter::quiet();
+        let summary = onboard(
+            args(&state_dir, &manager, &["--yes"]),
+            env(&owner),
+            &mut prompter,
+            &relay,
+            &manager,
+            &tools,
+        )
+        .await
+        .unwrap();
+        assert_eq!(manager.state().versions, 1, "{code}");
+        assert_eq!(tools.gh_added.lock().unwrap().len(), 1, "{code}");
+        assert_eq!(summary["paseo"]["provisioned"], true, "{code}");
+        assert_eq!(summary["agents"][0]["registered"], true, "{code}");
+    }
+}
+
+/// The pairing and grant-lifetime contracts, row by row.
+#[test]
+fn paseo_pairings_and_grant_lifetimes_are_checked() {
+    let key = Keys::generate().public_key();
+    let hex = key.to_hex();
+    let with = |field: &str, value: Value| {
+        let mut pairing = paseo("");
+        pairing[field] = value;
+        json!({"ok": true, "paseo": pairing})
+    };
+    let gateway = |reply: Value| paseo::pairing(&reply).map(|p| p.map(|p| p.gateway));
+    let malformed = Err("The Sandbox manager's Paseo pairing was malformed.".to_owned());
+    for (reply, expected) in [
+        (json!({"ok": true}), Ok(None)),
+        (json!({"ok": true, "paseo": null}), Ok(None)),
+        (json!({"ok": true, "paseo": paseo("")}), Ok(Some(None))),
+        (with("gateway_pubkey", Value::Null), Ok(Some(None))),
+        (with("gateway_pubkey", json!(hex)), Ok(Some(Some(key)))),
+        (
+            with("gateway_pubkey", json!(key.to_bech32().unwrap())),
+            malformed.clone(),
+        ),
+        (with("gateway_pubkey", json!(&hex[1..])), malformed.clone()),
+        (
+            with("gateway_pubkey", json!("z".repeat(64))),
+            malformed.clone(),
+        ),
+        (with("gateway_pubkey", json!(7)), malformed.clone()),
+        (
+            with("offer_url", json!("https://example.com/#offer=x")),
+            malformed.clone(),
+        ),
+        (with("password", json!("")), malformed.clone()),
+    ] {
+        assert_eq!(gateway(reply.clone()), expected, "{reply}");
+    }
+    for (input, expected) in [
+        ("90d", Some(("90d", 90 * 86_400))),
+        (" 36H ", Some(("36h", 36 * 3_600))),
+        ("2w", Some(("2w", 14 * 86_400))),
+        ("91d", None),
+        ("365d", None),
+        ("0d", None),
+        ("90", None),
+        ("d", None),
+        ("-1d", None),
+        ("9é", None),
+        ("", None),
+    ] {
+        let got = gateway::lifetime(input).ok();
+        assert_eq!(
+            got.as_ref().map(|(text, secs)| (text.as_str(), *secs)),
+            expected,
+            "{input:?}"
+        );
+    }
+    assert!(gateway::needs_renewal(100, 100, 90 * 86_400));
+    assert!(gateway::needs_renewal(100 + 7 * 86_400, 100, 90 * 86_400));
+    assert!(!gateway::needs_renewal(101 + 7 * 86_400, 100, 90 * 86_400));
+    assert!(!gateway::needs_renewal(100 + 3 * 3_600, 100, 4 * 3_600));
 }
 
 /// Only wss:// community origins are accepted, before anything is written.
@@ -605,6 +935,16 @@ fn only_wss_origins_are_accepted() {
             &manager,
             &["--relay", "ws://buzz.voltage.cloud"],
         ),
+        EnvSecrets::default(),
+        Store::new(state_dir.clone()),
+        &mut prompter,
+        &relay,
+        &manager,
+        &tools,
+    );
+    assert!(matches!(refused, Err(CliError::Usage(_))));
+    let refused = Wizard::new(
+        args(&state_dir, &manager, &["--gateway-expires", "0d"]),
         EnvSecrets::default(),
         Store::new(state_dir.clone()),
         &mut prompter,

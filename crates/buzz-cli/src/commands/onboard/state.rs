@@ -105,6 +105,15 @@ pub struct PendingKey {
     pub public: String,
 }
 
+/// A gateway grant the relay accepted.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GatewayGrant {
+    /// The granted gateway key, hex.
+    pub gateway: String,
+    /// When the grant expires, unix seconds.
+    pub expires_at: u64,
+}
+
 /// Onboarding progress. Holds no model, GitHub or 1Password credential.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct State {
@@ -134,6 +143,9 @@ pub struct State {
     /// A stored signing key still to add on GitHub.
     #[serde(default)]
     pub pending_key: Option<PendingKey>,
+    /// The Paseo daemon's last accepted gateway grant.
+    #[serde(default)]
+    pub gateway_grant: Option<GatewayGrant>,
 }
 
 /// The private directory and its two files.

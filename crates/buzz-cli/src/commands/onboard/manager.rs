@@ -186,14 +186,22 @@ impl ControlTransport for WsTransport {
 /// (`MANAGER_PUBKEY` in GPUI's `remote_workspace/config.rs`).
 pub const MANAGER_PUBKEY: &str = "1881c0c6186c81c00e607f9dcd9b6c655c49cd9a0227054e764a78e6829d31fd";
 
-/// The manager's refusal of a provider request, as `code: message`.
+/// The manager's refusal of a first-start `deploy`, as `code: message`,
+/// with what a `paseo_store_failed` refusal leaves behind.
 pub fn refusal_text(response: &Value) -> String {
     let code = response
         .get("code")
         .and_then(Value::as_str)
         .unwrap_or("refused");
-    match response.get("error").and_then(Value::as_str) {
+    let text = match response.get("error").and_then(Value::as_str) {
         Some(message) => format!("{code}: {message}"),
         None => code.to_owned(),
+    };
+    if code == "paseo_store_failed" {
+        // The manager refuses after the Sandbox started and the launch
+        // registration was saved; repeating the deploy retries the update.
+        format!("{text} (it started, but your Paseo daemon's agent list was not updated)")
+    } else {
+        text
     }
 }
