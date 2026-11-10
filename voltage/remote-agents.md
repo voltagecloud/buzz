@@ -226,7 +226,9 @@ The manager returns the daemon's public gateway key with its pairing. The owner'
 The wizard defaults to a 90-day grant lifetime; `--gateway-expires 2w` selects a shorter lifetime. The maximum is 90 days.
 The wizard asks before publishing an owner-signed grant through the gateway SDK.
 Each run checks the current relay head, including revocation, before reporting a
-grant as live. A grant near expiry is renewed after confirmation; local state
+grant as live. After publication, a second writer read must confirm that the
+submitted head is current and live; a duplicate receipt alone does not suffice.
+A grant near expiry is renewed after confirmation; local state
 does not override the relay. `--yes` accepts the displayed grant step.
 Use `--skip-gateway-grant` to defer this step. The command prints the exact
 `buzz gateway grant <pubkey> --expires 90d` command for later use.

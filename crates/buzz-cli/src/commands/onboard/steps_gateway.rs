@@ -62,16 +62,11 @@ impl<P: Prompter, R: Relay, T: ControlTransport, X: Tools> Wizard<P, R, T, X> {
         }) {
             return Err(CliError::Auth("the daemon gateway key belongs to an agent; ask an administrator to repair its Secret".into()));
         }
-        let values = self
-            .relay
-            .query(
-                keys,
-                json!({
-                    "kinds":[buzz_sdk::kind::KIND_AGENT_GATEWAY_DELEGATION],
-                    "authors":[keys.public_key()], "#d":[hex], "limit":1
-                }),
-            )
-            .await?;
+        let coordinate = json!({
+            "kinds":[buzz_sdk::kind::KIND_AGENT_GATEWAY_DELEGATION],
+            "authors":[keys.public_key()], "#d":[hex], "limit":1
+        });
+        let values = self.relay.query(keys, coordinate.clone()).await?;
         let heads: Vec<Event> = values
             .into_iter()
             .map(serde_json::from_value)
@@ -128,7 +123,26 @@ impl<P: Prompter, R: Relay, T: ControlTransport, X: Tools> Wizard<P, R, T, X> {
             self.say(&format!("  Skipped. To grant it later, run: {command}"));
             return Ok(());
         }
+        let submitted_id = event.id;
         self.relay.publish(&Signer::owner(keys), event).await?;
+        // A dominated NIP-33 write can receive an accepted duplicate receipt.
+        // Confirmation may have paused while another device revoked the grant.
+        let current: Vec<Event> = self
+            .relay
+            .query(keys, coordinate)
+            .await?
+            .into_iter()
+            .map(serde_json::from_value)
+            .collect::<Result<_, _>>()
+            .map_err(|_| {
+                CliError::Other("relay returned an invalid gateway head after publication".into())
+            })?;
+        let confirmed = matches!(current.as_slice(), [head]
+            if head.id == submitted_id && buzz_sdk::gateway::live(head, keys.public_key(), gateway,
+                u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default()).is_some());
+        if !confirmed {
+            return Err(CliError::Conflict("the gateway grant changed during confirmation; no live grant was recorded. Check the current grant before retrying".into()));
+        }
         self.state.gateway_grant = Some(GatewayGrant {
             gateway: hex,
             expires_at,

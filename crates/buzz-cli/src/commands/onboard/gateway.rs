@@ -10,7 +10,7 @@ pub const DEFAULT_LIFETIME: &str = "90d";
 /// The longest grant `--gateway-expires` accepts.
 pub const MAX_LIFETIME_SECS: u64 = 90 * DAY;
 
-/// Re-grant when the saved grant expires within this long.
+/// Re-grant when the current relay grant expires within this long.
 pub const RENEW_WITHIN_SECS: u64 = 7 * DAY;
 
 const HOUR: u64 = 60 * 60;

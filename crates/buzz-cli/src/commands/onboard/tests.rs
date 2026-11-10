@@ -1156,3 +1156,84 @@ async fn provisioning_reads_see_writer_state() {
     server.abort();
     assert_eq!(events.unwrap(), vec![expected]);
 }
+
+/// The actual HTTP publisher accepts a dominated NIP-33 receipt. The default
+/// wizard must still read the writer and refuse to claim a concurrent revoke
+/// was replaced by its older grant.
+#[tokio::test]
+async fn gateway_confirmation_requires_the_submitted_live_head_after_duplicate_receipt() {
+    use super::relay::HttpRelay;
+    use axum::{routing::post, Json, Router};
+    use std::sync::{Arc, Mutex};
+    let dir = tempfile::tempdir().unwrap();
+    let owner = Keys::generate();
+    let gateway = Keys::generate().public_key();
+    let current = Arc::new(Mutex::new(None::<nostr::Event>));
+    let reads = current.clone();
+    let writes = current.clone();
+    let signing_owner = owner.clone();
+    let app = Router::new()
+        .route("/query", post(move |Json(filters): Json<Value>| {
+            let current = reads.clone();
+            async move {
+                assert!(filters.as_array().unwrap().iter().all(|filter| filter["consistency"] == "strong"));
+                Json(if filters[0]["kinds"][0] == 30181 {
+                    current.lock().unwrap().as_ref().map_or(json!([]), |event| json!([event]))
+                } else { json!([]) })
+            }
+        }))
+        .route("/events", post(move |Json(event): Json<nostr::Event>| {
+            let current = writes.clone();
+            let owner = signing_owner.clone();
+            async move {
+                event.verify().unwrap();
+                let revoked = buzz_sdk::gateway::Delegation::revoke(gateway, event.created_at.as_secs() + 1)
+                    .unwrap().sign_with_keys(&owner).unwrap();
+                *current.lock().unwrap() = Some(revoked);
+                Json(json!({"event_id":event.id,"accepted":true,"message":"duplicate: replaced by a newer event"}))
+            }
+        }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let relay = HttpRelay::new(&format!("http://{address}"));
+    let manager = FakeManager::for_developer(&owner.public_key().to_hex());
+    let mut prompter = ScriptPrompter::quiet();
+    let tools = tools();
+    let mut wizard = Wizard::new(
+        args(dir.path(), &manager, &["--yes"]),
+        EnvSecrets::default(),
+        Store::new(dir.path().to_owned()),
+        &mut prompter,
+        relay,
+        &manager,
+        &tools,
+    )
+    .unwrap();
+    wizard.state.owner_pubkey = owner.public_key().to_hex();
+    let pairing = paseo::pairing(&json!({"paseo":paseo(&gateway.to_hex())}))
+        .unwrap()
+        .unwrap();
+    let result = wizard.gateway_grant(&owner, Some(&pairing)).await;
+    assert!(matches!(result, Err(CliError::Conflict(_))));
+    assert!(wizard.state.gateway_grant.is_none());
+    drop(wizard);
+    assert!(!prompter
+        .transcript
+        .join("\n")
+        .contains("Granted your Paseo"));
+    assert!(Store::new(dir.path().to_owned())
+        .load()
+        .unwrap()
+        .gateway_grant
+        .is_none());
+    assert!(
+        !buzz_sdk::gateway::Delegation::parse(current.lock().unwrap().as_ref().unwrap())
+            .unwrap()
+            .0
+            .enabled
+    );
+    server.abort();
+}
