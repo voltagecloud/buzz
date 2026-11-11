@@ -505,6 +505,163 @@ async fn journal_recovers_owned_audit_without_reopening_or_ending_a_losing_claim
     assert!(journal.reserve(&f.config.keys, &grant).is_err());
 }
 
+fn old_completed_record(f: &Fixture, journal: &Journal, future_end: bool) -> Record {
+    let now = Timestamp::now().as_secs();
+    let started = now - 1800;
+    let historical = |event: &Event, keys: &Keys, at: u64, request: Option<EventId>| {
+        let mut body: Value = serde_json::from_str(&event.content).unwrap();
+        body["expires_at"] = json!(started + 600);
+        if let Some(request) = request {
+            body["request_id"] = json!(request);
+        }
+        let tags = event.tags.iter().map(|tag| {
+            if tag
+                .as_slice()
+                .first()
+                .is_some_and(|key| key == "expiration")
+            {
+                Tag::expiration(Timestamp::from(started + 600))
+            } else {
+                tag.clone()
+            }
+        });
+        EventBuilder::new(event.kind, body.to_string())
+            .tags(tags)
+            .custom_created_at(Timestamp::from(at))
+            .sign_with_keys(keys)
+            .unwrap()
+    };
+    let request = historical(&f.request, &f.requester, started, None);
+    attach::Pending::parse(&request, started).unwrap();
+    let approval = historical(&f.approval, &f.owner, started + 1, Some(request.id));
+    let grant = Grant::parse(&approval, f.config.scope, started + 1).unwrap();
+    assert!(grant.expires_at() < now);
+    let mut record = journal.reserve(&f.config.keys, &grant).unwrap();
+    record.accepted = EventBuilder::new(record.accepted.kind, record.accepted.content.clone())
+        .tags(record.accepted.tags.clone().to_vec())
+        .custom_created_at(Timestamp::from(started + 2))
+        .sign_with_keys(&f.config.keys)
+        .unwrap();
+    record.claimed = true;
+    record.bytes_in = 12;
+    record.bytes_out = 34;
+    journal.finish(&f.config.keys, &mut record).unwrap();
+    let ended = record.ended.as_ref().unwrap();
+    record.ended = Some(
+        EventBuilder::new(ended.kind, ended.content.clone())
+            .tags(ended.tags.clone().to_vec())
+            .custom_created_at(Timestamp::from(if future_end {
+                now + 1800
+            } else {
+                started + 10
+            }))
+            .sign_with_keys(&f.config.keys)
+            .unwrap(),
+    );
+    journal.save(&record).unwrap();
+    record
+}
+
+#[tokio::test]
+async fn production_outbox_recovers_stale_end_without_reopening_the_expired_grant() {
+    for future_end in [false, true] {
+        let f = Fixture::new(false).await;
+        let journal = f.journal();
+        let original = old_completed_record(&f, &journal, future_end);
+        let old = original.ended.as_ref().unwrap().clone();
+        let path = f.config.journal.join(format!("{}.json", original.grant.id));
+        let received = Arc::new(Mutex::new(Vec::<Event>::new()));
+        let seen = received.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let relay = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let message: Value = serde_json::from_str(&text).unwrap();
+                if message[0] != "EVENT" {
+                    continue;
+                }
+                let event: Event = serde_json::from_value(message[1].clone()).unwrap();
+                event.verify().unwrap();
+                let saved: Record = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                assert_eq!(
+                    saved.ended.as_ref().unwrap().id,
+                    event.id,
+                    "fresh signed metadata was sent before durable replacement"
+                );
+                seen.lock().unwrap().push(event.clone());
+                let accepted = Timestamp::now()
+                    .as_secs()
+                    .abs_diff(event.created_at.as_secs())
+                    <= 900;
+                ws.send(Message::Text(
+                    json!(["OK", event.id, accepted, "timestamp gate"])
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+            }
+        });
+        let mut connection = NostrWsConnection::connect(&url).await.unwrap();
+        outbox(&mut connection, &f.config, &f.rest, &journal)
+            .await
+            .unwrap();
+        let recovered = journal.records().unwrap().remove(0);
+        let new = recovered.ended.as_ref().unwrap();
+        assert!(recovered.ended_sent);
+        assert_ne!(new.id, old.id);
+        assert_eq!(new.content, old.content);
+        assert_eq!(new.tags, old.tags);
+        assert_eq!(recovered.grant, original.grant);
+        assert_eq!(recovered.accepted, original.accepted);
+        assert_eq!(
+            received.lock().unwrap().as_slice(),
+            std::slice::from_ref(new)
+        );
+        assert!(journal
+            .reserve(
+                &f.config.keys,
+                &Grant::parse(
+                    &original.grant,
+                    f.config.scope,
+                    original.grant.created_at.as_secs()
+                )
+                .unwrap()
+            )
+            .is_err());
+        relay.abort();
+    }
+}
+
+#[tokio::test]
+async fn acknowledged_old_end_is_not_resent_and_failed_head_reads_cannot_rotate_it() {
+    for known in [false, true] {
+        let f = Fixture::new(false).await;
+        let journal = f.journal();
+        let original = old_completed_record(&f, &journal, false);
+        let event = original.ended.as_ref().unwrap().clone();
+        if known {
+            f.events.lock().unwrap().push(event.clone());
+        } else {
+            f.http.abort();
+            tokio::task::yield_now().await;
+        }
+        let (mut connection, peer) = relay_receipt("should not be used").await;
+        // The confirmed-head case must succeed without a live publishing peer.
+        peer.abort();
+        tokio::task::yield_now().await;
+        let result = outbox(&mut connection, &f.config, &f.rest, &journal).await;
+        assert_eq!(result.is_ok(), known);
+        let record = journal.records().unwrap().remove(0);
+        assert_eq!(record.ended.as_ref().unwrap().id, event.id);
+        assert_eq!(record.ended_sent, known);
+        assert_eq!(record.grant, original.grant);
+        assert_eq!(record.accepted, original.accepted);
+    }
+}
+
 #[test]
 fn production_factory_refuses_unbound_dm_non_owner_and_plaintext_transport() {
     let mut config = crate::build_mcp_servers_tests::test_config();
@@ -529,6 +686,17 @@ fn production_factory_refuses_unbound_dm_non_owner_and_plaintext_transport() {
     assert!(Config::from_harness(&config).unwrap().is_none());
     config.bound_session = None;
     assert!(Config::from_harness(&config).unwrap().is_none());
+}
+
+#[tokio::test]
+async fn shutdown_budget_allows_final_strong_head_lookup_and_publication() {
+    tokio::time::pause();
+    let service = tokio::spawn(async {
+        tokio::time::sleep(Duration::from_secs(41)).await;
+        Ok(())
+    });
+    assert!(crate::sandbox_terminal::stop(Some(service)).await.is_ok());
+    tokio::time::resume();
 }
 
 #[tokio::test]

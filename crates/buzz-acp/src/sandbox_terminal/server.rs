@@ -198,15 +198,88 @@ async fn queue(
     send(connection, config, session, &frame).await
 }
 
-async fn outbox(connection: &mut NostrWsConnection, journal: &Journal) -> Result<()> {
+async fn end_for_retry(
+    config: &Config,
+    rest: &RestClient,
+    journal: &Journal,
+    record: &mut Record,
+) -> Result<Option<Event>> {
+    let stored = record
+        .ended
+        .as_ref()
+        .context("terminal end audit missing")?;
+    // Rebuild only metadata. Historical parsing must never reopen the grant.
+    let grant = Grant::parse(
+        &record.grant,
+        config.scope,
+        record.grant.created_at.as_secs(),
+    )?;
+    let renewed = attach::audit(
+        &config.keys,
+        &grant,
+        "ended",
+        record.bytes_in,
+        record.bytes_out,
+    )?;
+    ensure!(
+        stored.kind == renewed.kind
+            && stored.pubkey == renewed.pubkey
+            && stored.content == renewed.content
+            && stored.tags == renewed.tags
+            && stored.verify().is_ok(),
+        "terminal retry must contain only its exact end metadata"
+    );
+    let coordinate = format!("terminal:{}:ended", grant.session());
+    let heads: Vec<Event> = serde_json::from_value(
+        timeout(
+            authority::AUTH_TIMEOUT,
+            rest.query_raw(&[json!({
+                "kinds":[30624],"authors":[config.keys.public_key()],
+                "#d":[coordinate],"limit":1,"consistency":"strong"
+            })]),
+        )
+        .await??,
+    )?;
+    ensure!(heads.len() <= 1, "terminal end head exceeds bound");
+    if let Some(head) = heads.first() {
+        ensure!(
+            head.id == stored.id && head.verify().is_ok(),
+            "terminal end audit was replaced"
+        );
+        record.ended_sent = true;
+        journal.save(record)?;
+        return Ok(None);
+    }
+    // The relay checks timestamp age before ordinary duplicate handling. After
+    // confirmed absence, save a fresh equivalent before its first transmission.
+    if Timestamp::now()
+        .as_secs()
+        .abs_diff(stored.created_at.as_secs())
+        >= 900
+    {
+        record.ended = Some(renewed);
+        journal.save(record)?;
+    }
+    Ok(record.ended.clone())
+}
+
+async fn outbox(
+    connection: &mut NostrWsConnection,
+    config: &Config,
+    rest: &RestClient,
+    journal: &Journal,
+) -> Result<()> {
     // One event per idle tick bounds both work and receipt-wait time. Retain
     // every failure in the journal until the exact stored event is accepted.
     for mut record in journal.records()? {
         if record.ended_sent {
             continue;
         }
-        if let Some(event) = &record.ended {
-            let receipt = publish(connection, event).await?;
+        if record.ended.is_some() {
+            let Some(event) = end_for_retry(config, rest, journal, &mut record).await? else {
+                break;
+            };
+            let receipt = publish(connection, &event).await?;
             ensure!(
                 receipt.accepted && receipt.event_id == event.id.to_hex(),
                 "terminal end audit refused"
@@ -520,7 +593,7 @@ async fn run(config: &Config, rest: &RestClient, mut shutdown: watch::Receiver<(
                         // Transport failures leave the exact metadata event
                         // durable. The next idle tick retries after backoff.
                         if refreshed.elapsed() >= REFRESH {
-                            if outbox(&mut connection, &journal).await.is_err() {
+                            if outbox(&mut connection, config, rest, &journal).await.is_err() {
                                 tracing::info!("terminal audit remains queued for retry");
                             }
                             journal.recover(&config.keys)?;
@@ -545,7 +618,10 @@ async fn run(config: &Config, rest: &RestClient, mut shutdown: watch::Receiver<(
     cleanup?;
     // Failure remains durable and does not turn a completed close into success
     // without an audit retry record.
-    if outbox(&mut connection, &journal).await.is_err() {
+    if outbox(&mut connection, config, rest, &journal)
+        .await
+        .is_err()
+    {
         tracing::info!("terminal audit retained for next startup");
     }
     let _ = timeout(IO_TIMEOUT, connection.disconnect()).await;
