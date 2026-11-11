@@ -188,3 +188,101 @@ pub(super) async fn refresh(
     })
     .await?
 }
+
+async fn snapshot_current(
+    rest: &RestClient,
+    authority: &Snapshot,
+    grant: &buzz_sdk::sandbox_attach::snapshot::Grant,
+) -> Result<()> {
+    use buzz_sdk::sandbox_attach::snapshot::Pending;
+    let coordinate = |author, phase| {
+        json!({"kinds":[30624], "authors":[author],
+        "#d":[format!("snapshot:{}:{phase}",grant.session())], "limit":1})
+    };
+    let (approvals, pending) = tokio::try_join!(
+        query(rest, coordinate(authority.owner, "grant"), 1),
+        query(rest, coordinate(grant.requester(), "request"), 1),
+    )?;
+    ensure!(
+        approvals
+            .first()
+            .is_some_and(|event| event.id == grant.id() && event.verify().is_ok()),
+        "snapshot approval was revoked or replaced"
+    );
+    let pending = Pending::parse(
+        pending.first().context("snapshot request was revoked")?,
+        Timestamp::now().as_secs(),
+    )?;
+    ensure!(
+        grant.authorized(&pending, authority.authority(), Timestamp::now().as_secs()),
+        "snapshot approval is not currently authorized"
+    );
+    Ok(())
+}
+
+pub(super) async fn refresh_snapshot(
+    rest: &RestClient,
+    owner: PublicKey,
+    grant: &buzz_sdk::sandbox_attach::snapshot::Grant,
+) -> Result<()> {
+    tokio::time::timeout(AUTH_TIMEOUT, async {
+        let authority = read(rest, owner, grant.scope()).await?;
+        snapshot_current(rest, &authority, grant).await
+    })
+    .await?
+}
+
+pub(super) async fn snapshot_grants(
+    rest: &RestClient,
+    owner: PublicKey,
+    scope: Scope,
+) -> Result<Vec<Event>> {
+    tokio::time::timeout(
+        AUTH_TIMEOUT,
+        query(
+            rest,
+            json!({"kinds":[30624],"authors":[owner],
+        "#h":[scope.channel],"#e":[scope.thread],"limit":32}),
+            32,
+        ),
+    )
+    .await?
+}
+
+pub(super) async fn snapshot_metadata_head(
+    rest: &RestClient,
+    event: &Event,
+) -> Result<Option<Event>> {
+    let coordinate = event
+        .tags
+        .iter()
+        .find_map(|tag| {
+            let values = tag.as_slice();
+            (values.first().is_some_and(|value| value == "d"))
+                .then(|| values.get(1))
+                .flatten()
+                .cloned()
+        })
+        .context("snapshot metadata coordinate missing")?;
+    let events = tokio::time::timeout(
+        AUTH_TIMEOUT,
+        query(
+            rest,
+            json!({"kinds":[30624],
+        "authors":[event.pubkey],"#d":[coordinate],"limit":1}),
+            1,
+        ),
+    )
+    .await??;
+    Ok(events.into_iter().next())
+}
+pub(super) async fn confirm_snapshot_metadata(rest: &RestClient, event: &Event) -> Result<()> {
+    ensure!(
+        snapshot_metadata_head(rest, event)
+            .await?
+            .as_ref()
+            .is_some_and(|stored| stored == event && stored.verify().is_ok()),
+        "snapshot metadata was not confirmed as current head"
+    );
+    Ok(())
+}

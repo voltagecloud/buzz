@@ -3416,6 +3416,8 @@ async fn run_harness(
 
     let mut terminal_task =
         sandbox_terminal::spawn(config, relay.rest_client(), shutdown_rx.clone())?;
+    let mut snapshot_task =
+        sandbox_terminal::spawn_snapshot(config, relay.rest_client(), shutdown_rx.clone())?;
 
     // Startup is complete; the main loop now owns graceful shutdown.
     let _ = startup_ready.send(());
@@ -3638,6 +3640,23 @@ async fn run_harness(
                         Err(_) => {
                             anyhow::bail!("terminal task failed without confirming containment");
                         }
+                    }
+                    None
+                }
+                result = async {
+                    match snapshot_task.as_mut() {
+                        Some(task) => task.await,
+                        None => std::future::pending().await,
+                    }
+                }, if snapshot_task.is_some() => {
+                    snapshot_task = None;
+                    match result {
+                        Ok(Ok(())) => {},
+                        Ok(Err(error)) if !sandbox_terminal::containment_failure(&error) => {
+                            tracing::warn!("snapshot service unavailable; restart the sandbox to retry");
+                        }
+                        Ok(Err(error)) => return Err(error),
+                        Err(_) => anyhow::bail!("snapshot task failed without confirming containment"),
                     }
                     None
                 }
@@ -4622,7 +4641,10 @@ async fn run_harness(
     let _ = shutdown_tx.send(());
     // PTY teardown precedes checkpoint scans. A failed containment boundary is
     // fatal even when ordinary model work could otherwise continue.
-    sandbox_terminal::stop(terminal_task).await?;
+    tokio::try_join!(
+        sandbox_terminal::stop(terminal_task),
+        sandbox_terminal::stop(snapshot_task)
+    )?;
     let wake_drain = tokio::time::timeout(Duration::from_secs(30), async {
         while wake_tasks.join_next().await.is_some() {}
     })

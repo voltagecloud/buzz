@@ -1,8 +1,8 @@
 # NIP-SA: Owner-approved workspace snapshots
 
-This SDK layer defines a snapshot capability, encrypted result receipt, and bounded Git-bundle preflight.
-Archive packaging, extraction, ACP execution, and CLI commands follow in dependent PRs.
-It does not export workspaces by itself.
+This protocol defines snapshot approvals, encrypted result receipts, upload recovery metadata, and bounded Git-bundle preflight.
+The [agent runtime](../sandbox-snapshot-runtime.md) creates and uploads scanned snapshots.
+The [CLI workflow](../sandbox-snapshot-cli.md) requests approval, restores a new read-only directory, and returns patches.
 
 Snapshots use kind 30624 with `h`, `e`, and one `p`, as NIP-TA does.
 Their `d` coordinates are `snapshot:<session UUID>:request`, `:grant`, `:accepted`, `:ready`, and `:ended`.

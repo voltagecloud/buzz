@@ -12,6 +12,16 @@ mod process_tree;
 #[cfg(target_os = "linux")]
 mod server;
 #[cfg(target_os = "linux")]
+mod snapshot_client;
+#[cfg(target_os = "linux")]
+mod snapshot_journal;
+#[cfg(target_os = "linux")]
+mod snapshot_run;
+#[cfg(target_os = "linux")]
+mod snapshot_server;
+#[cfg(target_os = "linux")]
+mod snapshot_upload;
+#[cfg(target_os = "linux")]
 mod snapshot_worker;
 #[cfg(target_os = "linux")]
 mod worker;
@@ -27,6 +37,37 @@ pub(crate) fn spawn(
     {
         Ok(server::Config::from_harness(config)?
             .map(|config| tokio::spawn(server::serve(config, rest, shutdown))))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (config, rest, shutdown);
+        Ok(None)
+    }
+}
+
+/// Start the separately approved snapshot export service for the same bound owner.
+pub(crate) fn spawn_snapshot(
+    config: &crate::config::Config,
+    rest: crate::relay::RestClient,
+    shutdown: tokio::sync::watch::Receiver<()>,
+) -> anyhow::Result<Option<tokio::task::JoinHandle<anyhow::Result<()>>>> {
+    #[cfg(target_os = "linux")]
+    {
+        let Some(mut config) = server::Config::from_harness(config)? else {
+            return Ok(None);
+        };
+        let home = std::env::var_os("HOME")
+            .ok_or_else(|| anyhow::anyhow!("snapshot journal requires HOME"))?;
+        config.journal = std::path::PathBuf::from(home)
+            .join(".local/state/buzz/snapshot")
+            .join(config.scope.agent.to_hex())
+            .join(config.scope.thread.to_hex());
+        Ok(Some(tokio::spawn(snapshot_server::serve(
+            config,
+            rest,
+            snapshot_server::helper(),
+            shutdown,
+        ))))
     }
     #[cfg(not(target_os = "linux"))]
     {
