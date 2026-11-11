@@ -51,9 +51,9 @@ pub(crate) async fn stop(
     task: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
 ) -> anyhow::Result<()> {
     let Some(mut task) = task else { return Ok(()) };
-    // The maximum admission (15s), confirmed worker cleanup (15s), final audit
-    // attempt (5s), and socket close (1s) fit inside this absolute bound.
-    match tokio::time::timeout(std::time::Duration::from_secs(40), &mut task).await {
+    // Maximum admission (15s), confirmed worker cleanup (15s), final audit head
+    // lookup and publish (10s), and socket close (1s) fit this absolute bound.
+    match tokio::time::timeout(std::time::Duration::from_secs(45), &mut task).await {
         Ok(Ok(Ok(()))) => Ok(()),
         Ok(Ok(Err(error))) if !containment_failure(&error) => {
             tracing::warn!("terminal service stopped with its audit journal retained");
