@@ -25,6 +25,8 @@ enum Mode {
     AmbiguousPut,
     SlowIntentRevocation,
     TransientPreclaim,
+    Keepalive,
+    SlowAuthority,
 }
 struct StateData {
     events: Vec<Event>,
@@ -34,6 +36,7 @@ struct StateData {
     ciphertext: Vec<u8>,
     deny_authority: bool,
     authority_failures: usize,
+    authority_reads: usize,
     record_path: Option<PathBuf>,
 }
 type Shared = Arc<Mutex<StateData>>;
@@ -46,6 +49,18 @@ async fn query(State(state): State<Shared>, Json(filters): Json<Vec<Value>>) -> 
             state.authority_failures += 1;
             return Json(json!({"error":"temporary authority read failure"}));
         }
+    }
+    let slow_authority = {
+        let mut state = state.lock().unwrap();
+        if filter["kinds"] == json!([30181]) {
+            state.authority_reads += 1;
+            state.mode == Mode::SlowAuthority
+        } else {
+            false
+        }
+    };
+    if slow_authority {
+        tokio::time::sleep(Duration::from_secs(2)).await;
     }
     let slow = state.lock().unwrap().mode == Mode::SlowIntentRevocation
         && filter["#d"].as_array().is_some_and(|items| {
@@ -90,6 +105,10 @@ async fn query(State(state): State<Shared>, Json(filters): Json<Vec<Value>>) -> 
     Json(json!(result))
 }
 async fn upload(State(state): State<Shared>, body: Bytes) -> (StatusCode, Json<Value>) {
+    let delayed = state.lock().unwrap().mode == Mode::Keepalive;
+    if delayed {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
     let mut state = state.lock().unwrap();
     state.uploads += 1;
     state.ciphertext = body.to_vec();
@@ -149,6 +168,7 @@ impl Fixture {
             ciphertext: Vec::new(),
             deny_authority: mode == Mode::TransientPreclaim,
             authority_failures: 0,
+            authority_reads: 0,
             record_path: None,
         }));
         let relay_key = relay.public_key();
@@ -229,6 +249,13 @@ with os.fdopen(fd,'wb') as f:f.write(b'fixture scanned archive')
 print('{"type":"started"}',flush=True)
 print(json.dumps({'type':'ended','receipt':{'version':1,'scanned':True,'repositories':1,'bytes':23},'reason':None}),flush=True)
 "#).unwrap();
+        if mode == Mode::Keepalive {
+            let script = std::fs::read_to_string(&executable).unwrap().replace(
+                "print(json.dumps",
+                "import time;time.sleep(2)\nprint(json.dumps",
+            );
+            std::fs::write(&executable, script).unwrap();
+        }
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
         Self {
             config: Config {

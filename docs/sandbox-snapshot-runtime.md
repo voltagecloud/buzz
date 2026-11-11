@@ -10,6 +10,7 @@ The service checks the current request and owner approval heads before accepting
 It checks authority every five seconds with a five-second read deadline.
 Failed reads, expiry, deleted approvals, replacement, or lost membership stop work within ten seconds, plus bounded containment cleanup.
 Authority monitoring continues while metadata or object storage requests wait.
+Socket reads answer relay control frames during idle time, archive creation, and upload.
 The service requires enough lease time for the complete five-second worker readiness window before spawning.
 
 ```mermaid

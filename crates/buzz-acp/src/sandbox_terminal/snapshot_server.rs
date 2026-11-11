@@ -12,7 +12,7 @@ use buzz_sdk::sandbox_attach::{
     self as attach,
     snapshot::{self, Failure, Grant},
 };
-use buzz_ws_client::{NostrWsConnection, OkResponse, RelayMessage};
+use buzz_ws_client::{NostrWsConnection, OkResponse, RelayMessage, WsClientError};
 use nostr::{Event, EventBuilder, Keys, Timestamp};
 use serde_json::json;
 use std::path::PathBuf;
@@ -30,6 +30,38 @@ fn deadline(grant: &Grant, checked: Instant) -> Instant {
         .unwrap_or(Duration::ZERO);
     (checked + PERIOD + authority::AUTH_TIMEOUT).min(Instant::now() + remaining)
 }
+// Reading drives the shared client's Ping/Pong control path. There is no
+// background reader, so idle scans/uploads must keep polling this socket.
+fn control(message: std::result::Result<RelayMessage, WsClientError>) -> Result<()> {
+    match message {
+        Ok(RelayMessage::Auth { .. }) => bail!("snapshot relay authentication changed"),
+        Ok(_) | Err(WsClientError::Timeout) => Ok(()),
+        Err(_) => bail!("snapshot relay transport closed"),
+    }
+}
+
+async fn before_claim(
+    config: &Config,
+    rest: &RestClient,
+    connection: &mut NostrWsConnection,
+    grant: &Grant,
+    shutdown: &mut watch::Receiver<()>,
+) -> Result<()> {
+    // Leave the caller's single shutdown notification unseen when this helper
+    // returns an error and the grant loop continues.
+    let mut shutdown = shutdown.clone();
+    let current = authority::refresh_snapshot(rest, config.owner, grant);
+    tokio::pin!(current);
+    loop {
+        tokio::select! {
+            biased;
+            _=shutdown.changed()=>bail!("snapshot service is shutting down"),
+            result=&mut current=>return result,
+            message=connection.next_event(PERIOD)=>control(message)?,
+        }
+    }
+}
+
 async fn publish(connection: &mut NostrWsConnection, event: &Event) -> Result<OkResponse> {
     timeout(PERIOD, async {
         timeout(
@@ -176,6 +208,7 @@ async fn export(
     journal.prepare(record)?;
     let directory = journal.job(grant.id());
     let (allowed_tx, allowed) = watch::channel(true);
+    let (transport_lost, mut transport_failure) = watch::channel(());
     let delivery_allowed = allowed.clone();
     let monitor_rest = rest.clone();
     let monitor_grant = grant.clone();
@@ -190,6 +223,7 @@ async fn export(
             tokio::select! {
                 biased;
                 _=monitor_shutdown.changed()=>break,
+                _=transport_failure.changed()=>break,
                 _=tokio::time::sleep_until(lease)=>break,
                 _=tokio::time::sleep_until(next_check)=>{},
             }
@@ -198,6 +232,7 @@ async fn export(
             let result = tokio::select! {
                 biased;
                 _=monitor_shutdown.changed()=>break,
+                _=transport_failure.changed()=>break,
                 _=tokio::time::sleep_until(lease)=>break,
                 result=authority::refresh_snapshot(&monitor_rest,owner,&monitor_grant)=>result,
             };
@@ -223,11 +258,17 @@ async fn export(
     );
     tokio::pin!(runner);
     let mut stopped = false;
+    let mut readable = true;
     let result = loop {
         tokio::select! {
             biased;
             _=shutdown.changed(),if !stopped=>{stopped=true;}
             result=&mut runner=>break result,
+            message=connection.next_event(PERIOD),if readable=>{
+                if control(message).is_err() {
+                    readable=false;stopped=true;let _=transport_lost.send(());
+                }
+            }
             step=updates.recv()=>{
                 let Some(step)=step else {continue;};
                 match step {
@@ -305,7 +346,11 @@ async fn run(
     let mut poll = tokio::time::interval(PERIOD);
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
-        tokio::select! {_=shutdown.changed()=>return Ok(()),_=poll.tick()=>{}}
+        tokio::select! {
+            _=shutdown.changed()=>return Ok(()),
+            _=poll.tick()=>{},
+            message=connection.next_event(PERIOD)=>{control(message)?;continue;}
+        }
         journal.recover(&config.keys)?;
         if outbox(&mut connection, rest, &journal, &config.keys)
             .await
@@ -325,7 +370,7 @@ async fn run(
             if shutdown.has_changed().unwrap_or(true) {
                 return Ok(());
             }
-            if authority::refresh_snapshot(rest, config.owner, &grant)
+            if before_claim(config, rest, &mut connection, &grant, &mut shutdown)
                 .await
                 .is_err()
             {
