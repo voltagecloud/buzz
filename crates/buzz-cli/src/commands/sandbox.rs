@@ -126,9 +126,9 @@ async fn relay_key(client: &BuzzClient) -> Result<PublicKey, CliError> {
         .await
         .map_err(|_| failure("relay metadata timed out"))??;
     let info: Value = serde_json::from_str(&raw).map_err(failure)?;
-    key(info["pubkey"]
+    key(info["self"]
         .as_str()
-        .ok_or_else(|| failure("relay metadata has no signing key"))?)
+        .ok_or_else(|| failure("relay metadata has no self signing key"))?)
 }
 async fn current_pending(client: &BuzzClient, pending: &Pending) -> Result<(), CliError> {
     let head = one(client, json!({"kinds":[30624],"authors":[pending.requester()],"#d":[format!("terminal:{}:request",pending.session())],"limit":1})).await?;

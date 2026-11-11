@@ -1,9 +1,45 @@
 use super::*;
-use axum::{extract::State, routing::post, Json, Router};
+use axum::{
+    extract::State,
+    routing::{get, post},
+    Json, Router,
+};
 use nostr::{EventBuilder, Keys, Kind, Tag};
 use std::sync::{Arc, RwLock};
 
 type Stored = Arc<RwLock<Vec<Event>>>;
+
+#[tokio::test]
+async fn relay_signing_identity_uses_nip11_self_instead_of_optional_operator_pubkey() {
+    let signer = Keys::generate().public_key();
+    let operator = Keys::generate().public_key();
+    for document in [
+        json!({"self":signer,"pubkey":null}),
+        json!({"self":signer,"pubkey":operator}),
+        json!({"pubkey":operator}),
+    ] {
+        let expected = document.get("self").is_some();
+        let app = Router::new().route(
+            "/info",
+            get(move || {
+                let document = document.clone();
+                async move { Json(document) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client =
+            BuzzClient::new(format!("http://{address}"), Keys::generate(), None, None).unwrap();
+        let result = relay_key(&client).await;
+        if expected {
+            assert_eq!(result.unwrap(), signer);
+        } else {
+            assert!(result.unwrap_err().to_string().contains("self signing key"));
+        }
+        server.abort();
+    }
+}
 async fn serve(State(stored): State<Stored>, Json(filters): Json<Vec<Value>>) -> Json<Vec<Event>> {
     let filter = &filters[0];
     assert_eq!(
