@@ -193,7 +193,7 @@ async fn fixture(
         .route("/events", post(publish_handler))
         .route(
             "/info",
-            get(move || async move { Json(json!({"pubkey":relay})) }),
+            get(move || async move { Json(json!({"self":relay,"pubkey":null})) }),
         )
         .route("/media/{hash}", get(media_handler))
         .with_state(state.clone());
