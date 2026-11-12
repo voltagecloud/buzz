@@ -246,7 +246,8 @@ jobs:
 
   desktop-e2e-integration-shard:
     name: Desktop E2E Integration (${{ matrix.shard }}/${{ strategy.job-total }})
-    runs-on: ubuntu-latest
+    # Pinned Playwright supports Ubuntu 24.04; ubuntu-latest now selects 26.04.
+    runs-on: ubuntu-24.04
     # A shard needs ~10m; Playwright install-deps is bounded by
     # ci-apt-retry.sh (~25m worst case), so a degraded mirror fails with its
     # own error instead of the job timeout.
