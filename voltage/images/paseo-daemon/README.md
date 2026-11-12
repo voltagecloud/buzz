@@ -93,6 +93,13 @@ Native terminals and workspace script tools are disabled.
 
 Each provider runs `buzz acp-bridge --agent <key> --channel <UUID> --owner <owner key>`.
 Each provider declares one preselected model, so the model picker does not ask for a choice; the bridge offers no ACP model selection.
+
+New or changed agents need no daemon restart when Terraform mounts the daemon Secret's `BUZZ_PASEO_AGENTS` key at `/etc/paseo-buzz/agents/agents.json`.
+`paseo-agents-watch` checks that file every 30 seconds.
+When the list changes, it validates the list with the same builder as startup (`providers.mjs`), replaces only the Buzz providers in `config.json`, and runs `paseo reload`.
+Kubernetes refreshes the mounted file about a minute after the manager updates the Secret, so a new agent appears within about two minutes.
+An invalid list is logged and the current providers stay; a failed reload is retried on the next check.
+Without the mount, the watcher does nothing and agents change only at the next restart.
 The bridge receives the gateway key and relay URL, without model, pairing, or GitHub credentials.
 The bridge in #149 supplies relay-backed session list/load; #154 supplies gateway authority.
 The final image must include current #149, #154, and manager #150 through the adopted core stack.
