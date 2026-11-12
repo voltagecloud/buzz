@@ -2,7 +2,7 @@
 
 One developer's headless Paseo daemon stays available while their laptop is closed.
 The image uses unmodified Paseo 0.15.3 and its bundled Claude Code 2.1.246 runtime.
-It adds the Buzz CLI, a configuration wrapper, read-only Git helpers, and a turn recorder.
+It adds the Buzz CLI, a configuration wrapper, read-only Git helpers, a turn recorder, and a gateway profile plugin.
 Codex stays disabled pending its shell and credential review.
 
 ```mermaid
@@ -27,6 +27,14 @@ The pod has no IAM role, Kubernetes token, or sandbox credentials.
 Grant the gateway with `buzz gateway grant` from the owner's existing CLI.
 Grant and membership are separate: admit the gateway to the workspace and each required channel, including its recording channel.
 A gateway grant conveys no delegated access to the owner's DMs, profile, or administrative privileges.
+
+The `buzz-profile` plugin gives the gateway key its own Buzz profile name, so its posts show a name instead of a pubkey prefix.
+At startup it reads the display name of `BUZZ_PASEO_OWNER` and publishes `<owner name> (Paseo)`, for example `Taylor (Paseo)`.
+The about line names the owner's pubkey. The profile is the gateway's own kind 0 and claims no owner authority.
+If the gateway already has that name, the plugin writes nothing; a renamed owner renames the gateway at the next start.
+Until the gateway is a relay member, or while the owner has no name, it retries with exponential backoff (1 minute up to 1 hour) for 24 hours.
+Without `BUZZ_PASEO_OWNER`, the plugin is disabled.
+
 See [the enrollment runbook](../../remote-agents.md) for the existing commands and pairing password retrieval.
 
 For code reads, the developer supplies a fine-grained GitHub token with `contents: read` and `pull_requests: read` on selected repositories only.

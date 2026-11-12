@@ -91,3 +91,4 @@ voltage/
 !voltage/images/paseo-daemon/agents-watch.mjs
 
 !voltage/images/paseo-daemon/recorder/**
+!voltage/images/paseo-daemon/profile/**

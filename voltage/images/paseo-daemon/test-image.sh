@@ -145,6 +145,12 @@ exit 1
 STUB
 cat >"$stubs/buzz" <<'STUB'
 #!/bin/sh
+# The profile plugin reads the owner's and its own profile, then names itself.
+case "$*" in
+  "--format compact users get --pubkey "*) printf '[{"pubkey":"%s","display_name":"Owner"}]\n' "$6"; exit 0 ;;
+  "--format compact users get") echo '[]'; exit 0 ;;
+  "users set-profile "*) printf '%s\n' "$@" >"$RECORD_TEST_OUTPUT-profile"; chmod 0644 "$RECORD_TEST_OUTPUT-profile"; exit 0 ;;
+esac
 if [ "$1 $2" = "messages send" ]; then
   sleep "${RECORD_TEST_DELAY:-0}"
   cat >>"$RECORD_TEST_OUTPUT"
@@ -302,6 +308,10 @@ docker exec "$NAME" node -e '
 # The bundled plugin compiles and starts in the unmodified daemon.
 docker exec "$NAME" paseo plugin ls --json >"$stubs/plugins.json"
 jq -e 'any(.[]; .id == "buzz-recorder" and .status == "running")' "$stubs/plugins.json" >/dev/null || fail "recorder plugin did not load"
+jq -e 'any(.[]; .id == "buzz-profile" and .status == "running")' "$stubs/plugins.json" >/dev/null || fail "profile plugin did not load"
+for _ in $(seq 1 20); do [ -s "$stubs/records/turn-profile" ] && break; sleep 0.5; done
+grep -qx "Owner (Paseo)" "$stubs/records/turn-profile" || fail "gateway profile name was not published"
+node "$(dirname "$0")/test-profile.mjs"
 node "$(dirname "$0")/test-recorder.mjs"
 node "$(dirname "$0")/test-code.mjs"
 node "$(dirname "$0")/test-workspaces.mjs"

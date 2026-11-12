@@ -47,6 +47,7 @@ RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack 
     && install -d -o root -g root -m 0555 /opt/paseo-buzz/no-terminal-worker /opt/paseo-buzz/no-hooks /etc/paseo-buzz /etc/paseo-buzz/agents /usr/local/lib/paseo-buzz
 COPY --from=builder /out/buzz /usr/local/bin/buzz
 COPY voltage/images/paseo-daemon/recorder /opt/paseo-buzz/recorder
+COPY voltage/images/paseo-daemon/profile /opt/paseo-buzz/profile
 COPY --chmod=0644 voltage/images/paseo-daemon/assistant.md /etc/paseo-buzz/assistant.md
 COPY --chmod=0755 voltage/images/paseo-daemon/entrypoint.sh /usr/local/bin/paseo-buzz-entrypoint
 COPY --chmod=0755 voltage/images/paseo-daemon/code.mjs /usr/local/bin/paseo-code
