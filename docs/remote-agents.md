@@ -1972,6 +1972,7 @@ Refusals are `done` replies with one of these codes
 | `invalid_profile` | `enroll`: the payload is not `{"profile": <object>}`, or the profile fails the image's validation; the message is the image's. | fix the profile |
 | `github_login_mismatch` | `enroll`: GitHub reports another login for the profile's token, refuses the token, or cannot be reached. | use a token for `github.login`, or retry |
 | `profile_store_failed` | `enroll`: Secrets Manager refused or failed the write; the message carries a label such as `access_denied`. | retry, or ask an admin |
+| `paseo_store_failed` | `enroll`: the developer's Paseo daemon Secret was not written (or the pairing could not be generated), or a Paseo read token was sent to a manager without Paseo daemons, so the profile was not stored either. The message carries a label such as `forbidden`. `deploy` never refuses with it: the deploy stays `ok` and reports a failed agent-list refresh under `paseo_sync` (below). | repeat the enroll, or ask an admin |
 | `manager_unavailable` | Client-side: the manager did not accept the request within 30 s. Ephemeral events reach only connected subscribers, so a manager that is down never sees it. | retry |
 | `manager_timeout` | Client-side: the manager accepted the request but did not finish it within the provider's `timeout_seconds`. | retry; the retry joins or replays the same run |
 | `relay_unavailable` | Client-side: the provider could not connect, authenticate or subscribe to the relay, the relay refused the request, or the connection dropped before `done`. The relay's own message is not repeated. | check the relay URL and the agent's owner attestation, then retry |
@@ -1995,7 +1996,11 @@ namespace. `profile_secret_arn` is where `enroll` writes the profile. It
 must be that developer's own secret,
 `arn:aws:secretsmanager:<region>:<account>:secret:voltage/staging/agents/<id>/profile-<6 characters>`,
 so one owner can never reach another developer's secret, and `enroll`
-writes to `<region>` (`AWS_REGION` is not used for it).
+writes to `<region>` (`AWS_REGION` is not used for it). The optional
+`"paseo_daemons": true` turns on Paseo daemon provisioning at enrollment
+(see **Paseo daemons** below), and the optional `"paseo_relay_endpoint"`
+(`host:port`) changes the Paseo relay that pairing offers name. Terraform
+omits both when disabled, because older managers refuse unknown fields.
 
 | Flag | Environment | Default |
 | --- | --- | --- |
@@ -2077,13 +2082,117 @@ stored. The summary is:
 
 It names the GitHub login and the Git identity, and only whether each
 credential is present. Replies are encrypted to the owner. Replies, logs and
-refusal messages never contain a credential; the serialized profile is
-zeroized after the write. Neither the merge nor the write uses the
-filesystem.
+refusal messages never contain a credential, except the owner's own Paseo
+pairing password below; the serialized profile is zeroized after the write.
+Neither the merge nor the write uses the filesystem.
 The manager does not check the 1Password token (`op whoami`); the image
 still refuses a profile it cannot load. A profile with an empty `developer`
 gets the signing owner's developer ID before validation, so the client need
 not know it.
+
+**Paseo daemons.** With `paseo_daemons` in the config, each developer has one
+always-on Paseo daemon (Deployment `paseo-daemon-<id>` in namespace
+`buzz-paseo`): a low-privilege personal assistant that delegates work to the
+developer's remote agents through the Buzz relay. Paseo apps pair with it
+through the Paseo relay at `paseo_relay_endpoint` (`host:port`, default
+`buzz.voltage.cloud:443`), always over TLS. `enroll` then also:
+
+1. After validation and the GitHub check, reads the existing Secret
+   `paseo-daemon-<id>` in `buzz-paseo`. A failed read refuses enrollment;
+   it never replaces an identity it could not read.
+2. Generates the pairing and gateway identity only when no Secret exists,
+   and otherwise keeps it. An existing Secret that lacks any pairing field
+   or the gateway key is refused with `paseo_store_failed`
+   (`invalid_pairing`), never repaired: a replacement would silently unpair
+   the apps or orphan the delegated gateway. The pairing and gateway key exist
+   only in this Secret, never the developer profile. The Secret holds only
+   these keys:
+
+   | Key | Value |
+   | --- | --- |
+   | `PASEO_PASSWORD` | 32 random bytes, unpadded base64url |
+   | `PASEO_SERVER_ID` | `srv_` plus 9 random bytes, unpadded base64url |
+   | `PASEO_DAEMON_KEYPAIR` | JSON `{"v":2,"publicKeyB64","secretKeyB64"}`, a NaCl box keypair |
+   | `BUZZ_PRIVATE_KEY` | A generated secp256k1 gateway secret key, 64 hex characters |
+   | `BUZZ_PASEO_AGENTS` | The developer's registered agents, below |
+   | `CLAUDE_CODE_OAUTH_TOKEN` | `models.claude_oauth_token`, when set |
+   | `github_read_token` | The optional daemon Git read token, below |
+
+   The daemon runs Claude only. A `CODEX_ACCESS_TOKEN` left by an earlier
+   manager is removed.
+
+3. Writes the Secret before the profile. A failure returns
+   `paseo_store_failed` and leaves the profile unchanged. If the profile
+   write fails, retrying enrollment preserves the same pairing and gateway
+   identity while rewriting the profile-derived fields.
+
+The profile's GitHub token, 1Password, API keys, and the ChatGPT broker login
+never reach the daemon. Its only Git credential is the optional
+`github_read_token`: a fine-grained token for selected repositories, which the
+developer sends in the enroll payload as `{"paseo": {"github_read_token":
+"github_pat_..."}}`, beside the profile and never inside it. The manager
+checks only its form; give it read-only Contents and Pull requests access,
+because the manager cannot see its permissions. Omitting `paseo` keeps the
+stored token. To remove it, send `{"paseo": {"github_read_token": null}}`;
+`"paseo": null` is refused.
+The gateway needs an owner-signed grant before it can drive remote agents.
+To rotate both identities, first revoke the old gateway grant and have an
+operator retire the old gateway key's community membership, and confirm both.
+Only then delete the daemon Secret and enroll again: the manager recognizes a
+managed daemon key by its current Secret, so once the Secret is gone a key
+that still has membership is treated as an ordinary requester. Enter the Git
+read token again when you enroll, because deleting the Secret removed it. The
+daemon reads its Secret only at startup, so have an operator restart it
+(`kubectl --context voltage-staging -n buzz-paseo rollout restart
+deploy/paseo-daemon-<id>`) before you pair the Paseo apps again.
+
+`BUZZ_PASEO_AGENTS` is a JSON array `[{"id","label","agent","channel"}]`,
+derived from the developer's `buzz-mobile-launch-*` registrations on the
+manager's own relay (`BUZZ_RELAY_URL`):
+
+- `agent` is the registered agent's hex public key.
+- `channel` is the channel of the agent's latest desktop deploy bound to a
+  channel thread (`provider_config.sandbox.channel_id`). The manager keeps it
+  in the registration's `buzz.voltage.cloud/paseo-channel` annotation, not in
+  its payload, so older managers still read the registration. A
+  direct-message deploy keeps the saved channel. An agent never deployed into
+  a channel thread is not listed.
+- `label` is the launch's `BUZZ_ACP_DISPLAY_NAME` (`launch.env`, then
+  `launch.policy_env`, then `env_vars`), or `Agent <first 8 hex>`.
+- `id` is the label's slug, `^[a-z][a-z0-9-]*$`. A slug that repeats one
+  before it (sorted by label, then key) or names a provider the daemon image
+  defines (`claude`, `codex`, …) gets `-<first 8 hex>`.
+
+Each successful registering deploy replaces `BUZZ_PASEO_AGENTS` in an
+existing Secret and keeps its other keys. If that write fails, the deploy
+still answers `ok`, because the Sandbox started and its registration is saved,
+and adds `"paseo_sync": {"ok": false, "code": "paseo_store_failed", ...}`.
+Enroll again to rebuild the list from the saved registrations; repeating the
+deploy with the same `request_id` only replays its first answer. The list holds
+at most 64 agents; with more registrations it is shortened (first by label,
+then key) and the manager logs a warning. Without a Secret (no enroll since
+Paseo was enabled), the deploy writes none. The
+daemon reads its environment when it starts, so a changed Secret applies at
+its next restart.
+
+The `enroll` and `profile` replies then add the pairing the owner opens in a
+Paseo app. Neither the daemon secret key nor the gateway secret key is returned:
+
+```json
+"paseo": {"password": "<base64url>", "server_id": "srv_<id>",
+  "offer_url": "https://app.paseo.sh/#offer=<base64url ConnectionOfferV2 JSON>",
+  "gateway_pubkey": "<64 hex characters>"}
+```
+
+The `profile` reply also includes `paseo_enabled`, including when no profile or daemon Secret exists.
+Clients can distinguish disabled provisioning from a missing Secret and idempotently re-enroll without replacing stored credentials.
+Older clients ignore this additional field.
+
+The offer is the daemon's own encoding: `{"v":2,"serverId","daemonPublicKeyB64",
+"relay":{"endpoint":"<paseo_relay_endpoint>","useTls":true}}`, unpadded
+base64url. The daemon gets no profile, IAM role, or Kubernetes token, and no
+Git credential other than its optional read token. The manager's ServiceAccount needs `secrets` get, create, and
+update in `buzz-paseo`, and nothing else there.
 
 **The relay provider.** `buzz-backend-relay` (`crates/buzz-backend-relay`)
 speaks the provider protocol on stdin and stdout like

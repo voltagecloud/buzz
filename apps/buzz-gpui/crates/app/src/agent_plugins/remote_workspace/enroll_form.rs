@@ -47,6 +47,7 @@ fn placeholder(field: Field, held: bool) -> &'static str {
         return "On file · leave blank to keep";
     }
     match field {
+        Field::PaseoGithubReadToken => "Optional · leave blank to keep",
         Field::GitEmail => "A verified email on your GitHub account",
         Field::ViaProfile => "via profile TOML",
         Field::CodexAccessToken => "Optional · at-…",
@@ -233,6 +234,10 @@ impl EnrollForm {
                 c,
             ))
             .child(row(&[Field::GithubToken, Field::GitEmail]))
+            .child(row(&[Field::PaseoGithubReadToken]))
+            .child(div().text_body_sm().child(
+                "For Paseo code reads only: use a separate fine-grained token for selected repositories, with Contents and Pull requests set to Read-only."
+            ))
             .child(field(
                 Field::ViaProfile.label(),
                 TextArea::new(&self.via)

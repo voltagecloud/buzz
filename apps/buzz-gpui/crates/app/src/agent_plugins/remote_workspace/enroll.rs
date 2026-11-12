@@ -7,7 +7,7 @@
 //! form once it is sent.
 
 use super::signing::{self, GitHubIdentity};
-use buzz_identity::Identity;
+use buzz_identity::{EnrollmentSecrets, Identity};
 use buzz_relay_client::Session;
 use buzz_relay_client::socket::{MAX_PUBLICATION_FRAME, SubscriptionEvent};
 use buzz_session_control::{KIND, Reply, Status};
@@ -34,10 +34,12 @@ pub enum Field {
     OpenaiApiKey,
     AnthropicApiKey,
     OpenrouterApiKey,
+    /// Selected-repository read-only token, sent only to the daemon Secret.
+    PaseoGithubReadToken,
 }
 
 impl Field {
-    pub const ALL: [Field; 9] = [
+    pub const ALL: [Field; 10] = [
         Field::GithubToken,
         Field::GitEmail,
         Field::ViaProfile,
@@ -47,6 +49,7 @@ impl Field {
         Field::OpenaiApiKey,
         Field::AnthropicApiKey,
         Field::OpenrouterApiKey,
+        Field::PaseoGithubReadToken,
     ];
 
     /// Masked, and cleared once the form is sent.
@@ -60,6 +63,7 @@ impl Field {
                 | Field::AnthropicApiKey
                 | Field::ClaudeOauthToken
                 | Field::OpenrouterApiKey
+                | Field::PaseoGithubReadToken
         )
     }
 
@@ -74,6 +78,7 @@ impl Field {
             Field::AnthropicApiKey => "Anthropic API key",
             Field::ClaudeOauthToken => "Claude subscription token",
             Field::OpenrouterApiKey => "OpenRouter API key",
+            Field::PaseoGithubReadToken => "Paseo GitHub read token",
         }
     }
 
@@ -370,6 +375,7 @@ pub fn partial(values: &Values, owner: &str, changes: Changes) -> Result<Value, 
     if profile
         .as_object()
         .is_some_and(|profile| profile.len() == 3)
+        && values.get(Field::PaseoGithubReadToken).trim().is_empty()
     {
         return Err("Nothing to change: fill in a field, or remove a credential.".into());
     }
@@ -667,6 +673,10 @@ pub const REFUSALS: &[(&str, &str)] = &[
         "profile_store_failed",
         "The Sandbox manager could not store the profile. Try again.",
     ),
+    (
+        "paseo_store_failed",
+        "The profile is unchanged. This manager has no Paseo daemons, or it could not save the daemon's credentials. Try again; if it repeats, clear the Paseo GitHub read token or ask the manager's operator.",
+    ),
 ];
 
 impl Outcome {
@@ -728,6 +738,23 @@ pub async fn done<T>(
     Err("The community connection closed before the Sandbox manager answered.".into())
 }
 
+fn paseo_git_token(values: &Values) -> Result<Option<String>, String> {
+    let token = values.get(Field::PaseoGithubReadToken).trim();
+    if token.is_empty() {
+        return Ok(None);
+    }
+    if !token.starts_with("github_pat_")
+        || token.len() <= "github_pat_".len()
+        || token.len() > 4096
+        || !token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        return Err("Use a fine-grained GitHub token for selected repositories with contents and pull requests set to read only.".into());
+    }
+    Ok(Some(token.to_owned()))
+}
+
 /// Model credentials to remove or replace in one enrollment.
 pub struct ModelChanges {
     /// Stored model fields to remove, including `codex_login` to disconnect it.
@@ -755,6 +782,7 @@ pub async fn run(
     replace_key: bool,
     models: ModelChanges,
 ) -> Result<(Outcome, Option<signing::Registration>), String> {
+    let paseo_token = paseo_git_token(&values)?;
     let ModelChanges {
         removed,
         codex_login,
@@ -812,10 +840,17 @@ pub async fn run(
             },
         )?,
     };
-    let outcome = match chatgpt_login {
-        Some(login) => enroll_with_login(session, identity, manager, profile, Some(login)).await?,
-        None => enroll(session, identity, manager, profile).await?,
-    };
+    let outcome = enroll_with_credentials(
+        session,
+        identity,
+        manager,
+        profile,
+        EnrollmentSecrets {
+            codex_login: chatgpt_login,
+            paseo_github_read_token: paseo_token,
+        },
+    )
+    .await?;
     let (Outcome::Enrolled { .. }, Some(key)) = (&outcome, key) else {
         return Ok((outcome, None));
     };
@@ -827,29 +862,17 @@ pub async fn run(
     Ok((outcome, Some(registration)))
 }
 
-/// Signs the `enroll` request for `profile` to `manager` as `identity`,
-/// sends it on `session`'s live socket, and waits up to [`TIMEOUT`] for
-/// its `done` reply.
-pub async fn enroll(
+async fn enroll_with_credentials(
     session: Arc<Session>,
     identity: Arc<Identity>,
     manager: String,
     profile: Value,
-) -> Result<Outcome, String> {
-    enroll_with_login(session, identity, manager, profile, None).await
-}
-
-async fn enroll_with_login(
-    session: Arc<Session>,
-    identity: Arc<Identity>,
-    manager: String,
-    profile: Value,
-    login: Option<Value>,
+    secrets: EnrollmentSecrets,
 ) -> Result<Outcome, String> {
     let manager = PublicKey::from_hex(&manager).map_err(|_| "The manager key is not valid.")?;
     let request_id = uuid::Uuid::new_v4().to_string();
     let request = identity
-        .enroll_request_with_codex_login(&manager, &request_id, profile, login, now())
+        .enroll_request_with_secrets(&manager, &request_id, profile, secrets, now())
         .map_err(|error| format!("Could not sign the enrollment ({}).", error.label()))?;
     if json!(["EVENT", request]).to_string().len() > MAX_PUBLICATION_FRAME {
         return Err("The profile is too large to send. Shorten the via profile.".into());

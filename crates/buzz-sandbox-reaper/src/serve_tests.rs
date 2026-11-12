@@ -215,6 +215,50 @@ fn payload(op: &str, agent: &Keys, owner: &Keys, auth: &str) -> Value {
 /// refusals included.
 #[tokio::test]
 async fn deploy_and_stop_run_end_to_end_over_the_relay() {
+    use clap::Parser;
+
+    // Exercise the real startup ordering: an unsupported daemon count must
+    // fail before key loading, AWS setup, Kubernetes, or relay connections.
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.json");
+    for (count, enabled, refused) in [(64, true, false), (65, false, false), (65, true, true)] {
+        let developers = (0..count).map(|index| {
+            let id = format!("d{index}");
+            let key = Keys::parse(&format!("{:064x}", index + 1)).unwrap();
+            (id.clone(), json!({"owner_pubkey":key.public_key(),
+                "namespace":format!("buzz-agent-staging-{id}"),
+                "profile_secret_arn":format!("arn:aws:secretsmanager:us-west-2:000000000000:secret:voltage/staging/agents/{id}/profile-AbCdEf")}))
+        }).collect::<serde_json::Map<String, Value>>();
+        std::fs::write(&path, json!({"version":1,"checkpoint_bucket":"fixture-checkpoints", "paseo_daemons":enabled,"developers":developers}).to_string()).unwrap();
+        let crate::Command::Serve(args) = crate::Cli::try_parse_from([
+            "buzz-sandbox-reaper",
+            "serve",
+            "--config",
+            path.to_str().unwrap(),
+            "--relay-url",
+            "wss://relay.example.invalid",
+            "--private-key-file",
+            directory
+                .path()
+                .join("missing-private-key")
+                .to_str()
+                .unwrap(),
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("serve command expected")
+        };
+        let error = serve(*args).await.unwrap_err().to_string();
+        assert_eq!(
+            error.contains("at most 64 configured developers"),
+            refused,
+            "{count}/{enabled}: {error}"
+        );
+        if !refused {
+            assert!(error.contains("read private key file"), "{error}");
+        }
+    }
     let (manager_keys, agent_keys, owner) = (keys("11"), keys("22"), keys("33"));
     let config = ManagerConfig::parse(
         &json!({"version": 1, "checkpoint_bucket": "fixture-checkpoints", "developers": {"dev": {

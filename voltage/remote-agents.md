@@ -121,6 +121,9 @@ sequenceDiagram
 | Claude, OpenAI, OpenRouter credentials and Codex access tokens | Enroll form | Profile | The harness in the Sandbox |
 | ChatGPT refresh token | Dedicated sign-in button | Manager-only Secrets Manager secret | Manager refresh broker |
 | Depot, Grafana, Linear, Argo CD tokens | Nobody: admins keep them in the vault | 1Password Buzz Agents Dev | The Sandbox, through `via` |
+| Paseo pairing: password, server ID, daemon keypair | Nobody: the manager generates it at enroll | Only the Secret `paseo-daemon-<id>` in `buzz-paseo` | Your Paseo daemon |
+| Claude subscription token, for the Paseo daemon | Enroll form (the same token as above) | Profile; copied to the Secret `paseo-daemon-<id>` | Your Paseo daemon's own agent (Claude only) |
+| Paseo GitHub read token: fine-grained, selected repositories, Contents and Pull requests read-only | Enroll form, **Paseo GitHub read token** (optional) | Only the Secret `paseo-daemon-<id>`, never the profile | Your Paseo daemon, to read code |
 
 The app removes the dedicated ChatGPT login cache after enrollment or cancellation. Other enrollment credentials are held in memory only. The profile is encrypted in transit and at rest. Checkpoints never include credentials.
 
@@ -140,6 +143,7 @@ Do these steps once for each new developer. You need the staging VPN for step 2.
 2. **Apply it locally.** Merge the PR, then run `make plan` and `make apply` in `v2/environments/staging-agent`.
    CI cannot apply this module, because its Kubernetes identity is read-only.
    The apply creates the namespace `buzz-agent-staging-<developer-id>`, the profile secret, and the developer's permissions.
+   With `paseo_daemon_image` set, it also turns on `paseo_daemons` in the manager config and creates the developer's Paseo daemon Deployment in `buzz-paseo`. The daemon waits for its Secret, which the manager writes at the developer's next enroll.
 3. **Restart the manager and the reaper.** Both read the developer list only at startup:
 
    ```sh
@@ -340,6 +344,7 @@ Do this once, on any of your Remote workspace agents. To change a credential lat
 | Claude subscription token | `sk-ant-oat01-…` (optional) |
 | OpenAI API key, Anthropic API key | Optional. Leave each empty if you use the matching subscription token. |
 | OpenRouter API key | Optional |
+| Paseo GitHub read token | Optional. A separate fine-grained token for selected repositories, with Contents and Pull requests set to Read-only. Only your Paseo daemon gets it. |
 
 Select **Enroll profile**. The app shows **Enrolled. Profile version …**, then one of these results:
 
@@ -361,6 +366,20 @@ The enroll form shows what is **On file**: your GitHub login, Git email, and the
 You need a GitHub token only to change it. The signing key stays the same, unless you select **Replace the signing key**. Then the app adds the new key to GitHub, as in the first enrollment.
 
 Entering a Codex access token replaces a stored OpenAI API key, and entering a Claude subscription token replaces a stored Anthropic API key. The same applies the other way round, because an agent can use only one of each pair.
+
+#### Pair a Paseo app
+
+When an admin enables Paseo daemons, each developer has one always-on [Paseo](https://paseo.sh) daemon in staging (Deployment `paseo-daemon-<id>` in namespace `buzz-paseo`). The daemon is a personal assistant with less access than your Sandboxes: no AWS role and no Kubernetes token. From your profile it gets only your Claude subscription token, for its own model; it runs Claude only, so a Codex-only profile leaves it without a model. Its only Git credential is the optional **Paseo GitHub read token**. The manager checks only the token's form, not its permissions: create it read-only, because a token with write access would let the daemon push. The daemon hands work to your remote agents through the Buzz relay.
+
+1. Enroll your profile, or enroll again if you enrolled before Paseo daemons were enabled. The first enroll generates the daemon's password, server ID, keypair, and gateway key in its narrow Secret. None enters your profile.
+2. From an interactive terminal, with your owner identity as the CLI's key, run `buzz paseo pairing --manager <manager public key>` (ask your admin for the Sandbox manager's public key). It prints the offer URL and `gateway_pubkey`, and shows the password only on the terminal, never in redirected output. You do not need `kubectl`.
+3. Open the offer URL (`https://app.paseo.sh/#offer=…`) on the device that runs the Paseo app. The app pairs with your daemon through the Paseo relay, which runs next to the Buzz relay at `buzz.voltage.cloud:443`, always over TLS.
+
+The daemon lists each remote agent you have started from the desktop in a channel thread, with the channel of its latest such start. Agents started only in direct messages are not listed. The daemon reads the list and your model token when it starts, so changes apply at its next restart.
+
+The profile reply advertises whether Paseo provisioning is enabled, even before its Secret exists. Enrolling in the desktop enrollment form can therefore provision a missing or rotated Secret without asking for your other credentials again. `buzz paseo pairing` only reads the pairing details; it never writes the Secret.
+
+Enrolling again keeps the pairing and gateway identity, so paired apps keep working. The reply includes `paseo.gateway_pubkey`; grant this key before using remote agents. To rotate, first revoke the old gateway grant and have an operator retire the old gateway key's community membership. Then delete the daemon Secret and enroll again, entering your **Paseo GitHub read token** again: deleting the Secret removed it, and a blank field cannot restore it. Ask an operator to restart your daemon so it reads the new Secret, then grant the new gateway key and pair your apps. If the reply is **Refused (paseo_store_failed)**, the daemon's Secret was not written and your profile was not changed: enroll again.
 
 ### 5. Start a session
 

@@ -39,6 +39,8 @@ pub struct State {
     pub fail_secret_create_responses: usize,
     /// Fail Secret updates before writing, for durable inbox recovery tests.
     pub fail_secret_updates: usize,
+    /// Fail this many Secret reads without changing stored values.
+    pub fail_secret_reads: usize,
     /// Fail Pod-owned credential Secret creates, leaving recovery journals intact.
     pub fail_binding_secret_creates: usize,
     /// Fail this many Sandbox creates with a 500.
@@ -227,10 +229,16 @@ impl State {
                 self.secrets.insert((*name).into(), stored.clone());
                 ok(&stored)
             }
-            ["api", "v1", "namespaces", _, "secrets", name] => match self.secrets.get(*name) {
-                Some(secret) => ok(secret),
-                None => status(404, "NotFound"),
-            },
+            ["api", "v1", "namespaces", _, "secrets", name] => {
+                if self.fail_secret_reads > 0 {
+                    self.fail_secret_reads -= 1;
+                    return status(500, "Unavailable");
+                }
+                match self.secrets.get(*name) {
+                    Some(secret) => ok(secret),
+                    None => status(404, "NotFound"),
+                }
+            }
             ["api", "v1", "namespaces", namespace, "secrets"] if method == Method::GET => {
                 let items: Vec<_> = self
                     .secrets

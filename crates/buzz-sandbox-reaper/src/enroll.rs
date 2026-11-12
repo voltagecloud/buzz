@@ -28,6 +28,7 @@ use zeroize::Zeroizing;
 
 use crate::codex_login::{Broker, Change};
 use crate::manager::{refusal, Developer};
+use crate::paseo::{self, DaemonSecrets};
 use crate::profile;
 
 pub const DEFAULT_GITHUB_API_URL: &str = "https://api.github.com";
@@ -52,7 +53,7 @@ pub fn admit_profile(
             payload.contains_key("profile")
                 && payload
                     .keys()
-                    .all(|key| key == "profile" || key == "codex_login")
+                    .all(|key| key == "profile" || key == "codex_login" || key == "paseo")
         })
         .and_then(|payload| payload.get("profile"))
         .filter(|profile| profile.is_object())
@@ -314,6 +315,9 @@ pub struct Enrollment {
     github: GitHub,
     store: Arc<dyn ProfileStore>,
     broker: Option<Arc<Broker>>,
+    paseo: Option<DaemonSecrets>,
+    /// Serialize profile and daemon Secret updates, including without a broker.
+    lock: tokio::sync::Mutex<()>,
 }
 
 impl Enrollment {
@@ -322,12 +326,74 @@ impl Enrollment {
             github,
             store,
             broker: None,
+            paseo: None,
+            lock: tokio::sync::Mutex::new(()),
         }
     }
 
     pub fn with_broker(mut self, broker: Arc<Broker>) -> Self {
         self.broker = Some(broker);
         self
+    }
+
+    /// Provision pairing and a gateway key only in the daemon Secret.
+    pub fn with_paseo(mut self, secrets: DaemonSecrets) -> Self {
+        self.paseo = Some(secrets);
+        self
+    }
+
+    /// A launch registration of `developer` changed: list it in their Paseo
+    /// daemon's Secret. The saved registration survives a failed refresh;
+    /// enrollment rebuilds the list without repeating the successful deploy.
+    pub async fn agents_changed(&self, developer: &Developer) -> Result<(), Value> {
+        let Some(secrets) = &self.paseo else {
+            return Ok(());
+        };
+        secrets
+            .refresh_agents(developer)
+            .await
+            .map_err(|paseo::Failed(label)| {
+                tracing::warn!(developer = %developer.id, label,
+                    "Paseo agent list refresh failed after successful Sandbox registration");
+                refusal(
+                    ErrorCode::PaseoStoreFailed,
+                    &format!(
+                        "the Sandbox started and is registered, but the Paseo agent list was not refreshed ({label}); enroll again to refresh the list without redeploying"
+                    ),
+                )
+            })
+    }
+
+    /// Capture daemon identities before reading shared authority. Retirement
+    /// must precede Secret removal: either this captures the old identity or
+    /// the later writer reads observe its retired community membership.
+    pub async fn shared_daemon_keys(
+        &self,
+        developers: &[Developer],
+    ) -> Result<Vec<PublicKey>, Value> {
+        let Some(secrets) = &self.paseo else {
+            return Ok(Vec::new());
+        };
+        secrets.gateway_keys(developers).await.map_err(|_| {
+            serde_json::json!({"ok":false,"code":"shared_task_retry","error":"current daemon identities are unavailable; retry this task"})
+        })
+    }
+
+    /// Check verified task identities against this admission's fresh snapshot.
+    pub fn check_shared_human(
+        keys: &[PublicKey],
+        task: &buzz_sdk::sharing::policy::Task,
+    ) -> Result<(), Value> {
+        if [task.human, task.requester, task.origin_requester]
+            .iter()
+            .any(|key| keys.contains(key))
+        {
+            Err(
+                serde_json::json!({"ok":false,"code":"shared_task_denied","error":"a managed Paseo gateway must use current gateway authority, never human sharing permissions"}),
+            )
+        } else {
+            Ok(())
+        }
     }
 
     /// The developer's stored profile, parsed. An unreadable stored value
@@ -364,6 +430,24 @@ impl Enrollment {
         partial: Value,
         login: Option<Change>,
     ) -> Value {
+        self.run_with_daemon(developer, partial, login, None).await
+    }
+
+    /// Apply separately encrypted daemon credentials without adding them to the profile.
+    pub async fn run_with_daemon(
+        &self,
+        developer: &Developer,
+        partial: Value,
+        login: Option<Change>,
+        git: Option<paseo::GitReadToken>,
+    ) -> Value {
+        let _serialized = self.lock.lock().await;
+        if git.is_some() && self.paseo.is_none() {
+            return refusal(
+                ErrorCode::PaseoStoreFailed,
+                "Paseo daemons are not configured",
+            );
+        }
         let _guard = match &self.broker {
             Some(broker) => match broker.lock(developer).await {
                 Ok(guard) => Some(guard),
@@ -458,6 +542,30 @@ impl Enrollment {
         if let Err(profile::Invalid(message)) = profile::validate(&profile) {
             return refusal(ErrorCode::InvalidProfile, message);
         }
+        // Before the profile write, so a refusal always means the profile is
+        // unchanged: a client that sees one keeps what it sent (a new signing
+        // key) to send again. A Secret written for a profile that then fails
+        // to store holds only what this request carries, and its retry
+        // rewrites the Secret.
+        let pairing = if let Some(secrets) = &self.paseo {
+            let written = match git.as_ref() {
+                Some(token) => {
+                    secrets
+                        .write_with_git_token(developer, &profile, Some(token))
+                        .await
+                }
+                None => secrets.write(developer, &profile).await,
+            };
+            match written {
+                Ok(pairing) => Some(pairing),
+                Err(paseo::Failed(label)) => return refusal(
+                    ErrorCode::PaseoStoreFailed,
+                    &format!("could not write the Paseo daemon secret ({label}); the profile is unchanged, retry"),
+                ),
+            }
+        } else {
+            None
+        };
         // Revoke before changing the profile: stale Secrets Manager replicas
         // may still serve its old broker credential, which must no longer work.
         if !connects_codex && (disconnects_codex || replaces_codex) {
@@ -486,7 +594,12 @@ impl Enrollment {
                 }
                 let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
                 let summary = profile::summary(&profile, &version_id, Some(now));
-                serde_json::json!({"ok": true, "version_id": version_id, "profile": summary})
+                let mut reply =
+                    serde_json::json!({"ok": true, "version_id": version_id, "profile": summary});
+                if let Some(pairing) = pairing {
+                    reply["paseo"] = pairing;
+                }
+                reply
             }
             Err(StoreFailed(label)) => refusal(
                 ErrorCode::ProfileStoreFailed,
@@ -496,14 +609,32 @@ impl Enrollment {
     }
 
     /// The `profile` operation: the stored profile's [`profile::summary`],
-    /// or `null` when none is stored.
+    /// or `null` when none is stored, and its Paseo pairing details.
     pub async fn describe(&self, developer: &Developer) -> Value {
         match self.stored(developer).await {
-            Ok(Some((profile, stored))) => serde_json::json!({
-                "ok": true,
-                "profile": profile::summary(&profile, &stored.version_id, stored.created),
-            }),
-            Ok(None) => serde_json::json!({"ok": true, "profile": null}),
+            Ok(Some((profile, stored))) => {
+                let mut reply = serde_json::json!({
+                    "ok": true,
+                    "profile": profile::summary(&profile, &stored.version_id, stored.created),
+                    "paseo_enabled": self.paseo.is_some(),
+                });
+                if let Some(secrets) = &self.paseo {
+                    match secrets.pairing(developer).await {
+                        Ok(Some(pairing)) => reply["paseo"] = pairing,
+                        Ok(None) => {}
+                        Err(paseo::Failed(label)) => {
+                            return refusal(
+                                ErrorCode::PaseoStoreFailed,
+                                &format!("could not read the Paseo daemon secret ({label}); retry"),
+                            )
+                        }
+                    }
+                }
+                reply
+            }
+            Ok(None) => {
+                serde_json::json!({"ok": true, "profile": null, "paseo_enabled": self.paseo.is_some()})
+            }
             Err(refused) => refused,
         }
     }

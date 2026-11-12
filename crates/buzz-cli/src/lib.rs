@@ -260,6 +260,9 @@ pub enum OutputFormat {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Read owner-encrypted Paseo pairing details
+    #[command(subcommand)]
+    Paseo(commands::paseo::PaseoCmd),
     /// Draft owner-reviewed agent creation and updates
     #[command(subcommand)]
     Agents(AgentsCmd),
@@ -2375,6 +2378,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
     let client = BuzzClient::new(relay_url, keys, auth_tag, auth_tag_json)?;
 
     match cli.command {
+        Cmd::Paseo(sub) => commands::paseo::dispatch(sub, &client).await,
         Cmd::Agents(sub) => commands::agents::dispatch(sub, &client).await,
         Cmd::Gateway(sub) => commands::gateway::dispatch(sub, &client).await,
         Cmd::Messages(sub) => commands::messages::dispatch(sub, &client, &cli.format).await,
@@ -2588,6 +2592,7 @@ mod tests {
             "moderation",
             "notes",
             "pack",
+            "paseo",
             "patches",
             "pr",
             "projects",
@@ -2714,6 +2719,7 @@ mod tests {
             names(&cmd, "workflows"),
             vec!["approve", "create", "delete", "get", "list", "runs", "trigger", "update"]
         );
+        assert_eq!(names(&cmd, "paseo"), vec!["pairing"]);
         assert_eq!(names(&cmd, "feed"), vec!["get"]);
         assert_eq!(
             names(&cmd, "social"),
@@ -2804,6 +2810,7 @@ mod tests {
             ("media", 1),
             ("messages", 8),
             ("pack", 2),
+            ("paseo", 1),
             ("patches", 4),
             ("pr", 5),
             ("projects", 8),

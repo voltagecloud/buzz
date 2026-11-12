@@ -396,3 +396,43 @@ fn invalid_desktop_registration_has_a_deploy_specific_refusal_without_url_secret
     assert_eq!(error["code"], "invalid_launch_registration");
     assert!(!error.to_string().contains("private"));
 }
+
+/// The Paseo channel annotation follows the latest channel-thread deploy; a
+/// direct-message deploy keeps the saved one, and the payload never carries
+/// it, so a manager without the annotation still reads the registration.
+#[tokio::test]
+async fn registrations_keep_the_latest_channel_thread_for_paseo() {
+    let state: sandbox_fake::Shared = Arc::new(Mutex::new(Default::default()));
+    let name = Registration::name(owner().public_key(), agent().public_key(), RELAY);
+    let save = |config: Value| {
+        let state = state.clone();
+        async move {
+            Registration::new(owner().public_key(), agent().public_key(), launch())
+                .unwrap()
+                .in_channel(&config)
+                .save(sandbox_fake::client(&state), NAMESPACE)
+                .await
+                .unwrap();
+        }
+    };
+    let annotation = || {
+        state.lock().unwrap().secrets[&name]["metadata"]["annotations"][CHANNEL_ANNOTATION].clone()
+    };
+    let other = "1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f";
+    save(json!({"sandbox": {"channel_id": CHANNEL, "thread_root": "b".repeat(64)}})).await;
+    assert_eq!(annotation(), CHANNEL);
+    save(json!({"sandbox": {"dm_channel_id": other}})).await;
+    assert_eq!(annotation(), CHANNEL);
+    save(json!({"sandbox": {"channel_id": other.to_uppercase(), "thread_root": "b".repeat(64)}}))
+        .await;
+    assert_eq!(annotation(), CHANNEL);
+    save(json!({"sandbox": {"channel_id": other, "thread_root": "b".repeat(64)}})).await;
+    assert_eq!(annotation(), other);
+    let data = state.lock().unwrap().secrets[&name]["data"][DATA_KEY].clone();
+    let text = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        data.as_str().unwrap(),
+    )
+    .unwrap();
+    assert!(!String::from_utf8(text).unwrap().contains("channel"));
+}
