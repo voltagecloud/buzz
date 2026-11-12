@@ -149,6 +149,9 @@ for (const [index, agent] of agents.entries()) {
       clientCapabilities: { terminal: false, fs: { readTextFile: false, writeTextFile: false } },
     },
     paseoTools: { enabled: false },
+    // One model, preselected: the bridge offers no ACP model choice, so the
+    // picker should not ask for one.
+    models: [{ id: "buzz", label, isDefault: true }],
   };
 }
 
@@ -286,4 +289,8 @@ ln -s /opt/paseo-buzz/no-terminal-worker "$PASEO_HOME/terminal-worker"
 # process environment.
 unset PASEO_DAEMON_KEYPAIR
 cd "$HOME/assistant"
+# Clone the token's repositories and register them as Paseo projects once the
+# daemon answers, so paired apps show file trees. Best-effort and bounded; it
+# logs to stderr and never blocks startup.
+/usr/local/bin/paseo-workspaces </dev/null >/dev/null &
 exec /usr/bin/tini -- /usr/local/bin/paseo-docker-entrypoint

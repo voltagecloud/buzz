@@ -50,6 +50,7 @@ COPY voltage/images/paseo-daemon/recorder /opt/paseo-buzz/recorder
 COPY --chmod=0644 voltage/images/paseo-daemon/assistant.md /etc/paseo-buzz/assistant.md
 COPY --chmod=0755 voltage/images/paseo-daemon/entrypoint.sh /usr/local/bin/paseo-buzz-entrypoint
 COPY --chmod=0755 voltage/images/paseo-daemon/code.mjs /usr/local/bin/paseo-code
+COPY --chmod=0755 voltage/images/paseo-daemon/workspaces.mjs /usr/local/bin/paseo-workspaces
 # Relay-only and TLS-only. The listener is loopback, for the in-container
 # CLI, the agent MCP server, and the health check. Clients, including the web
 # app at app.paseo.sh, reach the daemon only through the relay. The daemon's
