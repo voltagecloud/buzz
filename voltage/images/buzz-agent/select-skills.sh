@@ -15,8 +15,8 @@
 # prints counts only: the CI logs are public.
 set -eu
 
-# Skills that need tools a Sandbox cannot run (a browser, narration, VHS).
-EXCLUDE="walkthrough-video cli-demo-video"
+# Skills that need tools the image does not have (VHS).
+EXCLUDE="cli-demo-video"
 
 usage() {
     echo "usage: $0 <engineering-skills checkout> <output directory>" >&2

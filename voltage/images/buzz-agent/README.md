@@ -6,6 +6,8 @@ Staging agent workers are Graviton (`arm64`); the tool downloads in the Dockerfi
 Each developer supplies their own accounts at runtime.
 
 The image contains Codex and Claude ACP adapters, Rust, Node, Go, Python, Git, GitHub CLI, `via`, `kubectl`, and SQL clients.
+For browser tests and the `walkthrough-video` skill, it also contains Chromium's system libraries, ffmpeg, and Piper with two voices in `/opt/walkthrough-video` (`WALKTHROUGH_CACHE`).
+Each Playwright version needs its own browser build, so the image has no browser. Install the one that matches the repository's Playwright at runtime, for example `npx playwright install chromium` in frontend-turbo's `packages/e2e`.
 Buzz selects the runtime, model, persona, and arguments for each session.
 The image builds the Buzz source of the commit it is built from; npm dependencies use the committed lockfile.
 
@@ -32,6 +34,7 @@ docker build --platform linux/amd64 -f voltage/images/buzz-agent/Dockerfile \
 cd voltage/images/buzz-agent
 bash test-image.sh buzz-agent:local
 bash test-harness.sh buzz-agent:local
+bash test-walkthrough.sh buzz-agent:local
 python3 -O test-native-agent.py buzz-agent:local
 python3 test-policy.py buzz-agent:local
 python3 test-accounts.py buzz-agent:local
@@ -60,7 +63,7 @@ Build and test `linux/arm64` on an arm64 host, or through `.github/workflows/vol
 
 The image ships [voltagecloud/engineering-skills](https://github.com/voltagecloud/engineering-skills) (internal) in `/opt/engineering-skills`, owned by root.
 That repository is internal and this one is public, so the skills reach the build only as the `engineering-skills` [build context](https://docs.docker.com/build/building/context/#named-contexts).
-`select-skills.sh` makes that context. It leaves out `walkthrough-video` and `cli-demo-video`, which need a browser, narration, and VHS, and writes the source commit to `REVISION`.
+`select-skills.sh` makes that context. It leaves out `cli-demo-video`, which needs VHS, and writes the source commit to `REVISION`.
 
 | Build | Skills |
 | --- | --- |
