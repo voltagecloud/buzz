@@ -24,6 +24,8 @@ pub enum ClientMessage {
         filters: Vec<Filter>,
         /// Optional per-filter composite cursor tiebreaks from raw extension fields.
         before_ids: Vec<Option<Vec<u8>>>,
+        /// Per-filter authority reads pinned to the writer by `consistency:strong`.
+        writer_reads: Vec<bool>,
     },
     /// A REQ whose single filter is a NIP-AR sync (`"artifact":"current"`).
     /// An invalid sync filter is answered with `CLOSED`, so the parse error
@@ -173,10 +175,21 @@ impl ClientMessage {
                         Ok(Some(bytes))
                     })
                     .collect::<Result<Vec<_>>>()?;
+                let writer_reads = filter_values
+                    .iter()
+                    .map(|filter| match filter.get("consistency") {
+                        None => Ok(false),
+                        Some(Value::String(value)) if value == "strong" => Ok(true),
+                        Some(_) => Err(RelayError::InvalidMessage(
+                            "consistency must be \"strong\" when present".into(),
+                        )),
+                    })
+                    .collect::<Result<Vec<_>>>()?;
                 Ok(ClientMessage::Req {
                     sub_id,
                     filters,
                     before_ids,
+                    writer_reads,
                 })
             }
             "COUNT" => {
@@ -434,6 +447,27 @@ mod tests {
                 assert_eq!(filters.len(), 2);
             }
             _ => panic!("expected Req"),
+        }
+    }
+
+    #[test]
+    fn req_consistency_preserves_filter_alignment_and_rejects_unknown_modes() {
+        let value = serde_json::json!(["REQ", "authority", {"kinds":[9]},
+            {"kinds":[30181], "consistency":"strong"}, {"kinds":[0]}]);
+        let ClientMessage::Req { writer_reads, .. } =
+            ClientMessage::parse(&value.to_string()).unwrap()
+        else {
+            panic!("expected REQ");
+        };
+        assert_eq!(writer_reads, vec![false, true, false]);
+        for bad in [
+            serde_json::json!("eventual"),
+            serde_json::json!(true),
+            serde_json::json!(null),
+        ] {
+            let value =
+                serde_json::json!(["REQ", "authority", {"kinds":[30181], "consistency":bad}]);
+            assert!(ClientMessage::parse(&value.to_string()).is_err());
         }
     }
 

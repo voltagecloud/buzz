@@ -13,12 +13,29 @@ async fn scheduled_workflow_wakes_private_remote_agent_with_owner_offline() {
     let acp = PathBuf::from(std::env::var("BUZZ_SHARING_TEST_ACP").unwrap());
     let cli = PathBuf::from(std::env::var("BUZZ_SHARING_TEST_CLI").unwrap());
     assert!(acp.is_file() && cli.is_file());
-    tokio::time::timeout(Duration::from_secs(150), exercise(&relay, &acp, &cli))
-        .await
-        .expect("scheduled remote-agent workflow timed out");
+    tokio::time::timeout(
+        Duration::from_secs(150),
+        exercise(&relay, &acp, &cli, false),
+    )
+    .await
+    .expect("scheduled remote-agent workflow timed out");
 }
 
-async fn exercise(relay: &str, acp: &Path, cli: &Path) {
+#[tokio::test]
+#[ignore = "requires isolated local relay and built buzz-acp/buzz binaries"]
+async fn scheduled_gateway_workflow_wakes_private_agent_through_real_executor_and_harness() {
+    let relay = std::env::var("BUZZ_MENTION_TEST_RELAY").unwrap();
+    let url = url::Url::parse(&relay).unwrap();
+    assert_eq!(url.scheme(), "ws");
+    assert!(matches!(url.host_str(), Some("127.0.0.1" | "localhost")));
+    let acp = PathBuf::from(std::env::var("BUZZ_SHARING_TEST_ACP").unwrap());
+    let cli = PathBuf::from(std::env::var("BUZZ_SHARING_TEST_CLI").unwrap());
+    tokio::time::timeout(Duration::from_secs(150), exercise(&relay, &acp, &cli, true))
+        .await
+        .expect("gateway schedule timed out");
+}
+
+async fn exercise(relay: &str, acp: &Path, cli: &Path, gateway: bool) {
     let (owner, observer, agent) = (keys("33"), keys("44"), keys("22"));
     let channel = uuid::Uuid::new_v4();
     let mut phone = NostrWsConnection::connect_authenticated(relay, &owner, None)
@@ -113,12 +130,40 @@ async fn exercise(relay: &str, acp: &Path, cli: &Path) {
         })
     };
     wait_for(|| !inbox(&cluster).is_null()).await;
+    let workflow_author = if gateway {
+        observer.clone()
+    } else {
+        owner.clone()
+    };
+    if gateway {
+        publish(
+            &mut phone,
+            buzz_sdk::gateway::Delegation::grant(
+                observer.public_key(),
+                Timestamp::now().as_secs() + 3600,
+                Timestamp::now().as_secs(),
+            )
+            .unwrap(),
+            &owner,
+        )
+        .await;
+        drop(phone);
+        phone = NostrWsConnection::connect_authenticated(relay, &observer, None)
+            .await
+            .unwrap();
+        publish(
+            &mut phone,
+            EventBuilder::new(Kind::Metadata, "{}"),
+            &observer,
+        )
+        .await;
+    }
     let workflow_id = uuid::Uuid::new_v4();
     let yaml = "name: Scheduled remote agent\ntrigger:\n  on: schedule\n  cron: '* * * * *'\nsteps:\n  - id: work\n    action: send_message\n    text: '@ScheduledBrokkr scheduled fixture task'\n";
     let definition = publish(
         &mut phone,
         buzz_sdk::build_workflow_def(channel, workflow_id, yaml).unwrap(),
-        &owner,
+        &workflow_author,
     )
     .await;
     drop(phone);
@@ -142,10 +187,16 @@ async fn exercise(relay: &str, acp: &Path, cli: &Path) {
     assert_ne!(prompt.pubkey, owner.public_key());
     assert_eq!(
         buzz_sdk::workflow::owner(&prompt, prompt.pubkey, agent.public_key()),
-        Some(owner.public_key())
+        Some(workflow_author.public_key())
     );
+    if gateway {
+        assert_eq!(
+            buzz_sdk::workflow::gateway_owner(&prompt, prompt.pubkey, agent.public_key()),
+            Some(observer.public_key())
+        );
+    }
     // Stop future fires before checking the harness, including on later failure.
-    let mut phone = NostrWsConnection::connect_authenticated(relay, &owner, None)
+    let mut phone = NostrWsConnection::connect_authenticated(relay, &workflow_author, None)
         .await
         .unwrap();
     publish(
@@ -157,7 +208,7 @@ async fn exercise(relay: &str, acp: &Path, cli: &Path) {
             &definition.id.to_hex(),
         )
         .unwrap(),
-        &owner,
+        &workflow_author,
     )
     .await;
     drop(phone);

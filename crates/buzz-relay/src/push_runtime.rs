@@ -1221,7 +1221,7 @@ mod postgres_tests {
                     community,
                     &channel.to_string(),
                     text,
-                    text,
+                    buzz_workflow::action_sink::MessageAuthorship::unproven(text),
                     &owner.public_key().to_hex(),
                     None,
                 )

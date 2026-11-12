@@ -1,3 +1,5 @@
+mod transcript;
+
 use buzz_sdk::{DeleteMessageOptions, DiffMeta, ThreadRef, VoteDirection};
 use nostr::PublicKey;
 use uuid::Uuid;
@@ -566,6 +568,8 @@ fn match_profiles_by_name(events: &[serde_json::Value], name: &str) -> Vec<(Stri
 }
 
 pub struct SendMessageParams {
+    /// Validated recorder correlation metadata; message text remains separate.
+    pub paseo_transcript: Option<String>,
     pub channel_id: String,
     pub content: String,
     pub kind: Option<u16>,
@@ -584,11 +588,43 @@ pub async fn cmd_send_message(
     // quoting — the source of countless self-inflicted command-substitution
     // bugs for agent and human users alike.
     p.content = read_or_stdin(&p.content)?;
+    let event = prepare_message(client, &p).await?;
+    let emitted_mentions = event_mention_pubkeys(&event);
+    let resp = client.submit_event(event).await?;
+    let mut output: serde_json::Value = serde_json::from_str(&normalize_write_response(&resp))
+        .unwrap_or_else(|_| serde_json::json!({ "response": resp }));
+    if let Some(object) = output.as_object_mut() {
+        object.insert(
+            "mention_pubkeys".into(),
+            serde_json::json!(emitted_mentions),
+        );
+    }
+    println!("{output}");
+    Ok(())
+}
+
+/// Build and sign the message `cmd_send_message` would send, without
+/// submitting it or printing anything.
+///
+/// Runs the whole send pipeline: content size check, mention resolution and
+/// the channel-membership preflight, media upload, NIP-10 thread resolution
+/// for `reply_to`, and NIP-30 emoji tags, so every caller produces the same
+/// event. `p.content` is used verbatim: `-` is not read from stdin here, which
+/// keeps callers that own stdio (such as `acp-bridge`) safe. The signed
+/// event's id is known before submission, so callers can correlate relay
+/// activity that races the submit response.
+pub(crate) async fn prepare_message(
+    client: &BuzzClient,
+    p: &SendMessageParams,
+) -> Result<nostr::Event, CliError> {
     validate_content_size(&p.content)?;
     if let Some(ref r) = p.reply_to {
         validate_hex64(r)?;
     }
     let channel_uuid = parse_uuid(&p.channel_id)?;
+    if let Some(metadata) = &p.paseo_transcript {
+        return transcript::prepare(client, p, channel_uuid, metadata);
+    }
 
     let explicit_mentions = normalize_explicit_mentions(&p.mentions)?;
     let stripped = strip_code_regions(&p.content);
@@ -709,19 +745,7 @@ pub async fn cmd_send_message(
         }
     };
 
-    let event = client.sign_event(builder)?;
-    let emitted_mentions = event_mention_pubkeys(&event);
-    let resp = client.submit_event(event).await?;
-    let mut output: serde_json::Value = serde_json::from_str(&normalize_write_response(&resp))
-        .unwrap_or_else(|_| serde_json::json!({ "response": resp }));
-    if let Some(object) = output.as_object_mut() {
-        object.insert(
-            "mention_pubkeys".into(),
-            serde_json::json!(emitted_mentions),
-        );
-    }
-    println!("{output}");
-    Ok(())
+    client.sign_event(builder)
 }
 
 pub struct SendDiffParams {
@@ -905,6 +929,7 @@ pub async fn dispatch(
     use crate::MessagesCmd;
     match cmd {
         MessagesCmd::Send {
+            paseo_transcript,
             channel,
             content,
             kind,
@@ -916,6 +941,7 @@ pub async fn dispatch(
             cmd_send_message(
                 client,
                 SendMessageParams {
+                    paseo_transcript,
                     channel_id: channel,
                     content,
                     kind,
@@ -1566,6 +1592,7 @@ mod tests {
     #[derive(Clone, Default)]
     struct CapturedEvent {
         body: String,
+        submissions: usize,
     }
 
     /// Minimal fake relay for send-path tests.
@@ -1615,7 +1642,13 @@ mod tests {
                      _headers: AxumHeaderMap,
                      body: AxumBytes| async move {
                         let body_str = String::from_utf8_lossy(&body).to_string();
-                        *cap.lock().unwrap() = Some(CapturedEvent { body: body_str });
+                        let mut captured = cap.lock().unwrap();
+                        let submissions =
+                            captured.as_ref().map_or(1, |prior| prior.submissions + 1);
+                        *captured = Some(CapturedEvent {
+                            body: body_str,
+                            submissions,
+                        });
                         (
                             AxumStatusCode::OK,
                             [("content-type", "application/json")],
@@ -1650,6 +1683,7 @@ mod tests {
 
     fn send_params(content: &str) -> super::SendMessageParams {
         super::SendMessageParams {
+            paseo_transcript: None,
             channel_id: SEND_TEST_CHANNEL.to_string(),
             content: content.to_string(),
             kind: None,
@@ -1658,6 +1692,77 @@ mod tests {
             files: vec![],
             mentions: vec![],
         }
+    }
+
+    #[tokio::test]
+    async fn transcript_send_is_flat_literal_unmentioned_and_retry_stable() {
+        let (url, queries, captured) = fake_send_relay("[]".into()).await;
+        let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+        let root = "1".repeat(64);
+        let metadata = serde_json::json!({"session":"2".repeat(64), "entry":"3".repeat(64),
+            "role":"developer", "part":1,"parts":2,"sequence":7,"created_at":100,"root":root})
+        .to_string();
+        let mut params = send_params("ask @brokkr :wave: nostr:npub1invalid to fix it");
+        params.paseo_transcript = Some(metadata);
+        let prepared = super::prepare_message(&client, &params).await.unwrap();
+        assert!(
+            captured.lock().unwrap().is_none(),
+            "preparing a transcript never publishes it"
+        );
+        cmd_send_message(&client, params).await.unwrap();
+        assert_eq!(captured.lock().unwrap().as_ref().unwrap().submissions, 1);
+        let first: nostr::Event =
+            serde_json::from_str(&captured.lock().unwrap().as_ref().unwrap().body).unwrap();
+        assert_eq!(prepared.id, first.id);
+        first.verify().unwrap();
+        assert_eq!(first.kind.as_u16(), 9);
+        assert_eq!(first.created_at.as_secs(), 100);
+        assert_eq!(
+            first.content,
+            "ask @brokkr :wave: nostr:npub1invalid to fix it"
+        );
+        assert_eq!(
+            queries.load(Ordering::Relaxed),
+            0,
+            "transcripts never resolve mentions, palettes or channel defaults"
+        );
+        let tags: Vec<_> = first
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect();
+        assert!(tags
+            .iter()
+            .all(|tag| !matches!(tag[0].as_str(), "p" | "emoji" | "wake")));
+        let replies: Vec<_> = tags.iter().filter(|tag| tag[0] == "e").collect();
+        assert!(!replies.is_empty());
+        assert!(
+            replies.iter().all(|tag| tag[1] == root),
+            "every reply points at the root"
+        );
+        assert!(tags.contains(&vec!["t".into(), "paseo:developer".into()]));
+        let mut retry = send_params(&first.content);
+        retry.paseo_transcript = Some(
+            serde_json::json!({"session":"2".repeat(64), "entry":"3".repeat(64),
+            "role":"developer", "part":1,"parts":2,"sequence":7,"created_at":100,"root":root})
+            .to_string(),
+        );
+        cmd_send_message(&client, retry).await.unwrap();
+        assert_eq!(captured.lock().unwrap().as_ref().unwrap().submissions, 2);
+        let second: nostr::Event =
+            serde_json::from_str(&captured.lock().unwrap().as_ref().unwrap().body).unwrap();
+        assert_eq!(
+            first.id, second.id,
+            "lost ACK retry retains the signed event identity"
+        );
+        let mut invalid = send_params("bad");
+        invalid.paseo_transcript = Some(
+            serde_json::json!({"session":"2".repeat(64), "entry":"3".repeat(64),
+            "role":"assistant", "part":1,"parts":1,"sequence":1,"created_at":100,"p":["injected"]})
+            .to_string(),
+        );
+        assert!(cmd_send_message(&client, invalid).await.is_err());
+        assert_eq!(captured.lock().unwrap().as_ref().unwrap().submissions, 2);
     }
 
     #[tokio::test]
@@ -1782,7 +1887,10 @@ mod tests {
                     let cap = cap.clone();
                     async move {
                         let body_str = String::from_utf8_lossy(&body).to_string();
-                        *cap.lock().unwrap() = Some(CapturedEvent { body: body_str });
+                        *cap.lock().unwrap() = Some(CapturedEvent {
+                            body: body_str,
+                            submissions: 1,
+                        });
                         (
                             AxumStatusCode::OK,
                             [("content-type", "application/json")],

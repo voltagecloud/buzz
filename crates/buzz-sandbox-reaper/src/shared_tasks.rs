@@ -52,7 +52,7 @@ pub(crate) async fn verify(
     .await
 }
 
-async fn relay_key(relay: &str) -> Result<PublicKey, policy::Error> {
+pub(crate) async fn relay_key(relay: &str) -> Result<PublicKey, policy::Error> {
     let mut url = url::Url::parse(relay).map_err(|_| policy::Error::Unavailable)?;
     let scheme = match url.scheme() {
         "wss" => "https",
@@ -89,7 +89,10 @@ async fn relay_key(relay: &str) -> Result<PublicKey, policy::Error> {
         .map_err(|_| policy::Error::Unavailable)
 }
 
-async fn query(identity: &Identity, filter: Value) -> Result<Vec<Event>, ()> {
+async fn query(identity: &Identity, mut filter: Value) -> Result<Vec<Event>, ()> {
+    // Admission must observe committed retirement before a daemon identity
+    // Secret may be removed. Replica snapshots cannot supply that authority.
+    filter["consistency"] = json!("strong");
     tokio::time::timeout(Duration::from_secs(10), async {
         let mut connection = NostrWsConnection::connect_authenticated(
             &identity.relay,

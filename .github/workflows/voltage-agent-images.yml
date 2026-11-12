@@ -9,9 +9,12 @@ name: Voltage images
 #   buzz-agent           voltage/images/buzz-agent/Dockerfile → voltage-buzz-agent-staging
 #   buzz-sandbox-reaper  voltage/images/buzz-sandbox-reaper/Dockerfile → voltage-buzz-sandbox-reaper-staging
 #   buzz-relay           the upstream root Dockerfile (target runtime) → buzz-relay
+#   paseo-relay          getpaseo/paseo-relay's Dockerfile at PASEO_RELAY_SOURCE → paseo-relay
+#   paseo-daemon         voltage/images/paseo-daemon/Dockerfile → voltage-paseo-daemon-staging
 #
 # The changes job selects only the images whose inputs changed. Manual runs
-# (workflow_dispatch) build all three, or only buzz-agent with agent_only.
+# (workflow_dispatch) build all of them, or only buzz-agent with agent_only.
+# Paseo daemon publishes to staging ECR, provisioned in voltage-terraform #1029.
 #
 # Trust model: this repository and its logs are public. Pull requests run
 # without AWS access. Only the publish and merge jobs request an OIDC token,
@@ -86,6 +89,11 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # The Paseo relay (Apache-2.0), built unmodified from this pinned upstream
+  # commit as a remote BuildKit context. See docs/paseo-relay.md.
+  PASEO_RELAY_SOURCE: https://github.com/getpaseo/paseo-relay.git#5f4b7636af41a85ef20200c0b7e99dd1ea2ee1f2
+
 jobs:
   changes:
     name: Select images
@@ -131,6 +139,15 @@ jobs:
               - 'examples/**'
               - 'voltage/images/buzz-sandbox-reaper/**'
               - '.github/workflows/voltage-agent-images.yml'
+            paseo_daemon:
+              - '.cargo/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - 'crates/**'
+              - 'examples/**'
+              - 'voltage/images/paseo-daemon/**'
+              - '.github/workflows/voltage-agent-images.yml'
             relay:
               - 'Dockerfile'
               - '.dockerignore'
@@ -149,6 +166,10 @@ jobs:
               - 'web/**'
               - 'admin-web/**'
               - '.github/workflows/voltage-agent-images.yml'
+            # The source pin lives in this workflow.
+            paseo_relay:
+              - 'voltage/images/test-paseo-relay-image.sh'
+              - '.github/workflows/voltage-agent-images.yml'
       - name: Build the image matrices
         id: select
         env:
@@ -157,17 +178,24 @@ jobs:
           AGENT: ${{ steps.filter.outputs.agent }}
           REAPER: ${{ steps.filter.outputs.reaper }}
           RELAY: ${{ steps.filter.outputs.relay }}
+          PASEO_RELAY: ${{ steps.filter.outputs.paseo_relay }}
+          PASEO_DAEMON: ${{ steps.filter.outputs.paseo_daemon }}
         run: |
           set -euo pipefail
           selected=()
           if [ "$ALL" = true ] || [ "$AGENT_ONLY" = true ] || [ "$AGENT" = true ]; then selected+=(buzz-agent); fi
           if [ "$ALL" = true ] || [ "$REAPER" = true ]; then selected+=(buzz-sandbox-reaper); fi
           if [ "$ALL" = true ] || [ "$RELAY" = true ]; then selected+=(buzz-relay); fi
-          images='{
-            "buzz-agent": {"file": "voltage/images/buzz-agent/Dockerfile", "target": "", "repository": "voltage-buzz-agent-staging"},
-            "buzz-sandbox-reaper": {"file": "voltage/images/buzz-sandbox-reaper/Dockerfile", "target": "", "repository": "voltage-buzz-sandbox-reaper-staging"},
-            "buzz-relay": {"file": "Dockerfile", "target": "runtime", "repository": "buzz-relay"}
-          }'
+          if [ "$ALL" = true ] || [ "$PASEO_RELAY" = true ]; then selected+=(paseo-relay); fi
+          if [ "$ALL" = true ] || [ "$PASEO_DAEMON" = true ]; then selected+=(paseo-daemon); fi
+          # paseo-relay builds the Dockerfile at the root of its remote context.
+          images=$(jq -cn --arg paseo "$PASEO_RELAY_SOURCE" '{
+            "buzz-agent": {"context": ".", "file": "voltage/images/buzz-agent/Dockerfile", "target": "", "repository": "voltage-buzz-agent-staging"},
+            "buzz-sandbox-reaper": {"context": ".", "file": "voltage/images/buzz-sandbox-reaper/Dockerfile", "target": "", "repository": "voltage-buzz-sandbox-reaper-staging"},
+            "buzz-relay": {"context": ".", "file": "Dockerfile", "target": "runtime", "repository": "buzz-relay"},
+            "paseo-relay": {"context": $paseo, "file": "", "target": "", "repository": "paseo-relay"},
+            "paseo-daemon": {"context": ".", "file": "voltage/images/paseo-daemon/Dockerfile", "target": "", "repository": "voltage-paseo-daemon-staging"}
+          }')
           platforms='[{"arch": "amd64", "runner": "ubuntu-latest"}, {"arch": "arm64", "runner": "ubuntu-24.04-arm"}]'
           build=$(jq -cn --argjson images "$images" --argjson platforms "$platforms" \
             '{include: [$ARGS.positional[] as $image | $platforms[] | {image: $image} + $images[$image] + .]}' \
@@ -192,6 +220,8 @@ jobs:
         with:
           persist-credentials: false
       # The relay's root Dockerfile is upstream's; it gets only BuildKit checks.
+      # The Paseo relay's is checked in its own build and publish jobs instead,
+      # so an unreachable upstream repository fails only that image.
       - name: Hadolint buzz-agent
         uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
         with:
@@ -202,13 +232,18 @@ jobs:
         with:
           dockerfile: voltage/images/buzz-sandbox-reaper/Dockerfile
           failure-threshold: error
+      - name: Hadolint paseo-daemon
+        uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
+        with:
+          dockerfile: voltage/images/paseo-daemon/Dockerfile
+          failure-threshold: error
       # --check resolves every COPY --from source, so the agent image needs its
       # engineering-skills context; the other images ignore it.
       - name: BuildKit checks
         run: |
           set -euo pipefail
           sh voltage/images/buzz-agent/select-skills.sh --none "$RUNNER_TEMP/engineering-skills"
-          for file in voltage/images/buzz-agent/Dockerfile voltage/images/buzz-sandbox-reaper/Dockerfile Dockerfile; do
+          for file in voltage/images/buzz-agent/Dockerfile voltage/images/buzz-sandbox-reaper/Dockerfile voltage/images/paseo-daemon/Dockerfile Dockerfile; do
             echo "==> $file"
             docker buildx build --check --build-context engineering-skills="$RUNNER_TEMP/engineering-skills" -f "$file" .
           done
@@ -243,10 +278,13 @@ jobs:
       # Pull requests never read the internal skills repository.
       - name: Empty engineering skills context
         run: sh voltage/images/buzz-agent/select-skills.sh --none "$RUNNER_TEMP/engineering-skills"
+      - name: Paseo relay BuildKit check
+        if: matrix.image == 'paseo-relay'
+        run: docker buildx build --check "$PASEO_RELAY_SOURCE"
       - name: Build
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
-          context: .
+          context: ${{ matrix.context }}
           file: ${{ matrix.file }}
           target: ${{ matrix.target }}
           platforms: linux/${{ matrix.arch }}
@@ -264,6 +302,13 @@ jobs:
       - name: Relay smoke test
         if: matrix.image == 'buzz-relay'
         run: bash voltage/images/test-relay-image.sh "$IMAGE"
+      - name: Paseo relay smoke test
+        if: matrix.image == 'paseo-relay'
+        run: bash voltage/images/test-paseo-relay-image.sh "$IMAGE"
+
+      - name: Paseo daemon contract test
+        if: matrix.image == 'paseo-daemon'
+        run: bash voltage/images/paseo-daemon/test-image.sh "$IMAGE"
       - name: Image contract tests
         if: matrix.image == 'buzz-agent'
         run: |
@@ -285,6 +330,7 @@ jobs:
           python3 test-codex-login.py "$IMAGE"
           python3 -O test-profile.py "$IMAGE"
           python3 test-cluster.py "$IMAGE"
+          python3 test-environment.py "$IMAGE"
           python3 test-skills.py "$IMAGE"
 
   # main: resolve engineering-skills master once, so every platform image of
@@ -395,12 +441,15 @@ jobs:
             sh voltage/images/buzz-agent/select-skills.sh --none "$out"
           fi
           echo "revision=$(cat "$out/REVISION")" >> "$GITHUB_OUTPUT"
+      - name: Paseo relay BuildKit check
+        if: matrix.image == 'paseo-relay'
+        run: docker buildx build --check "$PASEO_RELAY_SOURCE"
       # Build and smoke-test before credentials exist; the push build below
       # reuses this build's cache.
       - name: Build
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
-          context: .
+          context: ${{ matrix.context }}
           file: ${{ matrix.file }}
           target: ${{ matrix.target }}
           platforms: linux/${{ matrix.arch }}
@@ -417,6 +466,13 @@ jobs:
       - name: Relay smoke test
         if: matrix.image == 'buzz-relay'
         run: bash voltage/images/test-relay-image.sh "$IMAGE"
+      - name: Paseo relay smoke test
+        if: matrix.image == 'paseo-relay'
+        run: bash voltage/images/test-paseo-relay-image.sh "$IMAGE"
+
+      - name: Paseo daemon contract test
+        if: matrix.image == 'paseo-daemon'
+        run: bash voltage/images/paseo-daemon/test-image.sh "$IMAGE"
       - name: Image contract test
         if: matrix.image == 'buzz-agent'
         env:
@@ -433,7 +489,7 @@ jobs:
         id: push
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
-          context: .
+          context: ${{ matrix.context }}
           file: ${{ matrix.file }}
           target: ${{ matrix.target }}
           platforms: linux/${{ matrix.arch }}

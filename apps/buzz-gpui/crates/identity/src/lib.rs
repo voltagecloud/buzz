@@ -24,6 +24,8 @@ mod reminders;
 #[cfg(feature = "session-control")]
 mod session_control;
 pub use reminders::{DecodedReminder, ReminderIntent};
+#[cfg(feature = "session-control")]
+pub use session_control::EnrollmentSecrets;
 
 /// buzz-app's release keyring entry. Debug builds of buzz-app use a
 /// `.debug` service; this app always uses the release one so it shares the

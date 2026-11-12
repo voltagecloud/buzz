@@ -48,6 +48,7 @@ python3 test-cache.py buzz-agent:local
 python3 -O test-profile.py buzz-agent:local
 python3 test-cluster.py buzz-agent:local
 python3 test-skills.py buzz-agent:local
+python3 test-environment.py buzz-agent:local
 ```
 
 To build with the engineering skills, replace `--none` with a local checkout:
@@ -154,6 +155,8 @@ The bootstrap exports `KUBECONFIG` and appends [the diagnostic guide](cluster.md
 It skips configuration when neither token is mounted, and rejects credentials for another developer namespace.
 It performs no cluster API calls during startup.
 
+Every session and worker also gets [the environment guide](environment.md), appended to the same instructions whether or not cluster credentials are mounted. It covers how to find enrolled services with `via capabilities`, how to detect a Sandbox, whose identity a `via` service uses, running untrusted code in a credentialed Pod, and where to report vulnerabilities.
+
 The staging Terraform root owns the observer RBAC, worker projection, and API egress policy.
 Diagnostic permissions cover reads across staging namespaces, including logs, events, metrics, routing, and Argo CD state.
 They exclude Secrets, exec, attach, port forwarding, node/service proxies, and mutations.
@@ -192,6 +195,10 @@ A profile can contain `anthropic_api_key` or `claude_oauth_token`, not both. Cla
 The bootstrap refuses an inherited `OPENAI_API_KEY`, `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, or `OPENROUTER_API_KEY`.
 Model credentials stay in process environments and are never written to workspace files. Tools that the agent runs inherit them: the agent's tool shell starts from a cleared environment, so the bootstrap lists them in `BUZZ_ACP_MCP_FORWARD_ENV`, which `buzz-acp` forwards into that shell. `buzz-agent-review` uses them to run its reviewer.
 The checkpoint secret scan also refuses Claude subscription tokens.
+
+When the manager config sets `paseo_daemons`, it generates pairing and gateway credentials only in the narrow Secret `paseo-daemon-<id>`.
+The profile carries no Paseo or gateway fields. Sandbox images need no profile-schema change for daemon provisioning.
+The manager preserves existing credentials on enrollment and returns only the password, server ID, offer URL, and gateway public key.
 
 ### Commit signing
 

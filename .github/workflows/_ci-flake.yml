@@ -215,7 +215,8 @@ jobs:
     name: Flake check (Playwright smoke, ${{ matrix.shard }}/${{ needs.flake-select.outputs.playwright_shard_total }})
     needs: [flake-select]
     if: needs.flake-select.outputs.playwright != ''
-    runs-on: ubuntu-latest
+    # Pinned Playwright supports Ubuntu 24.04; ubuntu-latest now selects 26.04.
+    runs-on: ubuntu-24.04
     # Same bound as a smoke shard: Chromium dependency setup is bounded by
     # ci-apt-retry.sh (~25m worst case), and flake-check.mjs sizes the shards
     # so the repetitions fit the rest.

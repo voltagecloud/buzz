@@ -49,3 +49,61 @@ pub fn owner(event: &Event, relay: PublicKey, agent: PublicKey) -> Option<Public
     }
     mentioned.contains(&agent).then_some(parsed)
 }
+
+/// Relay assertion for a stored schedule trigger with a literal prompt template.
+pub const SCHEDULED_LITERAL_TAG: &str = "buzz:workflow-schedule";
+
+/// Verify the relay's scheduled-literal assertion before attributing a gateway prompt.
+/// Delegation and current channel membership remain separate caller checks.
+pub fn gateway_owner(event: &Event, relay: PublicKey, agent: PublicKey) -> Option<PublicKey> {
+    let proof = event
+        .tags
+        .iter()
+        .filter(|tag| tag.as_slice().first().map(String::as_str) == Some(SCHEDULED_LITERAL_TAG))
+        .map(Tag::as_slice)
+        .collect::<Vec<_>>();
+    if proof.as_slice() != [[SCHEDULED_LITERAL_TAG, "literal-v1"]] {
+        return None;
+    }
+    owner(event, relay, agent)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nostr::{EventBuilder, Keys, Kind};
+
+    #[test]
+    fn gateway_workflow_authority_requires_one_relay_signed_schedule_assertion() {
+        let relay = Keys::generate();
+        let gateway = Keys::generate().public_key();
+        let agent = Keys::generate().public_key();
+        let forged = Keys::generate();
+        for (proofs, signer, expected) in [
+            (vec!["literal-v1"], &relay, true),
+            (vec![], &relay, false),
+            (vec!["literal-v2"], &relay, false),
+            (vec!["literal-v1", "literal-v1"], &relay, false),
+            (vec!["literal-v1"], &forged, false),
+        ] {
+            let mut tags = vec![
+                Tag::parse(["buzz:workflow", "true"]).unwrap(),
+                Tag::parse(["buzz:workflow-owner", &gateway.to_hex()]).unwrap(),
+                Tag::parse(["buzz:workflow-mention", &agent.to_hex()]).unwrap(),
+            ];
+            tags.extend(
+                proofs
+                    .into_iter()
+                    .map(|proof| Tag::parse([SCHEDULED_LITERAL_TAG, proof]).unwrap()),
+            );
+            let event = EventBuilder::new(Kind::Custom(9), "fixed instruction")
+                .tags(tags)
+                .sign_with_keys(signer)
+                .unwrap();
+            assert_eq!(
+                gateway_owner(&event, relay.public_key(), agent),
+                expected.then_some(gateway)
+            );
+        }
+    }
+}

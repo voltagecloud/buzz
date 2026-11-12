@@ -1133,7 +1133,7 @@ test("repeat invocations mirror the lanes they stand in for", () => {
 // `tests` ({pkg, binary, binaryName, name, feature?, ignored?, failsWith?}; a
 // feature test only under that feature) and passing every test a run selects
 // but one failing in the graph enabling its `failsWith` feature.
-function repeatWithFakeCargo(runner, entries, tests) {
+function repeatWithFakeCargo(runner, entries, tests, options = {}) {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "flake-repeat-")));
   try {
     mkdirSync(join(dir, "scripts"));
@@ -1153,7 +1153,24 @@ function repeatWithFakeCargo(runner, entries, tests) {
       );
       writeFileSync(join(dir, crateDir, "src/lib.rs"), "");
     }
+    for (const [file, source] of Object.entries(options.sources ?? {})) {
+      mkdirSync(join(dir, file, ".."), { recursive: true });
+      writeFileSync(join(dir, file), source);
+    }
     mkdirSync(join(dir, "bin"));
+    writeFileSync(
+      join(dir, "fake-rustc.mjs"),
+      `const target = process.argv.at(-1);
+if (process.env.FAKE_CFG_FAILURE === "true") process.exit(1);
+process.stdout.write(target.includes("windows") ? 'windows\\ntarget_os="windows"\\n' : 'unix\\ntarget_os="linux"\\n');
+`,
+    );
+    // Like bin/cargo, run the fake through this Node binary, not PATH.
+    writeFileSync(
+      join(dir, "bin/rustc"),
+      `#!/bin/sh\nexec "${process.execPath}" "${join(dir, "fake-rustc.mjs")}" "$@"\n`,
+      { mode: 0o755 },
+    );
     writeFileSync(
       join(dir, "fake-cargo.mjs"),
       `import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
@@ -1174,7 +1191,7 @@ if (args[1] === "list") {
       "filter-match": test.ignored ? { status: "mismatch", reason: "ignored" } : { status: "matches" },
     };
   }
-  process.stdout.write(JSON.stringify({ "rust-suites": suites }));
+  process.stdout.write(JSON.stringify({ "rust-suites": suites, "rust-build-meta": JSON.parse(process.env.FAKE_BUILD_META ?? "null") }));
 } else {
   const junit = join(
     args.includes("--manifest-path") ? dirname(value("--manifest-path")) : ".",
@@ -1215,6 +1232,8 @@ if (args[1] === "list") {
           GITHUB_STEP_SUMMARY: summary,
           FAKE_CARGO_LOG: log,
           FAKE_CARGO_TESTS: JSON.stringify(tests),
+          FAKE_BUILD_META: JSON.stringify(options.metadata ?? null),
+          FAKE_CFG_FAILURE: String(Boolean(options.cfgFailure)),
         },
       },
     );
@@ -1444,4 +1463,129 @@ test("feature-gated Rust tests repeat in every graph the regular lanes test them
     ["list", "list"],
   );
   assert.doesNotMatch(unlisted.summary, /nothing to repeat/);
+});
+
+test("Rust repeats excuse only source-proven platform exclusions on the listed build platforms", () => {
+  const file = "crates/buzz-feature-flags/src/platform.rs";
+  const entry = (name) => `${file}::tests::${name}`;
+  const suite = {
+    pkg: "buzz-feature-flags",
+    binary: "buzz-feature-flags",
+    binaryName: "buzz_feature_flags",
+    name: "platform::tests::plain",
+  };
+  const platform = (triple) => ({ platform: { triple } });
+  const linux = {
+    platforms: { host: platform("x86_64-unknown-linux-gnu"), targets: [] },
+  };
+  const sources = {
+    [file]: `
+#[cfg(test)]
+mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn windows_only() {}
+    #[test]
+    #[cfg(not(unix))]
+    fn non_unix() {}
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_os() {}
+    #[cfg(feature = "unbuilt")]
+    #[test]
+    fn feature_only() {}
+    #[cfg(custom_platform)]
+    #[test]
+    fn custom_guard() {}
+    #[cfg(any(windows, feature = "unbuilt"))]
+    #[test]
+    fn ambiguous_guard() {}
+    // #[cfg(windows)]
+    #[test]
+    fn commented_guard() { let text = "#[cfg(windows)]"; }
+    #[test]
+    fn plain() {}
+}
+`,
+  };
+  const excluded = ["windows_only", "non_unix", "windows_os"].map(entry);
+  const mixed = repeatWithFakeCargo(
+    "rust",
+    [...excluded, entry("plain")],
+    [suite],
+    { sources, metadata: linux },
+  );
+  assert.equal(mixed.status, 0, mixed.summary);
+  assert.match(mixed.summary, /3 platform-excluded test\(s\)/);
+  assert.match(mixed.summary, /0 of 2 iterations failed/);
+  assert.equal(mixed.calls.filter((call) => call[1] === "run").length, 2);
+  assert.ok(
+    mixed.calls
+      .filter((call) => call[1] === "run")
+      .every(
+        (call) =>
+          call.at(-1).includes("platform::tests::plain") &&
+          !call.at(-1).includes("windows_only"),
+      ),
+  );
+
+  const only = repeatWithFakeCargo("rust", excluded, [], {
+    sources,
+    metadata: linux,
+  });
+  assert.equal(only.status, 0, only.summary);
+  assert.match(only.summary, /3 platform-excluded test\(s\)/);
+  assert.match(only.summary, /nothing to repeat/);
+  assert.ok(only.calls.every((call) => call[1] === "list"));
+
+  const unsupported = [
+    "feature_only",
+    "custom_guard",
+    "ambiguous_guard",
+    "commented_guard",
+    "windows_but_missing",
+  ].map(entry);
+  const unknown = repeatWithFakeCargo("rust", unsupported, [], {
+    sources,
+    metadata: linux,
+  });
+  assert.equal(unknown.status, 1, unknown.summary);
+  assert.match(unknown.summary, /5 selected test\(s\) not listed/);
+  assert.doesNotMatch(unknown.summary, /platform-excluded/);
+  for (const selected of unsupported)
+    assert.ok(unknown.summary.includes(selected));
+
+  // A Node process on Linux cannot excuse a missing test built for Windows.
+  // Include the host too, conservatively: binaries may also be built for it.
+  for (const metadata of [
+    { platforms: { host: platform("x86_64-pc-windows-msvc"), targets: [] } },
+    {
+      platforms: {
+        ...linux.platforms,
+        targets: [platform("x86_64-pc-windows-msvc")],
+      },
+    },
+    {
+      platforms: {
+        ...linux.platforms,
+        host: { platform: { triple: "custom", "custom-json": "{}" } },
+      },
+    },
+    undefined,
+  ]) {
+    const result = repeatWithFakeCargo("rust", [entry("windows_only")], [], {
+      sources,
+      metadata,
+    });
+    assert.equal(result.status, 1, result.summary);
+    assert.match(result.summary, /1 selected test\(s\) not listed/);
+    assert.doesNotMatch(result.summary, /platform-excluded/);
+  }
+  const failedCfg = repeatWithFakeCargo("rust", excluded, [], {
+    sources,
+    metadata: linux,
+    cfgFailure: true,
+  });
+  assert.equal(failedCfg.status, 1, failedCfg.summary);
+  assert.match(failedCfg.summary, /3 selected test\(s\) not listed/);
 });

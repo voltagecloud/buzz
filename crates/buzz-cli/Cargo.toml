@@ -22,8 +22,8 @@ clap = { version = "4", features = ["derive", "env"] }
 # HTTP client — async REST calls to the relay
 reqwest = { workspace = true, features = ["json"] }
 
-# Async runtime — tokio macros + multi-thread for reqwest
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# Async runtime — tokio macros + multi-thread for reqwest; io-std for acp-bridge stdio
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-std"] }
 
 # Serialization — JSON body building and response passthrough
 serde = { workspace = true }
@@ -44,6 +44,8 @@ chrono = { workspace = true }
 # Typed event builders for all write operations
 buzz-sdk = { workspace = true }
 buzz-core = { workspace = true }
+buzz-session-control = { path = "../buzz-session-control" }
+zeroize = { workspace = true }
 
 # Base64 encoding — NIP-98 event serialization for Authorization header
 base64 = "0.22"
@@ -87,6 +89,8 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rand = { workspace = true }
 
 [dev-dependencies]
+futures-util = { workspace = true }
+tokio-tungstenite = { workspace = true }
 # Scratch files for channel-templates.json fixtures in tests
 tempfile = "3"
 # Minimal HTTP test server for retry/policy integration tests

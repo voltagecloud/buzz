@@ -8,6 +8,10 @@ Every commit an agent makes is signed with a key that is on your GitHub account,
 - **Admins:** start at [Onboard a developer](#onboard-a-developer).
 - **Developers:** start at [Set up your agents](#set-up-your-agents).
 
+A Paseo daemon uses its own gateway key. Follow
+[Gateway keys](../docs/agent-gateway-key.md) to admit that key and grant access
+to your agents. The daemon never needs your main Nostr secret.
+
 ## How it works
 
 An unchanged phone app can trigger registered agents through [server mention launches](../docs/server-mention-launch.md).
@@ -117,6 +121,9 @@ sequenceDiagram
 | Claude, OpenAI, OpenRouter credentials and Codex access tokens | Enroll form | Profile | The harness in the Sandbox |
 | ChatGPT refresh token | Dedicated sign-in button | Manager-only Secrets Manager secret | Manager refresh broker |
 | Depot, Grafana, Linear, Argo CD tokens | Nobody: admins keep them in the vault | 1Password Buzz Agents Dev | The Sandbox, through `via` |
+| Paseo pairing: password, server ID, daemon keypair | Nobody: the manager generates it at enroll | Only the Secret `paseo-daemon-<id>` in `buzz-paseo` | Your Paseo daemon |
+| Claude subscription token, for the Paseo daemon | Enroll form (the same token as above) | Profile; copied to the Secret `paseo-daemon-<id>` | Your Paseo daemon's own agent (Claude only) |
+| Paseo GitHub read token: fine-grained, selected repositories, Contents and Pull requests read-only | Enroll form, **Paseo GitHub read token** (optional) | Only the Secret `paseo-daemon-<id>`, never the profile | Your Paseo daemon, to read code |
 
 The app removes the dedicated ChatGPT login cache after enrollment or cancellation. Other enrollment credentials are held in memory only. The profile is encrypted in transit and at rest. Checkpoints never include credentials.
 
@@ -136,6 +143,7 @@ Do these steps once for each new developer. You need the staging VPN for step 2.
 2. **Apply it locally.** Merge the PR, then run `make plan` and `make apply` in `v2/environments/staging-agent`.
    CI cannot apply this module, because its Kubernetes identity is read-only.
    The apply creates the namespace `buzz-agent-staging-<developer-id>`, the profile secret, and the developer's permissions.
+   With `paseo_daemon_image` set, it also turns on `paseo_daemons` in the manager config and creates the developer's Paseo daemon Deployment in `buzz-paseo`. The daemon waits for its Secret, which the manager writes at the developer's next enroll.
 3. **Restart the manager and the reaper.** Both read the developer list only at startup:
 
    ```sh
@@ -336,6 +344,7 @@ Do this once, on any of your Remote workspace agents. To change a credential lat
 | Claude subscription token | `sk-ant-oat01-…` (optional) |
 | OpenAI API key, Anthropic API key | Optional. Leave each empty if you use the matching subscription token. |
 | OpenRouter API key | Optional |
+| Paseo GitHub read token | Optional. A separate fine-grained token for selected repositories, with Contents and Pull requests set to Read-only. Only your Paseo daemon gets it. |
 
 Select **Enroll profile**. The app shows **Enrolled. Profile version …**, then one of these results:
 
@@ -358,6 +367,11 @@ You need a GitHub token only to change it. The signing key stays the same, unles
 
 Entering a Codex access token replaces a stored OpenAI API key, and entering a Claude subscription token replaces a stored Anthropic API key. The same applies the other way round, because an agent can use only one of each pair.
 
+#### Pair a Paseo app
+
+Follow [Use a Paseo daemon](#use-a-paseo-daemon) for enrollment, pairing, gateway grants, and credential rotation.
+That section defines the core Claude-only daemon and its separate selected-repository Git token.
+
 ### 5. Start a session
 
 1. Mention the agent in a new thread, for example `@my-agent summarize the open PRs in voltagecloud/cd`.
@@ -369,7 +383,7 @@ When a mention fails because its session ended, recovery replays that mention af
 This requires an updated desktop and host; existing clients retain their earlier recovery behavior.
 The replay timestamp belongs to that recovery request and does not change the saved agent configuration.
 
-Each thread gets its own Sandbox, so threads run in parallel. A developer can have five sessions at the same time. A session stops after 12 hours.
+Each thread gets its own Sandbox, so threads run in parallel. Namespace quotas bound capacity; current staging settings allow ten primary sessions and five workers per developer. A session stops after 12 hours.
 
 ### Coordinate a team
 
@@ -381,14 +395,177 @@ Use Frigg for planning, Bifrost for additional implementation, and Forseti for a
 Use Heimdall for requested external PR reviews.
 
 Each directly mentioned saved agent starts a separate primary session in that thread.
-Five sessions means five agent-and-thread pairs, even when they belong to fewer than five agents.
+Each primary session consumes one agent-and-thread pair, even when several pairs use the same saved agent.
 To stop a session, use **End session** and preserve its checkpoint.
 
-Thread Sandboxes currently accept only the human owner's signed messages.
-A sibling agent's mention can start a Sandbox through the desktop, but the harness drops that message.
-Cross-owner channel collaboration requires a separate authorization and wakeup change.
+Thread Sandboxes require authorized prompts and immutable thread bindings.
+A live gateway delegation admits the owner's daemon; channel sharing requires its separate opt-in grant and current membership.
+Teammates' agents as separate Paseo providers remain an approved follow-up after the core review gates.
 The review command preserves the current message boundary.
 Publish and promote the new image before asking Brokkr to use the review command.
+
+## Use a Paseo daemon
+
+Each developer has one daemon in staging when an operator enables the core Paseo rollout.
+The daemon reads selected repositories and coordinates work through ordinary Buzz threads.
+Sandbox agents make changes, build, test, scan, and push branches.
+The daemon stays available when your laptop closes.
+
+```mermaid
+sequenceDiagram
+    actor Dev as Developer
+    participant Client as Paseo client
+    participant Daemon as Personal daemon
+    participant Git as GitHub
+    participant Buzz as Buzz relay
+    participant Agent as Sandbox agent
+    Dev->>Client: Ask for a change
+    Client->>Daemon: Encrypted frames through Paseo relay
+    Daemon->>Git: Partial clone or fetch with read-only token
+    Daemon->>Buzz: Brief or suggested diff in the agent thread
+    Buzz->>Agent: Authorized gateway message
+    Agent->>Git: Apply, test, and push branch
+    Agent->>Buzz: Reply and walkthrough link when applicable
+    Buzz->>Daemon: Bridged session reply
+    Daemon->>Git: Fetch branch for Paseo file and diff views
+    Daemon-->>Client: Conversation and fetched code
+```
+
+### Pair one developer
+
+Complete the reviewed infrastructure rollout before these steps.
+Rebuild and promote the Sandbox agent image containing this slice's authenticated `buzz media get` instruction before testing image prompts.
+Start a new Sandbox from that digest; an older running Sandbox does not acquire the new instruction.
+Use your owner identity for enrollment and gateway grants; never copy its private key into the daemon.
+
+1. Enroll your profile through the existing Buzz app.
+2. Run the pairing command from an interactive terminal with your owner CLI identity:
+
+   ```sh
+   buzz paseo pairing --manager "$MANAGER_PUBKEY"
+   ```
+
+3. Read the returned public pairing offer and `gateway_pubkey`; keep the displayed password private.
+4. Ask a relay operator to admit the gateway public key to the community.
+5. Ask a channel administrator to add it to each required workspace channel and the recording channel.
+6. Grant the gateway with your owner CLI identity:
+
+   ```sh
+   buzz gateway grant "$GATEWAY_PUBKEY" --expires 90d
+   buzz gateway list
+   ```
+
+7. Open the pairing offer in your Paseo client and enter the pairing password.
+8. Confirm that the connection uses `wss://buzz.voltage.cloud/ws`.
+9. From **New workspace**, open **Import session** and choose the remote provider's session.
+10. If an existing workspace filters the list, select **Show all**.
+
+The manager returns pairing data through encrypted `enroll` and `profile` replies.
+The pairing command uses that existing protocol and requires direct owner signing.
+The command requires an interactive terminal and prints the password to terminal stderr.
+Its JSON output contains only public pairing fields.
+The manager never returns the gateway private key in a profile reply.
+
+Relay and channel administrators use these existing commands:
+
+```sh
+buzz-admin add-member --pubkey "$GATEWAY_PUBKEY" --role member
+buzz channels add-member --channel "$CHANNEL_ID" --pubkey "$GATEWAY_PUBKEY"
+```
+
+Granting authority and joining channels are separate operations.
+The gateway needs current authorization and channel membership to drive agents.
+To revoke authority, run `buzz gateway revoke "$GATEWAY_PUBKEY"` with the owner identity.
+Previously started sandbox work can finish; revocation prevents further delegated prompts and launches.
+The manager also refuses current managed daemon keys as ordinary shared-task requesters.
+This check uses the existing narrow Secrets and fails closed when those identity reads fail.
+When adding a developer, update the daemon Secret Role and RoleBinding before activating the expanded manager configuration.
+A missing Secret returns 404 and is skipped; a missing permission returns 403 and refuses shared admission.
+Terraform orders the Role and binding before the manager ConfigMap; restart the manager only after the apply completes.
+
+Before rotating or deleting a daemon Secret, revoke the old gateway grant and have an operator retire the old gateway's community membership.
+Then delete the Secret and enroll again, entering the **Paseo GitHub read token** again: deleting the Secret removed it, and a blank field cannot restore it.
+Ask an operator to restart the daemon (`kubectl --context voltage-staging -n buzz-paseo rollout restart deploy/paseo-daemon-<id>`) so it reads the new Secret, then admit and grant the new public key and pair your apps again.
+Do not delete the old identity record while its key retains community access.
+Generic gateway keys outside the managed daemon registry retain their separate ordinary-member permissions.
+
+### Give the daemon read-only Git access
+
+Create a fine-grained GitHub token for selected repositories only.
+Grant `contents: read` and `pull_requests: read`; grant no write permissions.
+Never reuse the sandbox profile's GitHub token or a broad `gh` OAuth token.
+In the existing enrollment form, enter it in **Paseo GitHub read token**, then select **Enroll profile**.
+Configure the token's repository paths separately in `developers.<id>.paseo_git_token_repositories` in Terraform.
+The Deployment maps that nonsecret list to `GITHUB_READ_TOKEN_REPOSITORIES`; it does not contain the token value.
+The helper sends the token only to configured GitHub repository paths.
+Public repositories outside that list clone anonymously, even when the token is present.
+The empty default list sends no credentials; private repository reads need both the configured path and matching token permissions.
+A blank field keeps the existing daemon token.
+The manager receives the token in the encrypted enrollment request and writes only the narrow daemon Secret.
+The Secret key is `github_read_token`; Terraform references it as `GITHUB_READ_TOKEN` without reading its value.
+The daemon reads Secret values at startup, so an operator must restart it after credential changes.
+
+Read-only access depends on the token permissions the developer selects in GitHub.
+If the token permits writes, the daemon can push with that token.
+The manager checks token syntax, not GitHub permissions.
+Tool filters cannot enforce that boundary once an assistant has a shell.
+Use the [read-only code workflow](images/paseo-daemon/README.md#read-only-code-workflow) to clone and review branches.
+
+### Replace the pod
+
+Pairing identity and the gateway key survive in the developer's Secret.
+Remote conversations survive on the Buzz relay and reload through `session/list` and `session/load`.
+In Paseo 0.15.3, open **New workspace → Import session** after replacement.
+If an existing workspace filters the list, select **Show all**.
+The fresh daemon has no imported managed sessions until you import them again.
+The new assistant starts a fresh native session and reads recent recorded turns for context.
+Git checkouts are fetched again on demand.
+
+The recorder attempts a 1.5-second shutdown flush before upstream's forced plugin shutdown.
+The pod has a 60-second termination grace period; the plugin cannot use that entire window.
+A forced kill or replacement can lose the unsent spool, including dead-letter records.
+The spool holds at most 256 jobs and 8 MiB; it is not durable storage.
+See the [state inventory](images/paseo-daemon/README.md) for exact recovery limits and the replacement test.
+
+### Measured resource envelope
+
+Separate owning-layer observations used one CPU, a 2 GiB observation limit, disk-backed home, and two live upstream-imported bridges.
+
+| Operation | Wall time | Container memory peak | Home disk |
+| --- | --- | --- | --- |
+| Confirmed Claude turn reading relay context | 6.472 seconds | 734.6 MiB | 900 KiB |
+| Anonymous public Buzz partial clone | 10.865 seconds | 722.1 MiB | 275,700 KiB |
+| Public lnd partial clone with Buzz checkout retained | 8.829 seconds | 775.5 MiB | 348,476 KiB |
+
+The Claude turn and clones did not run concurrently.
+Both clones used `--filter=blob:none`, retained full history, and sent no Authorization header.
+The lnd clone had a synthetic token present, configured for different private repositories.
+The clone candidate was `sha256:236157bd565b321ca1bc931247f5100850499bb184dca90b46697276b0cdfa4e`.
+Its Git helper SHA-256 was `89e173a267f9e4ca77e4cc195ef838fc0a199d2c60ab7cd2dfd705eb8a8576e9`.
+The [image resource observations](images/paseo-daemon/README.md#resource-observations) identify both candidates and the private TLS provider substitution.
+
+Start with 250m CPU and 768 MiB memory requests, and one CPU and 2 GiB memory limits.
+Allow 2 GiB for home, 256 MiB for temporary files, and ephemeral storage requests/limits of 1 GiB/3 GiB.
+These settings include conservative headroom for model activity and checkout growth; the final aggregate image still needs validation.
+Authenticated reads of `voltagecloud/backend` and `voltagecloud/frontend-turbo` remain unproven until Taylor supplies the approved narrow token.
+Taylor accepted that limitation without blocking review readiness.
+
+### Schedule work
+
+Paseo's local schedules and heartbeats are disabled because their state would disappear with the pod.
+Ask the assistant to create a Buzz workflow with a schedule trigger and a fixed prompt.
+Paseo must ask for your approval before workflow creation, update, or manual triggering.
+The relay owns the approved schedule, so it survives daemon replacement.
+Ask the assistant to list or delete workflows when needed.
+
+Only scheduled, literal workflow prompts can drive an agent through the gateway.
+Message, reaction, diff, and webhook triggers do not gain that authority.
+Revocation, delegation expiry, or gateway channel removal stops further delegated prompting.
+The minimum interval and overlapping-run behavior remain subject to the narrowed #161 implementation and validation.
+
+For user-visible work, ask the sandbox agent to post a walkthrough video in its thread.
+The daemon never runs the site or exposes a sandbox development server.
+Buzz media currently requires authentication; a video link does not provide unauthenticated viewing from Paseo.
 
 ## Reference
 

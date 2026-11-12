@@ -15,6 +15,10 @@ use crate::manager::refusal;
 
 pub(crate) const DATA_KEY: &str = "launch.json";
 pub(crate) const LABEL: &str = "buzz.voltage.cloud/mobile-launch";
+/// The channel of the agent's latest channel-thread deploy, for its owner's
+/// Paseo daemon (`paseo.rs`). An annotation, not a payload field, so a
+/// manager without it still reads the registration.
+pub(crate) const CHANNEL_ANNOTATION: &str = "buzz.voltage.cloud/paseo-channel";
 
 fn store_failed() -> Value {
     refusal(
@@ -37,6 +41,11 @@ pub(crate) fn relay_endpoint(text: &str) -> Result<String, Value> {
     }
 }
 
+/// A channel ID as the relay writes it: a lowercase, hyphenated UUID.
+pub(crate) fn is_channel_id(id: &str) -> bool {
+    uuid::Uuid::parse_str(id).is_ok_and(|uuid| uuid.hyphenated().to_string() == id)
+}
+
 fn invalid() -> Value {
     refusal(
         wire::ErrorCode::InvalidStart,
@@ -54,6 +63,9 @@ pub(crate) struct Registration {
     pub(crate) agent: PublicKey,
     pub(crate) relay: String,
     pub(crate) payload: Value,
+    /// Saved as [`CHANNEL_ANNOTATION`]; `None` keeps the saved one.
+    #[serde(skip)]
+    pub(crate) channel: Option<String>,
 }
 
 impl Registration {
@@ -74,7 +86,18 @@ impl Registration {
             agent,
             relay,
             payload,
+            channel: None,
         })
+    }
+
+    /// Remember the deploy's channel when it is bound to a channel thread.
+    /// A direct-message deploy names no channel another key could post in.
+    pub fn in_channel(mut self, provider_config: &Value) -> Self {
+        self.channel = provider_config["sandbox"]["channel_id"]
+            .as_str()
+            .filter(|id| is_channel_id(id))
+            .map(str::to_owned);
+        self
     }
 
     pub(crate) fn name(owner: PublicKey, agent: PublicKey, relay: &str) -> String {
@@ -111,6 +134,15 @@ impl Registration {
             secret.metadata.name = Some(name.clone());
             secret.metadata.namespace = Some(namespace.into());
             secret.metadata.labels = Some(BTreeMap::from([(LABEL.into(), "v1".into())]));
+            let channel = self.channel.clone().or_else(|| {
+                prior
+                    .as_ref()
+                    .and_then(|s| s.metadata.annotations.as_ref())
+                    .and_then(|a| a.get(CHANNEL_ANNOTATION))
+                    .cloned()
+            });
+            secret.metadata.annotations =
+                channel.map(|channel| BTreeMap::from([(CHANNEL_ANNOTATION.into(), channel)]));
             secret.metadata.resource_version = prior
                 .as_ref()
                 .and_then(|s| s.metadata.resource_version.clone());
@@ -146,7 +178,35 @@ struct StartPayload {
     trigger: Event,
 }
 
+/// Fresh gateway authority, optionally carrying the relay identity needed to
+/// reverify workflow provenance. This context is never accepted from the wire.
+pub(crate) struct GatewayRequest {
+    pub(crate) delegation: buzz_sdk::gateway::Live,
+    pub(crate) workflow_relay: Option<PublicKey>,
+}
+
 impl Start {
+    /// Verify gateway authority again at the launch boundary. A workflow may
+    /// act only for its proven gateway owner, never for an arbitrary tagged key.
+    pub(crate) fn gateway(
+        payload: Value,
+        request: &GatewayRequest,
+        request_time: u64,
+    ) -> Result<Self, Value> {
+        let Some(relay) = request.workflow_relay else {
+            return Self::delegated(payload, &request.delegation, request_time);
+        };
+        let parsed: StartPayload =
+            serde_json::from_value(payload.clone()).map_err(|_| invalid())?;
+        if !request.delegation.is_live_at(request_time)
+            || parsed.agent_pubkey == request.delegation.gateway()
+            || buzz_sdk::workflow::gateway_owner(&parsed.trigger, relay, parsed.agent_pubkey)
+                != Some(request.delegation.gateway())
+        {
+            return Err(invalid());
+        }
+        Self::admit_signed(payload, request.delegation.owner(), relay, request_time)
+    }
     /// Construct a confined launch only after fresh sharing verification and
     /// atomic budget admission. This never manufactures an owner-signed event.
     pub(crate) fn shared(
@@ -170,6 +230,48 @@ impl Start {
 
     /// Verify the owner's signed mention and derive its immutable thread scope.
     pub fn admit(payload: Value, owner: PublicKey, request_time: u64) -> Result<Self, Value> {
+        Self::admit_signed(payload, owner, owner, request_time)
+    }
+
+    /// Verify a live owner-delegated gateway's signed mention and derive its
+    /// immutable thread scope. The launch runs exactly as the owner's own
+    /// mention would: same namespace, registration, and identity policy. The
+    /// gateway can never address itself or the owner as the agent.
+    pub(crate) fn delegated(
+        payload: Value,
+        delegation: &buzz_sdk::gateway::Live,
+        request_time: u64,
+    ) -> Result<Self, Value> {
+        if !delegation.is_live_at(request_time) {
+            return Err(invalid());
+        }
+        Self::admit_signed(
+            payload,
+            delegation.owner(),
+            delegation.gateway(),
+            request_time,
+        )
+    }
+
+    /// The channel and thread a `signer`'s mention would bind, for replies and
+    /// durable journaling only. This confers no launch authority.
+    pub(crate) fn thread_of(
+        payload: Value,
+        owner: PublicKey,
+        signer: PublicKey,
+        request_time: u64,
+    ) -> Result<(String, String), Value> {
+        let start = Self::admit_signed(payload, owner, signer, request_time)?;
+        let (channel, root) = start.conversation();
+        Ok((channel.into(), root.into()))
+    }
+
+    fn admit_signed(
+        payload: Value,
+        owner: PublicKey,
+        signer: PublicKey,
+        request_time: u64,
+    ) -> Result<Self, Value> {
         let payload: StartPayload = serde_json::from_value(payload).map_err(|_| invalid())?;
         let event = payload.trigger;
         let tags: Vec<&[String]> = event.tags.iter().map(|tag| tag.as_slice()).collect();
@@ -182,8 +284,9 @@ impl Start {
                 && t.get(1).map(String::as_str) == Some(payload.agent_pubkey.to_hex().as_str())
         });
         if event.verify().is_err()
-            || event.pubkey != owner
+            || event.pubkey != signer
             || payload.agent_pubkey == owner
+            || payload.agent_pubkey == signer
             || !matches!(event.kind.as_u16(), 9 | 40002)
             || event.created_at.as_secs() > request_time.saturating_add(60)
             || !addressed

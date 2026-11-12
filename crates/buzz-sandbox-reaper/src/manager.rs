@@ -50,6 +50,11 @@ pub struct ManagerConfig {
     checkpoint_bucket: String,
     /// Enable only after deploying a matching shared-task agent image.
     shared_tasks: bool,
+    /// Provision Paseo daemons at enrollment (`paseo.rs`). Enable after
+    /// creating the `buzz-paseo` namespace and Secret Role.
+    paseo_daemons: bool,
+    /// Where the daemons and the Paseo apps meet, `host:port`, always TLS.
+    paseo_relay_endpoint: String,
 }
 
 /// One configured developer.
@@ -76,6 +81,10 @@ struct ConfigFile {
     checkpoint_bucket: String,
     #[serde(default)]
     shared_tasks: bool,
+    #[serde(default)]
+    paseo_daemons: bool,
+    #[serde(default)]
+    paseo_relay_endpoint: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -107,6 +116,8 @@ pub enum ManagerConfigError {
     /// The owner selects the namespace, so it must select only one.
     #[error("developers.{developer}.owner_pubkey belongs to another developer too")]
     DuplicateOwner { developer: String },
+    #[error("paseo_relay_endpoint must be host:port, without a scheme or path")]
+    InvalidPaseoRelayEndpoint,
 }
 
 /// An S3 bucket name: 3 to 63 lowercase letters, digits, dots, and hyphens,
@@ -197,11 +208,29 @@ impl ManagerConfig {
                 return Err(ManagerConfigError::DuplicateOwner { developer: id });
             }
         }
+        let paseo_relay_endpoint = file
+            .paseo_relay_endpoint
+            .unwrap_or_else(|| crate::paseo::RELAY_ENDPOINT.to_owned());
+        if !crate::paseo::is_relay_endpoint(&paseo_relay_endpoint) {
+            return Err(ManagerConfigError::InvalidPaseoRelayEndpoint);
+        }
         Ok(Self {
             developers,
             checkpoint_bucket: file.checkpoint_bucket,
             shared_tasks: file.shared_tasks,
+            paseo_daemons: file.paseo_daemons,
+            paseo_relay_endpoint,
         })
+    }
+
+    /// Whether enrollment provisions each developer's Paseo daemon.
+    pub fn paseo_daemons(&self) -> bool {
+        self.paseo_daemons
+    }
+
+    /// The Paseo relay endpoint the pairing offers name (`host:port`).
+    pub fn paseo_relay_endpoint(&self) -> &str {
+        &self.paseo_relay_endpoint
     }
 
     /// The developer whose owner key is `owner`.
@@ -276,6 +305,9 @@ pub enum Work {
         request: Request,
         target: Target,
         registration: Option<Registration>,
+        /// The verified owner's developer, whose Paseo daemon lists the
+        /// registered agents.
+        developer: Developer,
     },
     /// An owner-authorized start using a registered launch identity.
     Start { start: Start, target: Target },
@@ -285,6 +317,7 @@ pub enum Work {
         developer: Developer,
         profile: serde_json::Value,
         login: Option<Change>,
+        git: Option<crate::paseo::GitReadToken>,
     },
     /// The `profile` operation: describe the developer's stored profile.
     Profile { developer: Developer },
@@ -308,8 +341,9 @@ impl Work {
                 request,
                 target,
                 registration,
+                developer,
             } => {
-                let response = response_value(&provider::run(request, &target).await);
+                let mut response = response_value(&provider::run(request, &target).await);
                 if response["ok"] == true {
                     if let (
                         Some(registration),
@@ -320,6 +354,12 @@ impl Work {
                     {
                         if let Err(error) = registration.save(client.clone(), namespace).await {
                             return error;
+                        }
+                        if let Err(error) = manager.enrollment.agents_changed(&developer).await {
+                            // Deployment and its registration already succeeded. Keep
+                            // that result authoritative; only the derived daemon list
+                            // needs recovery from the durable registration on enroll.
+                            response["paseo_sync"] = error;
                         }
                     }
                 }
@@ -344,14 +384,21 @@ impl Work {
                 developer,
                 profile,
                 login,
-            } => match login {
-                Some(login) => {
+                git,
+            } => match (login, git) {
+                (login, Some(git)) => {
+                    manager
+                        .enrollment
+                        .run_with_daemon(&developer, profile, login, Some(git))
+                        .await
+                }
+                (Some(login), None) => {
                     manager
                         .enrollment
                         .run_with_login(&developer, profile, Some(login))
                         .await
                 }
-                None => manager.enrollment.run(&developer, profile).await,
+                (None, None) => manager.enrollment.run(&developer, profile).await,
             },
             Work::Profile { developer } => manager.enrollment.describe(&developer).await,
         }
@@ -463,22 +510,27 @@ impl Manager {
     }
 
     /// Reuse mobile start validation without manufacturing an owner control event.
+    /// Start the agent for one mention. The trigger's signer is the owner, a
+    /// live owner-delegated gateway, a relay-proven gateway workflow owner
+    /// (`delegation`, freshly verified for this trigger), or a shared requester.
     pub(crate) async fn start_mention(
         &self,
         owner: PublicKey,
         agent: PublicKey,
         relay: &str,
         event: &Event,
+        delegation: Option<&crate::mobile_launch::GatewayRequest>,
     ) -> serde_json::Value {
         let Some(developer) = self.config.developer(&owner) else {
             return refusal(ErrorCode::UnauthorizedOwner, "owner is not configured");
         };
+        let payload =
+            serde_json::json!({"agent_pubkey": agent, "relay_url": relay, "trigger": event});
+        let delegation = delegation.filter(|request| request.delegation.owner() == owner);
         let admitted = if event.pubkey == owner {
-            Start::admit(
-                serde_json::json!({"agent_pubkey": agent, "relay_url": relay, "trigger": event}),
-                owner,
-                Timestamp::now().as_secs(),
-            )
+            Start::admit(payload, owner, Timestamp::now().as_secs())
+        } else if let Some(delegation) = delegation {
+            Start::gateway(payload, delegation, Timestamp::now().as_secs())
         } else {
             let request = crate::shared_tasks::Request {
                 relay_url: relay.into(),
@@ -581,11 +633,16 @@ impl Manager {
                 Ok(login) => login,
                 Err(error) => return refused(ErrorCode::InvalidProfile, &error.to_string()),
             };
+            let git = match crate::paseo::GitReadToken::parse(opened.request.payload.get("paseo")) {
+                Ok(git) => git,
+                Err(_) => return refused(ErrorCode::InvalidProfile, "invalid daemon Git token"),
+            };
             match enroll::admit_profile(&opened.request.payload, &owner, developer) {
                 Ok(profile) => Work::Enroll {
                     developer: developer.clone(),
                     profile,
                     login,
+                    git,
                 },
                 Err((code, message)) => return refused(code, message),
             }
@@ -641,7 +698,9 @@ impl Manager {
                     opened.signer,
                     opened.request.payload["agent"].clone(),
                 ) {
-                    Ok(registration) => Some(registration),
+                    Ok(registration) => {
+                        Some(registration.in_channel(&opened.request.payload["provider_config"]))
+                    }
                     Err(response) => return answer(response),
                 }
             } else {
@@ -664,6 +723,7 @@ impl Manager {
                     Work::Provider {
                         request,
                         registration,
+                        developer: developer.clone(),
                         target: Target::Managed {
                             client: self.client.clone(),
                             namespace: developer.namespace.clone(),
@@ -866,11 +926,14 @@ impl Manager {
             );
         }
         let result=tokio::time::timeout(std::time::Duration::from_secs(40),async {
+            let developers = self.config.developers().take(crate::paseo::MAX_DAEMON_IDENTITIES + 1).collect::<Vec<_>>();
+            let daemon_keys = self.enrollment.shared_daemon_keys(&developers).await?;
             let task=match crate::shared_tasks::verify(self.client.clone(),namespace,owner,agent,request).await {
                 Ok(task)=>task,
                 Err(PolicyError::Denied(reason))=>return Err(serde_json::json!({"ok":false,"code":"shared_task_denied","error":reason})),
                 Err(PolicyError::Unavailable)=>return Err(serde_json::json!({"ok":false,"code":"shared_task_retry","error":"current sharing authorization is unavailable; retry this task"})),
             };
+            Enrollment::check_shared_human(&daemon_keys, &task)?;
             let Some(origin)=self.config.developer(&task.origin_owner) else {
                 return Err(serde_json::json!({"ok":false,"code":"shared_task_denied","error":"the initial agent must use this session manager"}));
             };

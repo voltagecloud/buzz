@@ -1,10 +1,12 @@
 //! A black-box client sends only ordinary signed chat events. A real WebSocket
 //! drives the production supervisor/worker and provider against a fake cluster.
 
+mod gateway;
 mod live_relay;
 mod relay;
 mod revoked;
 mod shared_live;
+mod workflow;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -433,7 +435,8 @@ async fn ended_session_posts_an_ordinary_reply_without_recovering_the_sandbox() 
                 identity.owner,
                 identity.keys.public_key(),
                 &identity.relay,
-                &event
+                &event,
+                None,
             )
             .await["ok"],
         true

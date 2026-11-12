@@ -10,7 +10,12 @@ use super::journal::Journal;
 use super::registry::Identity;
 use super::{Error, IO_TIMEOUT};
 use crate::manager::Manager;
-use crate::mobile_launch::Start;
+use crate::mobile_launch::{GatewayRequest, Start};
+
+struct GatewayAuthors {
+    keys: Vec<nostr::PublicKey>,
+    relay: Option<nostr::PublicKey>,
+}
 
 const PAGE: usize = 1000;
 const MAX_PAGES: usize = 16;
@@ -20,9 +25,12 @@ const MAX_ATTEMPTS: u8 = 3;
 const MAX_EVENT_BYTES: usize = 60_000;
 
 enum LaunchPermission {
-    Allowed,
+    /// Deliverable; carries fresh gateway authority for the direct signer or
+    /// the owner cryptographically proven by relay workflow provenance.
+    Allowed(Option<GatewayRequest>),
     UnsupportedConversation,
     NoLongerRemote,
+    GatewayNotMember,
 }
 
 // A worker must renew its fenced journal before its longest external effect
@@ -106,12 +114,36 @@ pub(super) async fn session(
         tokio::time::sleep(RECYCLE_AFTER).await;
         return Ok(());
     }
+    // A delegation granted later is seen on the next bounded recycle; a
+    // revocation is enforced again at launch, so this snapshot only widens
+    // what is journaled, never what starts.
+    let gateways: Vec<nostr::PublicKey> = super::gateways::read(&mut connection, identity)
+        .await?
+        .iter()
+        .map(buzz_sdk::gateway::Live::gateway)
+        .collect();
+    let relay = if gateways.is_empty() {
+        None
+    } else {
+        Some(
+            crate::shared_tasks::relay_key(&identity.relay)
+                .await
+                .map_err(|_| Error::Relay)?,
+        )
+    };
+    let gateways = GatewayAuthors {
+        keys: gateways,
+        relay,
+    };
     let mut connected_at = Timestamp::now().as_secs();
     let started = tokio::time::Instant::now();
     let mut filter =
         json!({"kinds": [9, 40002], "#h":channels, "#p": [identity.keys.public_key()]});
     if !manager.sharing_enabled() {
-        filter["authors"] = json!([identity.owner]);
+        let mut authors = vec![identity.owner];
+        authors.extend(gateways.keys.iter().copied());
+        authors.extend(gateways.relay);
+        filter["authors"] = json!(authors);
     }
     let mut live = filter.clone();
     live["limit"] = json!(0);
@@ -156,7 +188,13 @@ pub(super) async fn session(
                     }
                     oldest = oldest.min(event.created_at.as_secs());
                 }
-                let actionable = eligible(identity, journal, &event, manager.sharing_enabled());
+                let actionable = eligible(
+                    identity,
+                    journal,
+                    &event,
+                    manager.sharing_enabled(),
+                    Some(&gateways),
+                );
                 tracing::debug!(event_id=%event.id, agent=%identity.keys.public_key(), actionable,"received mention");
                 if actionable {
                     let persisted = tokio::time::timeout(IO_TIMEOUT, journal.enqueue(*event))
@@ -234,38 +272,80 @@ async fn history(
     send(connection, json!(["REQ", "mentions-history", filter])).await
 }
 
-fn eligible(identity: &Identity, journal: &Journal, event: &Event, shared: bool) -> bool {
+/// Whether `event` may be journaled for launch.
+///
+/// `gateways` is the listener's current snapshot of live delegated gateways.
+/// `None` defers that judgement for an already journaled event: delivery
+/// re-verifies the delegation before any launch.
+fn eligible(
+    identity: &Identity,
+    journal: &Journal,
+    event: &Event,
+    shared: bool,
+    gateways: Option<&GatewayAuthors>,
+) -> bool {
     if event.created_at.as_secs() < journal.state.activated
         || serde_json::to_vec(event).map_or(true, |v| v.len() > MAX_EVENT_BYTES)
     {
         return false;
     }
-    if event.pubkey != identity.owner {
-        return shared
-            && buzz_sdk::sharing::task::scope(
-                event,
-                identity.keys.public_key(),
-                Timestamp::now().as_secs(),
-            )
-            .is_ok();
-    }
-    conversation(identity, event).is_ok()
-}
-
-fn conversation(identity: &Identity, event: &Event) -> Result<(String, String), Error> {
     if event.pubkey == identity.owner {
-        let start = Start::admit(json!({"agent_pubkey":identity.keys.public_key(),"relay_url":identity.relay,"trigger":event}),
-            identity.owner,Timestamp::now().as_secs()).map_err(|_|Error::Registration)?;
-        let (channel, root) = start.conversation();
-        Ok((channel.into(), root.into()))
-    } else {
-        let scope = buzz_sdk::sharing::task::scope(
+        return conversation(identity, event).is_ok();
+    }
+    let delegated = gateways.is_none_or(|gateways| {
+        gateways.keys.contains(&event.pubkey)
+            || gateways
+                .relay
+                .and_then(|relay| {
+                    buzz_sdk::workflow::gateway_owner(event, relay, identity.keys.public_key())
+                })
+                .is_some_and(|owner| gateways.keys.contains(&owner))
+    });
+    if delegated && gateway_thread(identity, event).is_ok() {
+        return true;
+    }
+    shared
+        && buzz_sdk::sharing::task::scope(
             event,
             identity.keys.public_key(),
             Timestamp::now().as_secs(),
         )
+        .is_ok()
+}
+
+fn start_payload(identity: &Identity, event: &Event) -> serde_json::Value {
+    json!({"agent_pubkey":identity.keys.public_key(),"relay_url":identity.relay,"trigger":event})
+}
+
+/// The thread a non-owner signer's mention binds, as an owner mention would.
+fn gateway_thread(identity: &Identity, event: &Event) -> Result<(String, String), Error> {
+    Start::thread_of(
+        start_payload(identity, event),
+        identity.owner,
+        event.pubkey,
+        Timestamp::now().as_secs(),
+    )
+    .map_err(|_| Error::Registration)
+}
+
+fn conversation(identity: &Identity, event: &Event) -> Result<(String, String), Error> {
+    if event.pubkey == identity.owner {
+        let start = Start::admit(
+            start_payload(identity, event),
+            identity.owner,
+            Timestamp::now().as_secs(),
+        )
         .map_err(|_| Error::Registration)?;
+        let (channel, root) = start.conversation();
+        Ok((channel.into(), root.into()))
+    } else if let Ok(scope) = buzz_sdk::sharing::task::scope(
+        event,
+        identity.keys.public_key(),
+        Timestamp::now().as_secs(),
+    ) {
         Ok((scope.channel.to_string(), scope.root.to_hex()))
+    } else {
+        gateway_thread(identity, event)
     }
 }
 
@@ -279,7 +359,13 @@ async fn drain(
 ) -> Result<(), Error> {
     while journal.state.pending.is_some() {
         let pending = journal.state.pending.as_ref().ok_or(Error::Storage)?;
-        if !eligible(identity, journal, &pending.event, manager.sharing_enabled()) {
+        if !eligible(
+            identity,
+            journal,
+            &pending.event,
+            manager.sharing_enabled(),
+            None,
+        ) {
             return Err(Error::Registration);
         }
         if pending.notice.is_some() {
@@ -314,13 +400,24 @@ async fn drain(
             .await
             .map_err(|_| Error::Deadline)??;
         let result = match channel_launch_allowed(identity, &event).await {
-            Ok(LaunchPermission::Allowed) => tokio::time::timeout(
+            // A non-owner trigger needs a fresh live delegation unless the
+            // manager may still admit it as a shared task.
+            Ok(LaunchPermission::GatewayNotMember) => {
+                json!({"ok": false, "code": "gateway_not_member"})
+            }
+            Ok(LaunchPermission::Allowed(None))
+                if event.pubkey != identity.owner && !manager.sharing_enabled() =>
+            {
+                json!({"ok": false, "code": "gateway_not_delegated"})
+            }
+            Ok(LaunchPermission::Allowed(delegation)) => tokio::time::timeout(
                 TURN_TIMEOUT,
                 manager.start_mention(
                     identity.owner,
                     identity.keys.public_key(),
                     &identity.relay,
                     &event,
+                    delegation.as_ref(),
                 ),
             )
             .await
@@ -352,6 +449,8 @@ async fn drain(
                     | "invalid_start"
                     | "unsupported_conversation"
                     | "shared_task_denied"
+                    | "gateway_not_delegated"
+                    | "gateway_not_member"
             ) || pending.attempts >= MAX_ATTEMPTS
             {
                 pending.notice = Some(failure_notice(identity, &event, code)?);
@@ -430,6 +529,8 @@ fn failure_notice(identity: &Identity, event: &Event, code: &str) -> Result<Even
         "launch_not_registered" => "Start this agent once from desktop to register its launch settings, then mention me again.",
         "unsupported_conversation" => "Automatic remote startup requires a channel thread. Mention me in a channel, or manage this conversation from desktop.",
         "shared_task_denied" => "Shared task refused: current sharing permission, channel membership, or handoff budget does not permit this request. Ask the agent owner to check sharing.",
+        "gateway_not_member" => "This gateway is not a current posting member of this channel, so I did not start. Ask the channel owner to restore membership.",
+        "gateway_not_delegated" => "This gateway key is not currently delegated by my owner, so I did not start. Ask my owner to check `buzz gateway list`.",
         "shared_task_retry" => "Current sharing authorization is unavailable. Mention me again to retry; this request has not been allowed to run.",
         _ => "Agent startup could not be confirmed. Mention me again to retry.",
     };
@@ -458,12 +559,35 @@ async fn channel_launch_allowed(
     tokio::time::timeout(IO_TIMEOUT, async {
         let (channel, _) = conversation(identity,trigger)?;
         let mut connection = connect(identity).await?;
+        // Fresh, per launch: a revoked or expired delegation never starts.
+        let delegation = if trigger.pubkey == identity.owner {
+            None
+        } else {
+            let relay = crate::shared_tasks::relay_key(&identity.relay).await.map_err(|_| Error::Relay)?;
+            let workflow_relay = (trigger.pubkey == relay).then_some(relay);
+            let requester = if workflow_relay.is_some() {
+                buzz_sdk::workflow::gateway_owner(trigger, relay, identity.keys.public_key())
+            } else {
+                Some(trigger.pubkey)
+            };
+            let delegation = super::gateways::read(&mut connection, identity)
+                .await?
+                .into_iter()
+                .find(|live| Some(live.gateway()) == requester);
+            if let Some(live) = &delegation {
+                if !super::gateways::member(&mut connection, identity,
+                    channel.parse().map_err(|_| Error::Registration)?, live.gateway(), relay).await? {
+                    return Ok(LaunchPermission::GatewayNotMember);
+                }
+            }
+            delegation.map(|delegation| GatewayRequest { delegation, workflow_relay })
+        };
         send(&mut connection, json!(["REQ", "mention-trigger", {"kinds":[9,40002],"ids":[trigger.id],"#h":[channel],"limit":1}])).await?;
-        send(&mut connection, json!(["REQ", "mention-channel", {"kinds":[39000],"#d":[channel],"limit":1}])).await?;
+        send(&mut connection, json!(["REQ", "mention-channel", {"kinds":[39000],"#d":[channel],"limit":1,"consistency":"strong"}])).await?;
         // Query the current coordinate without a runtime filter: an old remote
         // record must not survive a newer local record or coordinate deletion.
         let agent = identity.keys.public_key().to_hex();
-        send(&mut connection, json!(["REQ", "mention-listing", {"kinds":[30177],"authors":[identity.owner],"#d":[agent],"limit":1}])).await?;
+        send(&mut connection, json!(["REQ", "mention-listing", {"kinds":[30177],"authors":[identity.owner],"#d":[agent],"limit":1,"consistency":"strong"}])).await?;
         let (mut message_seen, mut metadata, mut trigger_done, mut channel_done, mut listing_done, mut remote) = (false, None, false, false, false, false);
         for _ in 0..16 {
             match connection.next_event(IO_TIMEOUT).await.map_err(|_| Error::Relay)? {
@@ -498,7 +622,7 @@ async fn channel_launch_allowed(
             if trigger_done && channel_done && listing_done {
                 if !remote { return Ok(LaunchPermission::NoLongerRemote); }
                 return match (message_seen, metadata) {
-                    (true, Some(true)) => Ok(LaunchPermission::Allowed),
+                    (true, Some(true)) => Ok(LaunchPermission::Allowed(delegation)),
                     (true, Some(false)) => Ok(LaunchPermission::UnsupportedConversation),
                     _ => Err(Error::Relay),
                 };

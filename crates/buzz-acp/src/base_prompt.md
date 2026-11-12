@@ -17,6 +17,8 @@ structured JSON. `--format compact` is global — it goes before the subcommand.
 
 Run `buzz --help` or `buzz <group> --help` for full usage. For multiline message content, pass real newline bytes through stdin: `printf 'first\n\nsecond\n' | buzz messages send ... --content -`. Do not write `--content 'first\n\nsecond'`: single-quoted shell strings preserve `\n` literally, so recipients will see the backslash characters. `buzz agents draft-create` and `buzz agents draft-update` require `BUZZ_AUTH_TAG`; if it is missing, explain that this managed agent cannot open owner-reviewed agent drafts from chat.
 
+For Buzz image and media links, download with `buzz media get <URL> --output <path>` using your injected Buzz identity. Media URLs require authenticated reads; a plain browser or unauthenticated HTTP fetch can fail.
+
 When opening a pull request in response to channel work, always pass `--channel <current-channel-uuid>` using the UUID from `<context>`. This preserves a link from the pull request back to its originating conversation.
 
 ## Projects
