@@ -5,6 +5,10 @@ all-features = true
 
 [advisories]
 ignore = [
+    # Shipped desktop (including direct rusqlite use) and the Mesh harness.
+    # Reachability and removal: docs/dependency-exceptions.md.
+    # Track: https://github.com/voltagecloud/buzz/issues/177; review by 2026-11-24.
+    { id = "RUSTSEC-2026-0459", reason = "shipped desktop SQLite stack has no upstream-compatible fix yet; maintainer accepted temporary exception; tracked in #177, review by 2026-11-24" },
     # zip 8.6.0 < 9: extraction keeps setuid/setgid bits (0367), creates
     # symlinks that escape the destination (0368) and applies permissions through
     # symlinks (0369). Only path: the optional mesh-llm feature → mesh-llm v0.76.2

@@ -22,7 +22,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 # Discovery-based clients (including Goose 1.52) require the modern lifecycle.
 # Keep the native agent's independent MCP client dependency unchanged.
-rmcp = { version = "3.4.1", features = ["server", "transport-io", "macros"] }
+rmcp = { version = "3.9.0", features = ["server", "transport-io", "macros"] }
 schemars = { workspace = true }
 similar = "3"
 tempfile = "3"
