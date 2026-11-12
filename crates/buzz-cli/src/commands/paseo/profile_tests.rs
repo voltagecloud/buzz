@@ -194,6 +194,6 @@ fn keygen_any(_: &str) -> Result<SigningKey, CliError> {
 
 #[test]
 fn pairing_offer_renders_as_a_qr_code() {
-    let code = qr("https://app.paseo.sh/#offer=fixture").unwrap();
+    let code = super::super::qr("https://app.paseo.sh/#offer=fixture").unwrap();
     assert!(code.lines().count() > 10);
 }

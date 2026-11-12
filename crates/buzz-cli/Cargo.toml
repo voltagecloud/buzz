@@ -41,6 +41,9 @@ uuid = { workspace = true }
 # RFC3339 observer timestamps for owner-reviewed agent draft requests
 chrono = { workspace = true }
 
+# Terminal QR code for `paseo pairing`
+qrcode = { version = "0.14", default-features = false }
+
 # Typed event builders for all write operations
 buzz-sdk = { workspace = true }
 buzz-core = { workspace = true }
@@ -92,7 +95,6 @@ rand = { workspace = true }
 # the new signing key, and the pairing QR code
 rpassword = "7"
 tempfile = "3"
-qrcode = { version = "0.14", default-features = false }
 
 [dev-dependencies]
 futures-util = { workspace = true }

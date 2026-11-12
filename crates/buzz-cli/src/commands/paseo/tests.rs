@@ -2,6 +2,20 @@ use super::*;
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
 
+/// A standard-base64 daemon key with `+`, `/` and `=`, which the link must escape.
+const DAEMON_KEY: &str = "ab+/cd+/ef+/gh+/ij+/kl+/mn+/op+/qr+/st+/uvw=";
+
+thread_local! {
+    static OFFER_URL: String = format!(
+        "https://app.paseo.sh/#offer={}",
+        URL_SAFE_NO_PAD.encode(
+            json!({"v":2,"serverId":"srv_fixture","daemonPublicKeyB64":DAEMON_KEY,
+                "relay":{"endpoint":"buzz.voltage.cloud:443","useTls":true}})
+            .to_string()
+        )
+    );
+}
+
 #[tokio::test]
 async fn pairing_uses_encrypted_owner_profile_and_only_valid_correlated_reply() {
     for row in [
@@ -10,6 +24,7 @@ async fn pairing_uses_encrypted_owner_profile_and_only_valid_correlated_reply() 
         "wrong-recipient",
         "expired",
         "missing",
+        "bad-offer",
         "timeout",
     ] {
         let owner = Keys::generate();
@@ -64,10 +79,15 @@ async fn pairing_uses_encrypted_owner_profile_and_only_valid_correlated_reply() 
                             manager.clone()
                         };
                         let now = Timestamp::now().as_secs();
+                        let offer_url = if row == "bad-offer" {
+                            "https://app.paseo.sh/#offer=fixture".to_owned()
+                        } else {
+                            OFFER_URL.with(Clone::clone)
+                        };
                         let response = if row == "missing" {
                             json!({"ok":true})
                         } else {
-                            json!({"ok":true,"profile":{"private":"MUST_NOT_LEAK"},"paseo":{"password":URL_SAFE_NO_PAD.encode([7u8;32]),"server_id":"srv_fixture","offer_url":"https://app.paseo.sh/#offer=fixture","gateway_pubkey":expected}})
+                            json!({"ok":true,"profile":{"private":"MUST_NOT_LEAK"},"paseo":{"password":URL_SAFE_NO_PAD.encode([7u8;32]),"server_id":"srv_fixture","offer_url":offer_url,"gateway_pubkey":expected}})
                         };
                         let reply = buzz_session_control::build_reply(
                             &signer,
@@ -113,11 +133,35 @@ async fn pairing_uses_encrypted_owner_profile_and_only_valid_correlated_reply() 
         });
         let result = exchange(&relay, &owner, expected, Duration::from_millis(500)).await;
         if row == "valid" {
-            let (public, password) = result.unwrap();
-            assert_eq!(password.as_str(), URL_SAFE_NO_PAD.encode([7u8; 32]));
+            let (public, secret) = result.unwrap();
+            let password = URL_SAFE_NO_PAD.encode([7u8; 32]);
+            assert_eq!(secret.password.as_str(), password);
             assert_eq!(public.as_object().unwrap().len(), 3);
             assert!(public.get("password").is_none());
+            assert!(!public.to_string().contains(&password));
             assert!(!public.to_string().contains("MUST_NOT_LEAK"));
+            // Decode as Paseo does: decodeURIComponent, then URL and searchParams.
+            let fragment = secret
+                .link
+                .strip_prefix("https://app.paseo.sh/#connect=")
+                .unwrap();
+            let relay: String = url::form_urlencoded::parse(format!("x={fragment}").as_bytes())
+                .next()
+                .unwrap()
+                .1
+                .into_owned();
+            let relay = url::Url::parse(&relay).unwrap();
+            assert_eq!(relay.scheme(), "relay");
+            assert_eq!(
+                (relay.host_str(), relay.port()),
+                (Some("buzz.voltage.cloud"), Some(443))
+            );
+            assert_eq!(relay.path(), "/srv_fixture");
+            let query: std::collections::HashMap<_, _> = relay.query_pairs().into_owned().collect();
+            assert_eq!(query["key"], DAEMON_KEY);
+            assert_eq!(query["ssl"], "true");
+            assert_eq!(query["password"], password);
+            assert!(qr(&secret.link).is_some());
         } else {
             assert!(result.is_err(), "{row}");
         }

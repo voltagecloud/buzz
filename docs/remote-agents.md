@@ -2199,6 +2199,21 @@ base64url. The daemon gets no profile, IAM role, or Kubernetes token, and no
 Git credential other than its optional read token. The manager's ServiceAccount needs `secrets` get, create, and
 update in `buzz-paseo`, and nothing else there.
 
+**Pairing a Paseo app.** The developer runs
+`buzz paseo pairing --manager <manager-pubkey>` with their own key
+(`BUZZ_PRIVATE_KEY`, not delegated auth) and their community's `BUZZ_RELAY_URL`.
+No Kubernetes access or Buzz app is needed. The command sends the encrypted
+`profile` request. On an interactive terminal's stderr, it then prints a QR code
+and the matching link, `https://app.paseo.sh/#connect=<URI-encoded
+relay://<endpoint>/<server id>?key=<daemon public key>&ssl=true&password=<password>>`.
+This is Paseo's own connection URI. The Paseo apps take it from Scan QR, from a
+pasted pairing link, or from an opened link, and pair without asking for the
+password. Anyone with the QR code or the link can use the daemon, so treat both
+as the password. The command also prints the password by itself. It refuses
+redirected stderr. Its stdout JSON holds only `offer_url`, `server_id`, and
+`gateway_pubkey`. The daemon's own "Pair a device" dialog in Paseo shows only
+the `#offer=` link, which has no password.
+
 **The relay provider.** `buzz-backend-relay` (`crates/buzz-backend-relay`)
 speaks the provider protocol on stdin and stdout like
 `buzz-backend-kubernetes`, and advertises `info`, `deploy`, `stop` and

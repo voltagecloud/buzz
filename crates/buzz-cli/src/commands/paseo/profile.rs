@@ -455,16 +455,6 @@ fn model_credentials(
     Ok(models)
 }
 
-/// Render `text` as a terminal QR code, or `None` when it does not fit one.
-pub(super) fn qr(text: &str) -> Option<String> {
-    let code = qrcode::QrCode::new(text.as_bytes()).ok()?;
-    Some(
-        code.render::<qrcode::render::unicode::Dense1x2>()
-            .quiet_zone(true)
-            .build(),
-    )
-}
-
 #[cfg(test)]
 #[path = "profile_tests.rs"]
 mod tests;
