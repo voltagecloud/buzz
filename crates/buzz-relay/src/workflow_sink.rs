@@ -205,13 +205,14 @@ impl ActionSink for RelayActionSink {
         community_id: CommunityId,
         channel_id: &str,
         text: &str,
-        authored_text: &str,
+        authorship: buzz_workflow::action_sink::MessageAuthorship<'_>,
         author_pubkey: &str,
         reply_to: Option<&str>,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
         let channel_id = channel_id.to_owned();
         let text = text.to_owned();
-        let authored_text = authored_text.to_owned();
+        let authored_text = authorship.template().to_owned();
+        let scheduled_literal = authorship.is_scheduled_literal();
         let author_pubkey = author_pubkey.to_owned();
         let reply_to = reply_to.map(str::to_owned);
 
@@ -323,6 +324,16 @@ impl ActionSink for RelayActionSink {
                 Tag::parse(["buzz:workflow-owner", &author_pubkey_hex])
                     .map_err(|e| ActionSinkError::EventBuild(format!("workflow owner tag: {e}")))?,
             ];
+
+            if scheduled_literal {
+                tags.push(
+                    Tag::parse([buzz_sdk::workflow::SCHEDULED_LITERAL_TAG, "literal-v1"]).map_err(
+                        |error| {
+                            ActionSinkError::EventBuild(format!("scheduled prompt tag: {error}"))
+                        },
+                    )?,
+                );
+            }
 
             // Resolve thread ancestry when this is a threaded reply, so the
             // built event carries NIP-10 `root`/`reply` e-tags and persists real
@@ -841,6 +852,28 @@ mod postgres_tests {
             }],
             "enabled": true,
         });
+        execute_defined_workflow(
+            state,
+            community,
+            channel_id,
+            owner_pubkey,
+            &definition,
+            trigger_text,
+            false,
+        )
+        .await
+    }
+
+    async fn execute_defined_workflow(
+        state: &Arc<AppState>,
+        community: CommunityId,
+        channel_id: Uuid,
+        owner_pubkey: &[u8],
+        definition: &serde_json::Value,
+        trigger_text: &str,
+        scheduled: bool,
+    ) -> String {
+        let name = definition["name"].as_str().expect("fixture name");
         let definition_hash_byte = name.as_bytes().first().copied().unwrap_or_default();
         let workflow_id = state
             .db
@@ -855,6 +888,7 @@ mod postgres_tests {
             .await
             .expect("create workflow");
         let trigger_ctx = buzz_workflow::executor::TriggerContext {
+            scheduled,
             text: trigger_text.to_owned(),
             channel_id: channel_id.to_string(),
             ..Default::default()
@@ -1058,6 +1092,61 @@ mod postgres_tests {
             tag_values(&injected, "buzz:workflow-mention").is_empty(),
             "a mention introduced solely by trigger data must not receive owner-delegated authority"
         );
+
+        // The actual executor and relay sink produce the signed authority input
+        // consumed by the running harness and launcher's gateway author gate.
+        for (name, trigger, text, scheduled, expected) in [
+            (
+                "scheduled-literal",
+                serde_json::json!({"on":"schedule","interval":"60s"}),
+                "@Robby fixed instruction",
+                true,
+                true,
+            ),
+            (
+                "message-trigger",
+                serde_json::json!({"on":"message_posted"}),
+                "@Robby fixed instruction",
+                true,
+                false,
+            ),
+            (
+                "templated-schedule",
+                serde_json::json!({"on":"schedule","interval":"60s"}),
+                "@Robby {{trigger.text}}",
+                true,
+                false,
+            ),
+            (
+                "old-unscheduled-run",
+                serde_json::json!({"on":"schedule","interval":"60s"}),
+                "@Robby fixed instruction",
+                false,
+                false,
+            ),
+        ] {
+            let definition = serde_json::json!({"name":name,"trigger":trigger,"steps":[{"id":"send","action":"send_message","text":text}]});
+            let id = execute_defined_workflow(
+                &state,
+                community,
+                channel.id,
+                &author.public_key().to_bytes(),
+                &definition,
+                "untrusted trigger data",
+                scheduled,
+            )
+            .await;
+            let stored = load_event(&id).await;
+            assert_eq!(
+                buzz_sdk::workflow::gateway_owner(
+                    &stored.event,
+                    state.relay_keypair.public_key(),
+                    agent.public_key()
+                ),
+                expected.then_some(author.public_key()),
+                "{name}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1102,7 +1191,7 @@ mod postgres_tests {
                 community,
                 &channel.id.to_string(),
                 "root message",
-                "root message",
+                buzz_workflow::action_sink::MessageAuthorship::unproven("root message"),
                 &author_hex,
                 None,
             )
@@ -1115,7 +1204,7 @@ mod postgres_tests {
                 community,
                 &channel.id.to_string(),
                 "threaded reply",
-                "threaded reply",
+                buzz_workflow::action_sink::MessageAuthorship::unproven("threaded reply"),
                 &author_hex,
                 Some(&root_hex),
             )
@@ -1259,7 +1348,7 @@ mod postgres_tests {
                 community,
                 &channel_hex,
                 "workflow reply",
-                "workflow reply",
+                buzz_workflow::action_sink::MessageAuthorship::unproven("workflow reply"),
                 &author_hex,
                 Some(&parent_hex),
             )
@@ -1341,7 +1430,9 @@ mod postgres_tests {
                 community,
                 &channel_hex,
                 "workflow reply to root-only parent",
-                "workflow reply to root-only parent",
+                buzz_workflow::action_sink::MessageAuthorship::unproven(
+                    "workflow reply to root-only parent",
+                ),
                 &author_hex,
                 Some(&root_only_parent_hex),
             )
@@ -1405,7 +1496,7 @@ mod postgres_tests {
                 community,
                 &channel.id.to_string(),
                 "orphan reply",
-                "orphan reply",
+                buzz_workflow::action_sink::MessageAuthorship::unproven("orphan reply"),
                 &author_hex,
                 Some(&unknown),
             )
@@ -1504,7 +1595,7 @@ mod postgres_tests {
                     community,
                     &channel,
                     "reply",
-                    "reply",
+                    buzz_workflow::action_sink::MessageAuthorship::unproven("reply"),
                     &author_hex,
                     Some(&parent),
                 )

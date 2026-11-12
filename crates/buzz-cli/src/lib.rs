@@ -260,9 +260,15 @@ pub enum OutputFormat {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Read owner-encrypted Paseo pairing details
+    #[command(subcommand)]
+    Paseo(commands::paseo::PaseoCmd),
     /// Draft owner-reviewed agent creation and updates
     #[command(subcommand)]
     Agents(AgentsCmd),
+    /// Delegate a separate key to drive your remote agents
+    #[command(subcommand)]
+    Gateway(GatewayCmd),
     /// Send, read, search, and manage messages
     #[command(subcommand)]
     Messages(MessagesCmd),
@@ -329,6 +335,38 @@ enum Cmd {
     /// Community moderation — reports queue, bans, timeouts, audit trail
     #[command(subcommand)]
     Moderation(ModerationCmd),
+    /// Drive a Buzz remote agent from an ACP client (such as Paseo) over stdio
+    #[command(
+        name = "acp-bridge",
+        long_about = "\
+Act as an ACP (Agent Client Protocol) agent on stdin/stdout that drives one Buzz
+remote agent through the relay. Each ACP session is one thread in --channel:
+the first prompt posts a kind 9 thread root that mentions --agent (which starts
+the agent's sandbox), and later prompts post replies in that thread. The
+agent's observer telemetry streams back as session/update notifications.
+
+When the thread's agent session has ended, the bridge says so and accepts
+/fresh (resend as a new thread, new empty workspace) or /recover (resend in the
+same thread after choosing Recover on it in the Buzz app).
+
+BUZZ_RELAY_URL must be a wss:// URL. BUZZ_PRIVATE_KEY signs prompts and cancel
+requests; live telemetry is only readable when it is the agent owner's key.
+stdout carries only JSON-RPC; diagnostics go to stderr.",
+        after_help = "\
+Example Paseo provider:
+  {\"extends\":\"acp\",\"command\":[\"buzz\",\"acp-bridge\",\"--agent\",\"<agent pubkey>\",\"--channel\",\"<channel uuid>\"]}"
+    )]
+    AcpBridge {
+        /// Pubkey of the remote agent to drive (hex or npub)
+        #[arg(long)]
+        agent: String,
+        /// Owner public key when signing with a delegated gateway key
+        #[arg(long)]
+        owner: Option<String>,
+        /// Channel UUID where prompts are posted as thread messages
+        #[arg(long)]
+        channel: String,
+    },
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -347,6 +385,26 @@ impl RespondToArg {
         }
         .to_string()
     }
+}
+
+/// Manage owner-signed, expiring gateway delegations.
+#[derive(Subcommand)]
+pub enum GatewayCmd {
+    /// Delegate a gateway key (membership must be granted separately)
+    Grant {
+        /// Gateway public key (hex or npub)
+        pubkey: String,
+        /// Lifetime, such as 24h or 90d (maximum 90d)
+        #[arg(long, default_value = "90d")]
+        expires: String,
+    },
+    /// Read your delegation heads, including revocations and expired heads
+    List,
+    /// Revoke a gateway with a durable replacement head
+    Revoke {
+        /// Gateway public key (hex or npub)
+        pubkey: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -518,6 +576,9 @@ pub enum MessagesCmd {
         /// Message text — supports @mentions and markdown. Use '-' to read from stdin.
         #[arg(long)]
         content: String,
+        /// Validated Paseo transcript correlation; not a general tag surface.
+        #[arg(long, hide = true)]
+        paseo_transcript: Option<String>,
         /// Nostr event kind (default: channel default)
         #[arg(long)]
         kind: Option<u16>,
@@ -2267,6 +2328,11 @@ fn normalize_auth_tag_input(input: &str) -> String {
 }
 
 async fn run(cli: Cli) -> Result<(), CliError> {
+    // The bridge holds a long-lived WebSocket and refuses anything but wss://.
+    // Check the raw value: normalization rewrites ws:// and wss:// to http(s)://.
+    if matches!(cli.command, Cmd::AcpBridge { .. }) {
+        commands::acp_bridge::require_wss(&cli.relay)?;
+    }
     let relay_url = client::normalize_relay_url(&cli.relay);
 
     // Pack commands are local-only — no relay connection needed.
@@ -2315,7 +2381,9 @@ async fn run(cli: Cli) -> Result<(), CliError> {
     let client = BuzzClient::new(relay_url, keys, auth_tag, auth_tag_json)?;
 
     match cli.command {
+        Cmd::Paseo(sub) => commands::paseo::dispatch(sub, &client).await,
         Cmd::Agents(sub) => commands::agents::dispatch(sub, &client).await,
+        Cmd::Gateway(sub) => commands::gateway::dispatch(sub, &client).await,
         Cmd::Messages(sub) => commands::messages::dispatch(sub, &client, &cli.format).await,
         Cmd::Channels(sub) => commands::channels::dispatch(sub, &client, &cli.format).await,
         Cmd::Canvas(sub) => commands::channels::dispatch_canvas(sub, &client).await,
@@ -2337,6 +2405,11 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
+        Cmd::AcpBridge {
+            agent,
+            channel,
+            owner,
+        } => commands::acp_bridge::run(client, &agent, &channel, owner.as_deref()).await,
         Cmd::Pack(_) => unreachable!("handled above"),
     }
 }
@@ -2506,12 +2579,14 @@ mod tests {
     #[test]
     fn command_inventory_is_stable() {
         let expected_groups: Vec<&str> = vec![
+            "acp-bridge",
             "agents",
             "canvas",
             "channels",
             "dms",
             "emoji",
             "feed",
+            "gateway",
             "gifs",
             "issues",
             "media",
@@ -2520,6 +2595,7 @@ mod tests {
             "moderation",
             "notes",
             "pack",
+            "paseo",
             "patches",
             "pr",
             "projects",
@@ -2646,6 +2722,7 @@ mod tests {
             names(&cmd, "workflows"),
             vec!["approve", "create", "delete", "get", "list", "runs", "trigger", "update"]
         );
+        assert_eq!(names(&cmd, "paseo"), vec!["pairing"]);
         assert_eq!(names(&cmd, "feed"), vec!["get"]);
         assert_eq!(
             names(&cmd, "social"),
@@ -2731,10 +2808,12 @@ mod tests {
             ("dms", 4),
             ("emoji", 5),
             ("feed", 1),
+            ("gateway", 3),
             ("issues", 6),
             ("media", 1),
             ("messages", 8),
             ("pack", 2),
+            ("paseo", 1),
             ("patches", 4),
             ("pr", 5),
             ("projects", 8),

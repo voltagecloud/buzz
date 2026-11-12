@@ -13,11 +13,12 @@ It also builds the Paseo relay image from a pinned upstream commit; see [The Pas
 | [buzz-sandbox-reaper](buzz-sandbox-reaper/Dockerfile) | In-cluster reaper for ended and orphaned agent Sandboxes (`buzz-sandbox-reaper reconcile`) | `voltage-buzz-sandbox-reaper-staging` |
 | [buzz-relay](#the-relay-image) | Buzz relay, admin, and pair relay binaries with the web bundles, from the root `Dockerfile` | `buzz-relay` |
 | [paseo-relay](#the-paseo-relay-image) | The Paseo relay, from the upstream `Dockerfile` of getpaseo/paseo-relay at `PASEO_RELAY_SOURCE` | `paseo-relay` |
+| [paseo-daemon](paseo-daemon/README.md) | Paseo daemon that runs a developer's personal assistant in front of Buzz remote agents | `voltage-paseo-daemon-staging` |
 
 Each Buzz image compiles the Buzz crates of the commit it is built from.
 The build context is the repository root, except for `paseo-relay`.
-For the two agent images, BuildKit reads the `Dockerfile.dockerignore` next to each Dockerfile instead of the root `.dockerignore`.
-These files keep only the Cargo workspace and, for `buzz-agent`, the files that its Dockerfile copies from `voltage/images/buzz-agent`.
+For the agent images and `paseo-daemon`, BuildKit reads the `Dockerfile.dockerignore` next to each Dockerfile instead of the root `.dockerignore`.
+These files keep only the Cargo workspace and the files that each Dockerfile copies from its own directory.
 
 ## Publishing
 
@@ -25,7 +26,7 @@ These files keep only the Cargo workspace and, for `buzz-agent`, the files that 
 Its first job selects only the images whose inputs changed; manual runs build all of them.
 
 - Pull requests: hadolint and BuildKit checks, then a build of each selected image for `linux/amd64` and `linux/arm64` on native runners, without a push.
-  The workflow tests the agent image on both platforms, runs the reaper binary, and smoke-tests the relay images with [`test-relay-image.sh`](test-relay-image.sh) and [`test-paseo-relay-image.sh`](test-paseo-relay-image.sh).
+  The workflow tests the agent image on both platforms, runs the reaper binary, smoke-tests the relay images with [`test-relay-image.sh`](test-relay-image.sh) and [`test-paseo-relay-image.sh`](test-paseo-relay-image.sh), and runs [`paseo-daemon/test-image.sh`](paseo-daemon/test-image.sh).
   These jobs have no AWS access.
 - `main`: each platform builds on its native runner and is pushed by digest.
   A merge job then creates one manifest list per image, tagged with the full commit SHA.

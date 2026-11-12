@@ -936,6 +936,9 @@ pub struct PromptContext {
     pub memory_enabled: bool,
     /// Fresh authorization for bound shared-channel tasks.
     pub sharing: Option<Arc<crate::sharing::Client>>,
+    /// Live owner-delegated gateways, set only in strict owner mode. A queued
+    /// gateway turn is rechecked against it at dispatch.
+    pub(crate) gateways: Option<Arc<crate::gateway::GatewayAccess>>,
     /// Harness identity string for NIP-AM `harness` field. Derived from the
     /// configured `agent_command` at startup (e.g. `"goose"`, `"buzz-agent"`).
     pub harness_name: String,
@@ -2422,7 +2425,7 @@ fn send_prompt_result(
 #[allow(clippy::too_many_arguments)]
 pub async fn run_prompt_task(
     mut agent: OwnedAgent,
-    batch: Option<FlushBatch>,
+    mut batch: Option<FlushBatch>,
     prompt_text: Option<String>,
     ctx: Arc<PromptContext>,
     result_tx: mpsc::UnboundedSender<PromptResult>,
@@ -2514,24 +2517,10 @@ pub async fn run_prompt_task(
 
     // Queueing may outlive a grant. Recheck before session creation, memory
     // fetches, or any ACP prompt; the listener separately guards native steering.
-    if let (Some(sharing), Some(pending)) = (&ctx.sharing, &batch) {
-        let mut denied = None;
-        for item in &pending.events {
-            if Some(item.event.pubkey) == ctx.agent_owner_pubkey {
-                continue;
-            }
-            match sharing.authorize(&item.event).await {
-                Ok(crate::sharing::Admission::Allowed(_)) => {}
-                Ok(crate::sharing::Admission::Refused(reason)) => {
-                    denied = Some(reason);
-                    break;
-                }
-                Err(error) => {
-                    denied = Some(error.to_string());
-                    break;
-                }
-            }
-        }
+    // A gateway turn is rechecked the same way: a revocation or expiry blocks
+    // it here even when it was admitted before.
+    if let (true, Some(pending)) = (ctx.sharing.is_some() || ctx.gateways.is_some(), &mut batch) {
+        let denied = dispatch_refusal(&ctx, pending).await;
         if let Some(reason) = denied {
             send_prompt_result(
                 &result_tx,
@@ -2539,7 +2528,12 @@ pub async fn run_prompt_task(
                 agent,
                 source,
                 PromptOutcome::Error(AcpError::TaskPermission(reason)),
-                requeue_batch_if_queue(&ctx, batch),
+                requeue_batch_if_queue(
+                    &ctx,
+                    batch.filter(|pending| {
+                        !pending.events.is_empty() || !pending.cancelled_events.is_empty()
+                    }),
+                ),
             );
             return;
         }
@@ -4939,6 +4933,84 @@ fn parse_nostr_dm_response(json: serde_json::Value, limit: u32) -> Option<Conver
         total,
         truncated,
     })
+}
+
+enum DispatchAdmission {
+    Allowed,
+    Refused(String),
+    Retry(String),
+}
+
+async fn dispatch_admission(ctx: &PromptContext, event: &nostr::Event) -> DispatchAdmission {
+    if Some(event.pubkey) == ctx.agent_owner_pubkey {
+        return DispatchAdmission::Allowed;
+    }
+    let mut gateway_error = None;
+    if let Some(gateways) = &ctx.gateways {
+        match gateways.prompt_author(event).await {
+            Ok(Some(_)) => return DispatchAdmission::Allowed,
+            Ok(None) => {}
+            Err(error) => gateway_error = Some(error.to_string()),
+        }
+    }
+    let Some(sharing) = &ctx.sharing else {
+        return match gateway_error {
+            Some(error) => DispatchAdmission::Retry(error),
+            None => DispatchAdmission::Refused(
+                "the requester is not the owner or a live owner-delegated gateway".into(),
+            ),
+        };
+    };
+    match sharing.authorize(event).await {
+        Ok(crate::sharing::Admission::Allowed(_)) => DispatchAdmission::Allowed,
+        Ok(crate::sharing::Admission::Refused(reason)) => match gateway_error {
+            Some(error) => DispatchAdmission::Retry(error),
+            None => DispatchAdmission::Refused(reason),
+        },
+        Err(error) => DispatchAdmission::Retry(error.to_string()),
+    }
+}
+
+/// Remove only events whose current admission is definitively refused. An
+/// unrelated owner's event proceeds in the same turn. Transient authority
+/// failures retain the remaining work for the normal bounded retry policy.
+/// Cancelled instructions receive the same check as new instructions.
+pub(crate) async fn dispatch_refusal(
+    ctx: &PromptContext,
+    pending: &mut FlushBatch,
+) -> Option<String> {
+    let mut first_refusal = None;
+    for events in [&mut pending.events, &mut pending.cancelled_events] {
+        let mut original = std::mem::take(events).into_iter();
+        let mut allowed = Vec::with_capacity(original.len());
+        while let Some(item) = original.next() {
+            match dispatch_admission(ctx, &item.event).await {
+                DispatchAdmission::Allowed => allowed.push(item),
+                DispatchAdmission::Refused(reason) => {
+                    tracing::warn!(event_id=%item.event.id,reason=%reason,"queued event definitively refused at dispatch");
+                    first_refusal.get_or_insert(reason);
+                }
+                DispatchAdmission::Retry(reason) => {
+                    allowed.push(item);
+                    allowed.extend(original);
+                    *events = allowed;
+                    return Some(reason);
+                }
+            }
+        }
+        *events = allowed;
+    }
+    if pending.events.is_empty() && !pending.cancelled_events.is_empty() {
+        // The refused interruption cannot consume the authorized work it
+        // cancelled. Run that work as an ordinary batch with a real prompt.
+        pending.events = std::mem::take(&mut pending.cancelled_events);
+        pending.cancel_reason = None;
+    }
+    if pending.events.is_empty() && pending.cancelled_events.is_empty() {
+        first_refusal
+    } else {
+        None
+    }
 }
 
 /// Return the batch for requeue only in Queue mode; drop it in Drop mode.
@@ -10526,6 +10598,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             agent_owner_pubkey: owner_pubkey,
             memory_enabled: false,
             sharing: None,
+            gateways: None,
             harness_name: "goose".to_string(),
             relay_url: "ws://127.0.0.1:3000".to_string(),
         }
@@ -12490,3 +12563,6 @@ done"#
 #[cfg(all(test, unix))]
 #[path = "pool/pi_prompt_tests.rs"]
 mod pi_prompt_tests;
+
+#[cfg(all(test, unix))]
+mod gateway_dispatch_tests;

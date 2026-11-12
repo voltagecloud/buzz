@@ -950,6 +950,92 @@ export function rustGroups(entries) {
   return { groups, runner: [...workspaces][0] };
 }
 
+// Only explicit per-test platform guards can excuse an unlisted test. Read
+// the platforms nextest actually built, including cross-compilation targets;
+// the Node host is not evidence of the test binary's target. Missing metadata,
+// custom targets, unsupported cfg expressions and absent declarations stay
+// unlisted failures. Feature predicates are deliberately never evaluated here.
+function rustPlatformCfgs(listing, cache) {
+  const platforms = listing["rust-build-meta"]?.platforms;
+  if (!platforms?.host?.platform || !Array.isArray(platforms.targets))
+    return undefined;
+  const built = [platforms.host, ...platforms.targets].map((p) => p.platform);
+  const cfgs = [];
+  for (const platform of built) {
+    if (
+      !platform ||
+      platform["custom-json"] ||
+      platform["custom-cfg"] ||
+      !/^[a-zA-Z0-9_-]+$/.test(platform.triple ?? "")
+    )
+      return undefined;
+    if (!cache.has(platform.triple)) {
+      const result = run("rustc", [
+        "--print",
+        "cfg",
+        "--target",
+        platform.triple,
+      ]);
+      cache.set(
+        platform.triple,
+        result.status === 0
+          ? new Set(result.stdout.trim().split("\n"))
+          : undefined,
+      );
+    }
+    const cfg = cache.get(platform.triple);
+    // Confirm real platform output before treating a missing predicate as false.
+    if (!cfg || ![...cfg].some((line) => line.startsWith('target_os="')))
+      return undefined;
+    cfgs.push(cfg);
+  }
+  return cfgs;
+}
+
+function rustPlatformExcluded(entry, cfgs) {
+  if (!cfgs?.length) return false;
+  const [file, ...parts] = entry.split("::");
+  if (!existsSync(`${root}${file}`)) return false;
+  const source = readFileSync(`${root}${file}`, "utf8");
+  const tests = rustTests(source).filter(
+    (test) => test.name === parts.join("::"),
+  );
+  if (tests.length !== 1) return false;
+  const test = tests[0];
+  const span = source
+    .split("\n")
+    .slice(test.start - 1, test.end)
+    .join("\n");
+  const masked = blankRust(span);
+  const guards = [];
+  let at = /^\s*/.exec(masked)[0].length;
+  while (masked.startsWith("#[", at)) {
+    const close = matching(masked, "[", "]", at + 1);
+    const attr = span.slice(at + 2, close).trim();
+    // Deliberately support only atomic built-in platform predicates and their
+    // negation. Complex/feature/custom predicates retain the existing failure.
+    const guard =
+      /^cfg\(\s*(windows|unix|target_(?:os|arch|family|env|vendor|endian|pointer_width)\s*=\s*"[\w-]+")\s*\)$/.exec(
+        attr,
+      );
+    const negated =
+      /^cfg\(\s*not\(\s*(windows|unix|target_(?:os|arch|family|env|vendor|endian|pointer_width)\s*=\s*"[\w-]+")\s*\)\s*\)$/.exec(
+        attr,
+      );
+    const value = guard?.[1] ?? negated?.[1];
+    if (value)
+      guards.push({
+        value: value.replace(/\s/g, ""),
+        negated: Boolean(negated),
+      });
+    at = close + 1;
+    while (/\s/.test(masked[at] ?? "")) at += 1;
+  }
+  return cfgs.every((cfg) =>
+    guards.some(({ value, negated }) => cfg.has(value) === negated),
+  );
+}
+
 // nextest has no repeat flag, so run the selection once per iteration under
 // the `flake` profile (the workspace's .config/nextest.toml: no retries, JUnit
 // per run), one cargo invocation per package and feature graph so each builds
@@ -963,7 +1049,8 @@ export function rustGroups(entries) {
 // keyed per graph, so one graph's pass cannot stand for another's failure.
 // An entry standing only for ignored or infrastructure-backed tests is
 // excluded; one no graph lists (a test behind a cfg the regular lanes do not
-// build here) fails the lane rather than passing unrepeated. The Tauri
+// build here) fails the lane unless an explicit platform guard proves it cannot
+// run on any build platform. The Tauri
 // workspace is addressed by its manifest; the root one is cargo's default.
 function repeatRust(entries, iterations) {
   const { groups, runner } = rustGroups(entries);
@@ -973,8 +1060,11 @@ function repeatRust(entries, iterations) {
   const cargoArgs = runner === "rust" ? [] : ["--manifest-path", manifest];
   const invocations = [];
   const unlisted = [];
+  const platformExcluded = [];
+  const cfgCache = new Map();
   for (const [crate, group] of groups) {
     const missing = new Set(group.tests);
+    const excluded = new Set(group.tests);
     for (const { features, args } of group.graphs) {
       const listed = run("cargo", [
         "nextest",
@@ -986,18 +1076,21 @@ function repeatRust(entries, iterations) {
       ]);
       if (listed.status !== 0)
         throw new Error(`cargo nextest list: ${listed.stderr}`);
-      const candidates = Object.entries(
-        JSON.parse(listed.stdout)["rust-suites"],
-      ).flatMap(([binary, suite]) =>
-        Object.entries(suite.testcases).map(([name, test]) => ({
-          binary,
-          name,
-          runnable: !test.ignored && !infraTest(suite["binary-name"], name),
-        })),
+      const listing = JSON.parse(listed.stdout);
+      const cfgs = rustPlatformCfgs(listing, cfgCache);
+      const candidates = Object.entries(listing["rust-suites"]).flatMap(
+        ([binary, suite]) =>
+          Object.entries(suite.testcases).map(([name, test]) => ({
+            binary,
+            name,
+            runnable: !test.ignored && !infraTest(suite["binary-name"], name),
+          })),
       );
       const choice = chooseRust(group.tests, candidates);
-      for (const test of group.tests)
+      for (const test of group.tests) {
         if (!choice.unlisted.includes(test)) missing.delete(test);
+        else if (!rustPlatformExcluded(test.entry, cfgs)) excluded.delete(test);
+      }
       const chosen = choice.chosen.filter((test) => test.runnable);
       if (chosen.length)
         invocations.push({
@@ -1012,8 +1105,16 @@ function repeatRust(entries, iterations) {
             .join(" | "),
         });
     }
-    unlisted.push(...[...missing].map((test) => test.entry));
+    for (const test of missing)
+      (excluded.has(test) ? platformExcluded : unlisted).push(test.entry);
   }
+  if (platformExcluded.length)
+    summarize(
+      `## ${title}: ${platformExcluded.length} platform-excluded test(s)\n\n` +
+        "Explicit platform guards exclude these tests on every platform nextest built; they were not repeated:\n\n" +
+        platformExcluded.map((entry) => `- \`${entry}\``).join("\n") +
+        "\n\n",
+    );
   if (unlisted.length) {
     summarize(
       [
@@ -1036,7 +1137,7 @@ function repeatRust(entries, iterations) {
   if (expected.length === 0) {
     if (!unlisted.length)
       summarize(
-        `## ${title}: nothing to repeat\n\nEvery selected test is ignored or infrastructure-backed.\n\n`,
+        `## ${title}: nothing to repeat\n\nEvery selected test is ignored, infrastructure-backed or explicitly excluded on the build platforms.\n\n`,
       );
     return;
   }
@@ -1135,8 +1236,9 @@ export function parseDartReport(text, mobileRoot = `${root}mobile/`) {
     const test = started.get(event.testID);
     if (!test) continue;
     const url = test.root_url ?? test.url;
-    const source = suites.get(test.suiteID) ??
-      (url?.startsWith("file:") ? fileURLToPath(url) : url ?? "unknown");
+    const source =
+      suites.get(test.suiteID) ??
+      (url?.startsWith("file:") ? fileURLToPath(url) : (url ?? "unknown"));
     const file = source.replace(mobileRoot, "");
     statuses.set(
       `${file} › ${test.name}`,

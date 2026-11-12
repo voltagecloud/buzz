@@ -60,6 +60,18 @@ pub async fn handle_req(
     conn: Arc<ConnectionState>,
     state: Arc<AppState>,
 ) {
+    handle_req_consistent(sub_id, filters, before_ids, Vec::new(), conn, state).await;
+}
+
+/// Handle a subscription with per-filter writer-pinned authority reads.
+pub(crate) async fn handle_req_consistent(
+    sub_id: String,
+    filters: Vec<Filter>,
+    before_ids: Vec<Option<Vec<u8>>>,
+    writer_reads: Vec<bool>,
+    conn: Arc<ConnectionState>,
+    state: Arc<AppState>,
+) {
     let mut access = crate::access::ReadLog::req(&conn, &sub_id, &filters);
     let (conn_id, pubkey_bytes, token_channel_ids) = {
         match conn.auth_state_snapshot() {
@@ -505,8 +517,22 @@ pub async fn handle_req(
         let mut results = stream::iter(filter_queries.into_iter().map(
             |(idx, per_filter_channel, params)| {
                 let db = db.clone();
+                let writer_read = writer_reads.get(idx).copied().unwrap_or(false);
+                let state = state.clone();
+                let tenant = conn.tenant.clone();
+                let reader = pubkey_bytes.clone();
+                let filter = filters[idx].clone();
                 async move {
-                    let filter_events = db.query_events_routed("req_historical", &params).await;
+                    let filter_events = if writer_read {
+                        match super::current_members::read(&state, &tenant, &reader, &filter).await
+                        {
+                            Ok(Some(events)) => Ok(events),
+                            Ok(None) => db.query_events(&params).await,
+                            Err(error) => Err(error),
+                        }
+                    } else {
+                        db.query_events_routed("req_historical", &params).await
+                    };
                     (idx, per_filter_channel, filter_events)
                 }
             },

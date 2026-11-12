@@ -701,6 +701,7 @@ impl WorkflowEngine {
             // Fix 5: handle serialization errors explicitly rather than silently
             // dropping the trigger context with .ok().
             let trigger_ctx = executor::TriggerContext {
+                scheduled: true,
                 channel_id: channel_id.to_string(),
                 timestamp: now.timestamp().to_string(),
                 ..Default::default()
@@ -1065,6 +1066,7 @@ pub fn build_trigger_context(event: &buzz_core::StoredEvent) -> executor::Trigge
     };
 
     executor::TriggerContext {
+        scheduled: false,
         text: content,
         author,
         channel_id: event

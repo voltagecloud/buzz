@@ -345,6 +345,17 @@ pub const KIND_MANAGED_AGENT: u32 = 30177;
 /// absent grants never authorize another member. Credentials are not included.
 pub const KIND_AGENT_CHANNEL_GRANT: u32 = 30180;
 
+/// Owner-signed delegation of a gateway key (NIP-33, coordinate = gateway hex).
+///
+/// A live head lets the named gateway key drive the signer's own remote
+/// agents: mention-launch them, prompt them in their threads, cancel a turn,
+/// and receive their observer telemetry. It never makes the gateway an owner
+/// or an agent anywhere else. Every enabled head carries a NIP-40
+/// `expiration`. Revocation is a newer disabled head; the relay ignores NIP-09
+/// deletions of this kind so an old signed grant cannot be replayed into an
+/// empty coordinate. See `docs/agent-gateway-key.md`.
+pub const KIND_AGENT_GATEWAY_DELEGATION: u32 = 30181;
+
 /// NIP-AP: Team Catalog projection (parameterized replaceable, owner-authored).
 ///
 /// The shareable projection of a team, addressed by `(pubkey, kind, d_tag)`
@@ -727,6 +738,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_TEAM,
     KIND_MANAGED_AGENT,
     KIND_AGENT_CHANNEL_GRANT,
+    KIND_AGENT_GATEWAY_DELEGATION,
     KIND_TEAM_CATALOG,
     KIND_PRIVATE_MANAGED_AGENT,
     KIND_REPORT,
@@ -943,6 +955,7 @@ const _: () = assert!(is_parameterized_replaceable(KIND_TEAM)); // 30176 ∈ 300
 const _: () = assert!(is_parameterized_replaceable(KIND_MANAGED_AGENT)); // 30177 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_TEAM_CATALOG)); // 30178 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_PRIVATE_MANAGED_AGENT)); // 30179 ∈ 30000–39999
+const _: () = assert!(is_parameterized_replaceable(KIND_AGENT_GATEWAY_DELEGATION)); // 30181 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_WORKFLOW_DEF)); // 30620 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_EVENT_REMINDER)); // 30300 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_DM_VISIBILITY)); // 30622 ∈ 30000–39999

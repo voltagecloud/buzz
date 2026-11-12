@@ -643,6 +643,22 @@ fn manager_config_maps_each_owner_to_its_namespace() {
             .map(|d| d.namespace.as_str()),
         None
     );
+    // Paseo provisioning is off unless Terraform turns it on.
+    assert!(!config.paseo_daemons());
+    let mut value = config_json(&[("dev", &owner())]);
+    value["paseo_daemons"] = json!(true);
+    let parsed = ManagerConfig::parse(&value.to_string()).unwrap();
+    assert!(parsed.paseo_daemons());
+    // Offers name the Buzz relay's host unless the config says otherwise.
+    assert_eq!(parsed.paseo_relay_endpoint(), "buzz.voltage.cloud:443");
+    value["paseo_relay_endpoint"] = json!("paseo.example.test:8443");
+    let parsed = ManagerConfig::parse(&value.to_string()).unwrap();
+    assert_eq!(parsed.paseo_relay_endpoint(), "paseo.example.test:8443");
+    value["paseo_relay_endpoint"] = json!("wss://buzz.voltage.cloud:443");
+    assert!(matches!(
+        ManagerConfig::parse(&value.to_string()),
+        Err(ManagerConfigError::InvalidPaseoRelayEndpoint)
+    ));
 }
 
 #[test]
@@ -755,3 +771,185 @@ fn manager_config_refuses_each_invalid_field_and_names_it() {
         Err(ManagerConfigError::Malformed(_))
     ));
 }
+
+/// A registering deploy lists the agent, with its deploy's channel, in the
+/// owner's Paseo daemon Secret, keeping the Secret's other keys. A failed
+/// update preserves the successful deploy response and reports a separate
+/// sync failure. Enrollment recovers the list without another deploy. Before
+/// the owner enrolls with Paseo on, there is no Secret
+/// and the deploy creates none.
+#[tokio::test]
+async fn a_registering_deploy_lists_the_agent_for_the_owners_paseo_daemon() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use buzz_backend_kubernetes::sandbox_fake;
+    use std::io::{Read, Seek};
+    use tracing::instrument::WithSubscriber;
+
+    let cluster = sandbox_fake::Shared::default();
+    let config = ManagerConfig::parse(&config_json(&[("dev", &owner())]).to_string()).unwrap();
+    let developer = config.developer(&owner().public_key()).unwrap().clone();
+    let enrollment = crate::enroll::tests::offline(Default::default())
+        .with_paseo(crate::enroll::tests::daemon_secrets(&cluster));
+    let manager = Manager::new(
+        manager_keys(),
+        config,
+        sandbox_fake::client(&cluster),
+        enrollment,
+    )
+    .with_sandbox_defaults(
+        json!({"pod_options": {"active_deadline_seconds": 3600}})
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    let mut sent = Sent::deploy();
+    sent.payload["agent"]["launch"]["policy_env"] = json!({"BUZZ_ACP_DISPLAY_NAME": "Brokkr"});
+    let deploy = |sent: &Sent| {
+        let Admission::Start { job, .. } = manager.admit(&sent.event(), now()) else {
+            panic!("deploy refused");
+        };
+        job.work.run(&manager)
+    };
+    let response = deploy(&sent).await;
+    assert_eq!(response["ok"], true, "{response}");
+    assert!(!cluster
+        .lock()
+        .unwrap()
+        .secrets
+        .contains_key("paseo-daemon-dev"));
+
+    let profile = crate::profile::tests::valid("dev", &"a".repeat(64));
+    crate::enroll::tests::daemon_secrets(&cluster)
+        .write(&developer, &profile)
+        .await
+        .unwrap();
+    let env = || -> std::collections::BTreeMap<String, String> {
+        let cluster = cluster.lock().unwrap();
+        cluster.secrets["paseo-daemon-dev"]["data"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(key, value)| {
+                let bytes = STANDARD.decode(value.as_str().unwrap()).unwrap();
+                (key.clone(), String::from_utf8(bytes).unwrap())
+            })
+            .collect()
+    };
+    let before = env();
+    // Only the daemon Secret refuses replacement (a conflict every time).
+    let immutable = |value: bool| {
+        cluster
+            .lock()
+            .unwrap()
+            .secrets
+            .get_mut("paseo-daemon-dev")
+            .unwrap()["immutable"] = json!(value);
+    };
+    immutable(true);
+    sent.request_id = "r-2".into();
+    let output = tempfile::tempfile().unwrap();
+    let mut reader = output.try_clone().unwrap();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .without_time()
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(Mutex::new(output))
+        .finish();
+    let response = deploy(&sent).with_subscriber(subscriber).await;
+    assert_eq!(response["ok"], true, "{response}");
+    assert!(response["agent_id"].is_string(), "{response}");
+    assert_eq!(response["paseo_sync"]["ok"], false, "{response}");
+    assert_eq!(
+        response["paseo_sync"]["code"], "paseo_store_failed",
+        "{response}"
+    );
+    assert!(!response["paseo_sync"]["error"]
+        .as_str()
+        .unwrap()
+        .contains("start it again"));
+    assert_eq!(env(), before);
+    reader.rewind().unwrap();
+    let mut captured = String::new();
+    reader.read_to_string(&mut captured).unwrap();
+    let warning = captured
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|event| {
+            event["fields"]["message"]
+                == "Paseo agent list refresh failed after successful Sandbox registration"
+        })
+        .expect("a stale list needs an operator-visible warning");
+    assert_eq!(warning["fields"]["developer"], "dev");
+    assert_eq!(warning["fields"]["label"], "conflict");
+    for key in [
+        "PASEO_PASSWORD",
+        "PASEO_DAEMON_KEYPAIR",
+        "BUZZ_PRIVATE_KEY",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+    ] {
+        if let Some(secret) = before.get(key) {
+            assert!(!captured.contains(secret), "credential in warning: {key}");
+        }
+    }
+    let deployed = cluster.lock().unwrap().sandboxes.clone();
+    assert!(!deployed.is_empty(), "provider did not start its Sandbox");
+
+    immutable(false);
+    crate::enroll::tests::daemon_secrets(&cluster)
+        .write(&developer, &profile)
+        .await
+        .unwrap();
+    assert_eq!(
+        cluster.lock().unwrap().sandboxes,
+        deployed,
+        "list recovery redeployed the Sandbox"
+    );
+    let mut expected = before;
+    expected.insert(
+        "BUZZ_PASEO_AGENTS".into(),
+        json!([{"id": "brokkr", "label": "Brokkr", "agent": agent().public_key().to_hex(),
+            "channel": "0b6c1f0e-2a7d-4c1e-9f3a-5d2b8e4c7a10"}])
+        .to_string(),
+    );
+    assert_eq!(env(), expected);
+}
+
+#[tokio::test]
+async fn only_owner_encrypted_enrollment_can_set_the_daemon_read_token() {
+    let request = |value: Value| Sent {
+        payload: json!({"profile":profile("dev",&owner()),"paseo":value}),
+        ..enroll(owner(), None, profile("dev", &owner()))
+    };
+    let sent = request(json!({"github_read_token":"github_pat_OwnerReadOnlyFixture"}));
+    assert!(!sent.event().content.contains("github_pat_"));
+    let Admission::Start { job, .. } = manager().admit(&sent.event(), now()) else {
+        panic!("owner request refused")
+    };
+    let Work::Enroll {
+        profile,
+        git: Some(crate::paseo::GitReadToken::Set(token)),
+        ..
+    } = job.work
+    else {
+        panic!("token was not admitted separately")
+    };
+    assert_eq!(token.as_str(), "github_pat_OwnerReadOnlyFixture");
+    assert!(profile.get("paseo").is_none());
+    for value in [
+        json!({"github_read_token":"ghp_writeToken"}),
+        json!({"github_read_token":"github_pat_with space"}),
+        json!({"github_read_token":12}),
+        json!({"github_read_token":"github_pat_valid","extra":true}),
+    ] {
+        assert_eq!(admit(&manager(), &request(value)), "invalid_profile");
+    }
+    let delegated = Sent {
+        signer: agent(),
+        auth: Some(tag(&owner(), &agent(), "")),
+        ..sent
+    };
+    assert_eq!(admit(&manager(), &delegated), "signer_mismatch");
+}
+
+#[path = "manager_tests/paseo_shared.rs"]
+mod paseo_shared;

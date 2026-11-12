@@ -16,6 +16,7 @@ mod evidence;
 mod manager;
 mod mentions;
 mod mobile_launch;
+mod paseo;
 mod plan;
 mod profile;
 mod reconcile;

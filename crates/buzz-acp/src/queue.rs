@@ -738,6 +738,26 @@ impl EventQueue {
         );
 
         let queue = self.queues.entry(scope.clone()).or_default();
+        // A transient failure must not drop an interrupted turn's
+        // instructions. Beside newer events they stay cancelled events, so
+        // the retry keeps its Interrupt or Steer framing; alone they retry as
+        // ordinary events, because stored cancelled events only flush with a
+        // newer event.
+        let mut batch = batch;
+        if !batch.cancelled_events.is_empty() {
+            if batch.events.is_empty() {
+                batch.events = std::mem::take(&mut batch.cancelled_events);
+            } else {
+                self.cancelled_batches
+                    .entry(scope.clone())
+                    .or_default()
+                    .extend(std::mem::take(&mut batch.cancelled_events));
+                self.cancel_reasons.insert(
+                    scope.clone(),
+                    batch.cancel_reason.unwrap_or(CancelReason::Steer),
+                );
+            }
+        }
         // Push to front in reverse order so original order is preserved.
         for be in batch.events.into_iter().rev() {
             queue.push_front(QueuedEvent {
@@ -3386,6 +3406,46 @@ mod tests {
         assert_eq!(batch2.events.len(), 2);
         assert_eq!(batch2.events[0].event.content, "msg1");
         assert_eq!(batch2.events[1].event.content, "msg2");
+
+        // A failed merged batch keeps the interrupted turn's instructions and
+        // its framing; when only they remain, they retry as ordinary events.
+        for newer in [vec!["msg2"], vec![]] {
+            let carried = |text: &str| BatchEvent {
+                edit: None,
+                event: make_event(text),
+                prompt_tag: "@mention".into(),
+                received_at: Instant::now(),
+            };
+            let merged = FlushBatch {
+                events: newer.iter().map(|text| carried(text)).collect(),
+                cancelled_events: vec![carried("interrupted")],
+                cancel_reason: Some(CancelReason::Interrupt),
+                ..batch2.clone()
+            };
+            queue.requeue(merged);
+            queue.mark_complete(ch);
+            queue.retry_after.remove(&conv(ch));
+            let retried = queue.flush_next().expect("merged batch is retried");
+            let contents: Vec<_> = retried
+                .events
+                .iter()
+                .map(|event| event.event.content.as_str())
+                .collect();
+            let cancelled: Vec<_> = retried
+                .cancelled_events
+                .iter()
+                .map(|event| event.event.content.as_str())
+                .collect();
+            if newer.is_empty() {
+                assert_eq!(contents, ["interrupted"]);
+                assert!(cancelled.is_empty());
+                assert_eq!(retried.cancel_reason, None);
+            } else {
+                assert_eq!(contents, newer);
+                assert_eq!(cancelled, ["interrupted"]);
+                assert_eq!(retried.cancel_reason, Some(CancelReason::Interrupt));
+            }
+        }
     }
 
     // ── Retry-throttled work must block idle-pool-sleep teardown ────────────

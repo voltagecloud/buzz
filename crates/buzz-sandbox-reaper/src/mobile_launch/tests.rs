@@ -83,6 +83,61 @@ fn rejects_forged_wrong_owner_unaddressed_ambiguous_and_future_triggers() {
     assert!(Start::admit(value, owner().public_key(), event.created_at.as_secs() - 61).is_err());
 }
 
+/// A delegated start binds exactly like the owner's mention, but only for the
+/// live gateway's own signature, never for an expired delegation, and never
+/// with the gateway or the owner addressed as the agent.
+/// Mutations: drop the `is_live_at` check → "expired" admits; check the
+/// owner instead of the signer → "gateway" refuses and "owner signed" admits.
+#[test]
+fn delegated_start_requires_the_live_gateway_signature() {
+    let gateway = Keys::parse(&"44".repeat(32)).unwrap();
+    let at = 1_800_000_000;
+    let head = |created_at: u64, expires_at: u64| {
+        buzz_sdk::gateway::Delegation::grant(gateway.public_key(), expires_at, created_at)
+            .unwrap()
+            .sign_with_keys(&owner())
+            .unwrap()
+    };
+    let live = buzz_sdk::gateway::live(
+        &head(at - 10, at + 3_600),
+        owner().public_key(),
+        gateway.public_key(),
+        at,
+    )
+    .unwrap();
+    let signed = |signer: &Keys, agent_key: nostr::PublicKey| {
+        let event = EventBuilder::new(Kind::Custom(9), "@agent investigate this")
+            .tags([
+                Tag::parse(["h", CHANNEL]).unwrap(),
+                Tag::public_key(agent_key),
+            ])
+            .custom_created_at(Timestamp::from(at))
+            .sign_with_keys(signer)
+            .unwrap();
+        json!({"agent_pubkey": agent_key, "relay_url": RELAY, "trigger": event})
+    };
+    let started = Start::delegated(signed(&gateway, agent().public_key()), &live, at).unwrap();
+    assert_eq!(started.owner, owner().public_key());
+    assert_eq!(started.agent(), agent().public_key());
+    assert_eq!(started.scope["channel_id"], CHANNEL);
+    assert!(
+        Start::delegated(signed(&owner(), agent().public_key()), &live, at).is_err(),
+        "owner signed"
+    );
+    assert!(
+        Start::delegated(signed(&Keys::generate(), agent().public_key()), &live, at).is_err(),
+        "stranger signed"
+    );
+    assert!(
+        Start::delegated(signed(&gateway, gateway.public_key()), &live, at).is_err(),
+        "gateway addressed as the agent"
+    );
+    assert!(
+        Start::delegated(signed(&gateway, agent().public_key()), &live, at + 3_600).is_err(),
+        "expired"
+    );
+}
+
 #[tokio::test]
 async fn durable_registration_survives_manager_restart_and_rebinds_each_thread() {
     let state: sandbox_fake::Shared = Arc::new(Mutex::new(Default::default()));
@@ -340,4 +395,114 @@ fn invalid_desktop_registration_has_a_deploy_specific_refusal_without_url_secret
     };
     assert_eq!(error["code"], "invalid_launch_registration");
     assert!(!error.to_string().contains("private"));
+}
+
+/// The Paseo channel annotation follows the latest channel-thread deploy; a
+/// direct-message deploy keeps the saved one, and the payload never carries
+/// it, so a manager without the annotation still reads the registration.
+#[tokio::test]
+async fn registrations_keep_the_latest_channel_thread_for_paseo() {
+    let state: sandbox_fake::Shared = Arc::new(Mutex::new(Default::default()));
+    let name = Registration::name(owner().public_key(), agent().public_key(), RELAY);
+    let save = |config: Value| {
+        let state = state.clone();
+        async move {
+            Registration::new(owner().public_key(), agent().public_key(), launch())
+                .unwrap()
+                .in_channel(&config)
+                .save(sandbox_fake::client(&state), NAMESPACE)
+                .await
+                .unwrap();
+        }
+    };
+    let annotation = || {
+        state.lock().unwrap().secrets[&name]["metadata"]["annotations"][CHANNEL_ANNOTATION].clone()
+    };
+    let other = "1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f";
+    save(json!({"sandbox": {"channel_id": CHANNEL, "thread_root": "b".repeat(64)}})).await;
+    assert_eq!(annotation(), CHANNEL);
+    save(json!({"sandbox": {"dm_channel_id": other}})).await;
+    assert_eq!(annotation(), CHANNEL);
+    save(json!({"sandbox": {"channel_id": other.to_uppercase(), "thread_root": "b".repeat(64)}}))
+        .await;
+    assert_eq!(annotation(), CHANNEL);
+    save(json!({"sandbox": {"channel_id": other, "thread_root": "b".repeat(64)}})).await;
+    assert_eq!(annotation(), other);
+    let data = state.lock().unwrap().secrets[&name]["data"][DATA_KEY].clone();
+    let text = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        data.as_str().unwrap(),
+    )
+    .unwrap();
+    assert!(!String::from_utf8(text).unwrap().contains("channel"));
+}
+
+/// A workflow launch revalidates the current relay's proof at the final Start
+/// boundary. Raw owner tags, a different target, expiration and signature
+/// tampering cannot turn into an owner-scoped launch.
+#[test]
+fn gateway_workflow_start_revalidates_the_owner_proof() {
+    let gateway = Keys::parse(&"44".repeat(32)).unwrap();
+    let relay = Keys::parse(&"11".repeat(32)).unwrap();
+    let at = 1_800_000_000;
+    let head = buzz_sdk::gateway::Delegation::grant(gateway.public_key(), at + 60, at - 10)
+        .unwrap()
+        .sign_with_keys(&owner())
+        .unwrap();
+    let delegation =
+        buzz_sdk::gateway::live(&head, owner().public_key(), gateway.public_key(), at).unwrap();
+    let request = super::GatewayRequest {
+        delegation,
+        workflow_relay: Some(relay.public_key()),
+    };
+    let payload = |signer: &Keys, mentioned: nostr::PublicKey| {
+        let event = EventBuilder::new(Kind::Custom(9), "@agent workflow")
+            .tags([
+                Tag::parse(["h", CHANNEL]).unwrap(),
+                Tag::public_key(agent().public_key()),
+                Tag::parse(["buzz:workflow", "true"]).unwrap(),
+                Tag::parse([buzz_sdk::workflow::SCHEDULED_LITERAL_TAG, "literal-v1"]).unwrap(),
+                Tag::parse(["buzz:workflow-owner", &gateway.public_key().to_hex()]).unwrap(),
+                Tag::parse(["buzz:workflow-mention", &mentioned.to_hex()]).unwrap(),
+            ])
+            .custom_created_at(Timestamp::from(at))
+            .sign_with_keys(signer)
+            .unwrap();
+        json!({"agent_pubkey":agent().public_key(),"relay_url":RELAY,"trigger":event})
+    };
+    let valid = payload(&relay, agent().public_key());
+    let mut unproven = valid.clone();
+    let original: nostr::Event = serde_json::from_value(unproven["trigger"].clone()).unwrap();
+    unproven["trigger"] = serde_json::to_value(
+        EventBuilder::new(original.kind, original.content.clone())
+            .tags(
+                original
+                    .tags
+                    .iter()
+                    .filter(|tag| {
+                        tag.as_slice().first().map(String::as_str)
+                            != Some(buzz_sdk::workflow::SCHEDULED_LITERAL_TAG)
+                    })
+                    .cloned(),
+            )
+            .custom_created_at(original.created_at)
+            .sign_with_keys(&relay)
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(Start::gateway(unproven, &request, at).is_err());
+    let start = Start::gateway(valid.clone(), &request, at).unwrap();
+    assert_eq!(start.owner, owner().public_key());
+    assert_eq!(start.scope["channel_id"], CHANNEL);
+    assert!(Start::gateway(
+        payload(&Keys::generate(), agent().public_key()),
+        &request,
+        at
+    )
+    .is_err());
+    assert!(Start::gateway(payload(&relay, gateway.public_key()), &request, at).is_err());
+    assert!(Start::gateway(valid.clone(), &request, at + 60).is_err());
+    let mut tampered = valid;
+    tampered["trigger"]["content"] = json!("forged");
+    assert!(Start::gateway(tampered, &request, at).is_err());
 }

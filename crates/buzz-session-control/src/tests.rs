@@ -228,6 +228,28 @@ fn serialized_events_reveal_no_secret_and_no_payload_field() {
     assert_eq!(tag_names(&reply), ["p", "e", "expiration"]);
 }
 
+/// An `enroll` or `profile` reply may carry the owner's Paseo pairing: the
+/// password and offer URL stay inside the encrypted envelope, and the
+/// optional field opens unchanged next to the fields clients already read.
+#[test]
+fn paseo_pairing_replies_are_opaque_and_open_intact() {
+    const PASSWORD: &str = "paseo-fixture-password-do-not-leak-0003";
+    const OFFER: &str = "https://app.paseo.sh/#offer=eyJ2IjoyfQ";
+    let request = request_event(&secret_request());
+    let done = Reply::done(
+        "enroll-1",
+        json!({"ok": true, "version_id": "v-1", "profile": {"developer": "dev"},
+            "paseo": {"password": PASSWORD, "server_id": "srv_AAECAwQFBgcI", "offer_url": OFFER}}),
+    );
+    let event = reply_event(&request.id, &done);
+    assert_opaque(&event, &[PASSWORD, OFFER, "srv_AAECAwQFBgcI", "paseo"]);
+    let opened = open_reply(&event, &agent(), &manager().public_key(), &request.id).unwrap();
+    assert_eq!(opened, done);
+    let response = opened.response.unwrap();
+    assert_eq!(response["version_id"], "v-1");
+    assert_eq!(response["paseo"]["password"], PASSWORD);
+}
+
 /// Confidentiality rule 4c: a refusal is as opaque as any other reply.
 #[test]
 fn refusal_replies_are_encrypted() {

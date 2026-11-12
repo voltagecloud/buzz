@@ -9,6 +9,16 @@ use nostr::prelude::{Event, EventId, PublicKey};
 use nostr_wire::JsonUtil as _;
 use serde_json::{Value, json};
 
+/// Additional credentials sent only in the owner-encrypted enrollment envelope.
+/// These values are separate from the Sandbox profile and have no Debug output.
+#[derive(Default)]
+pub struct EnrollmentSecrets {
+    /// Optional dedicated ChatGPT login; null disconnects it.
+    pub codex_login: Option<Value>,
+    /// Selected-repository read-only Git token for the daemon's narrow Secret.
+    pub paseo_github_read_token: Option<String>,
+}
+
 impl Identity {
     /// The owner's signed `enroll` request carrying `profile` to `manager`.
     /// Its content is NIP-44 ciphertext to the manager; only `p` and
@@ -33,9 +43,34 @@ impl Identity {
         login: Option<Value>,
         created_at: u64,
     ) -> Result<Event, WireError> {
+        self.enroll_request_with_secrets(
+            manager,
+            request_id,
+            profile,
+            EnrollmentSecrets {
+                codex_login: login,
+                ..Default::default()
+            },
+            created_at,
+        )
+    }
+
+    /// Enroll with optional manager-only and daemon-only credentials.
+    /// Additional credentials never enter the Sandbox profile or clear-text tags.
+    pub fn enroll_request_with_secrets(
+        &self,
+        manager: &PublicKey,
+        request_id: &str,
+        profile: Value,
+        secrets: EnrollmentSecrets,
+        created_at: u64,
+    ) -> Result<Event, WireError> {
         let mut payload = json!({ "profile": profile });
-        if let Some(login) = login {
+        if let Some(login) = secrets.codex_login {
             payload["codex_login"] = login;
+        }
+        if let Some(token) = secrets.paseo_github_read_token {
+            payload["paseo"] = json!({ "github_read_token": token });
         }
         self.owner_request(
             manager,
@@ -166,6 +201,42 @@ mod tests {
         assert!(!serialized.contains("codex_login"));
         let opened = control::open_request(&wire(&event), &manager_keys).unwrap();
         assert_eq!(opened.request.payload["codex_login"], login);
+        let stranger = Keys::parse(&"09".repeat(32)).unwrap();
+        assert!(control::open_request(&wire(&event), &stranger).is_err());
+    }
+
+    #[test]
+    fn daemon_git_token_is_encrypted_outside_the_sandbox_profile() {
+        let (owner, manager_keys) = (Identity::ephemeral(), manager());
+        let profile = json!({"owner_pubkey":owner.pubkey_hex()});
+        let token = "github_pat_selected_repo_fixture";
+        let event = owner
+            .enroll_request_with_secrets(
+                &manager_key(&manager_keys),
+                "paseo-token",
+                profile.clone(),
+                EnrollmentSecrets {
+                    codex_login: Some(json!({"tokens":{"refresh_token":"login-fixture"}})),
+                    paseo_github_read_token: Some(token.into()),
+                },
+                1_700_000_000,
+            )
+            .unwrap();
+        assert_eq!(event.pubkey, owner.public_key());
+        assert!(!event.as_json().contains(token));
+        assert!(!event.as_json().contains("github_read_token"));
+        let opened = control::open_request(&wire(&event), &manager_keys).unwrap();
+        assert_eq!(opened.auth_tag, None);
+        assert_eq!(opened.request.op, Op::Enroll);
+        assert_eq!(opened.request.payload["profile"], profile);
+        assert_eq!(
+            opened.request.payload["paseo"],
+            json!({"github_read_token":token})
+        );
+        assert_eq!(
+            opened.request.payload["codex_login"]["tokens"]["refresh_token"],
+            "login-fixture"
+        );
         let stranger = Keys::parse(&"09".repeat(32)).unwrap();
         assert!(control::open_request(&wire(&event), &stranger).is_err());
     }
