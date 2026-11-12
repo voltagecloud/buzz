@@ -40,14 +40,16 @@ RUN case "$TARGETARCH" in \
             op_sha=198b05dcf9a0972778ce5a4e262c459979b0c837257b5da65e2fba6187734226 \
             gitleaks_sha=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb \
             depot_sha=7a469c767bd3b7e67b3174f91af9c6315fea0ced4871948ee9d41a006fb2347e \
-            sccache_sha=45f1447fbe231e3037bde351ef70677dd212216c8d62ae7ca409fecc4d6acc89 ;; \
+            sccache_sha=45f1447fbe231e3037bde351ef70677dd212216c8d62ae7ca409fecc4d6acc89 \
+            ghstack_sha=957e822cfa7e435cd84a297cd96c419b58e51e3ac58be249762c24bd9e45099b ;; \
         arm64) via=arm64 gitleaks=arm64 sccache=aarch64 \
             kubectl_sha=cc749967b62f4422260bc9c0aa7a7c55f45175ae38cb8d95767b5d2b7e04c1fd \
             via_sha=26cc174802c875424b9846a398d4b2d890b911506f7c574dee96859620caa535 \
             op_sha=7b5c361a23e738a3969cf676960f4843af4aa9aa68dbec23d18a9134da428ba3 \
             gitleaks_sha=e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080 \
             depot_sha=042d846f544919e6b5bcb328387b1963af4e298bfa441a41f36bc46663202f2b \
-            sccache_sha=2b3284d5da3b46a47dc4229e75bb7b88ac4aa99c8d754fb7d2f84997e5a4354a ;; \
+            sccache_sha=2b3284d5da3b46a47dc4229e75bb7b88ac4aa99c8d754fb7d2f84997e5a4354a \
+            ghstack_sha=803ec91eeba9b2ac38827e299a79830fe75ca7284f0c28d60e6a2704bb34ed13 ;; \
         *) echo "Unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
     esac \
     && curl -fsSL "https://github.com/tee8z/via/releases/download/v0.6.1/via-linux-$via.tar.gz" -o /tmp/via.tar.gz \
@@ -70,6 +72,11 @@ RUN case "$TARGETARCH" in \
     && curl -fsSL "https://dl.k8s.io/release/v1.35.8/bin/linux/${TARGETARCH}/kubectl" -o /usr/local/bin/kubectl \
     && echo "$kubectl_sha  /usr/local/bin/kubectl" | sha256sum -c - \
     && chmod 0755 /usr/local/bin/kubectl \
+    && mkdir -p /opt/gh-extensions/gh-stack \
+    && curl -fsSL "https://github.com/github/gh-stack/releases/download/v0.3.0/linux-${TARGETARCH}" -o /opt/gh-extensions/gh-stack/gh-stack \
+    && echo "$ghstack_sha  /opt/gh-extensions/gh-stack/gh-stack" | sha256sum -c - \
+    && chmod 0755 /opt/gh-extensions/gh-stack/gh-stack \
+    && printf 'owner: github\nname: gh-stack\nhost: github.com\ntag: v0.3.0\nispinned: true\npath: /opt/gh-extensions/gh-stack/gh-stack\n' > /opt/gh-extensions/gh-stack/manifest.yml \
     && rm /tmp/via.tar.gz /tmp/op.zip /tmp/gitleaks.tar.gz /tmp/depot.tar.gz /tmp/sccache.tar.gz
 # Browser recording and narration for the walkthrough-video skill.
 # Each Playwright version has its own browser build, so the image carries only

@@ -146,6 +146,7 @@ Developer tools and configured MCP servers remain available; the previous text-o
 ## Staging cluster diagnostics
 
 The image includes checksum-pinned `kubectl` 1.35.8 for staging Kubernetes 1.35.
+The image also carries checksum-pinned `gh-stack` v0.3.0 under `/opt/gh-extensions`; `gh` links it into its data directory on first use, so `gh stack` works in every Sandbox.
 During `buzz-agent-profile run` and `work`, the bootstrap configures staging access when projected credentials are mounted.
 Primary sessions reuse `/var/run/secrets/buzz-subagents`; workers use `/var/run/secrets/buzz-cluster`.
 The generated kubeconfig references the mounted token file and CA without copying token contents.
