@@ -564,6 +564,12 @@ impl BuzzClient {
         &self.relay_url
     }
 
+    /// The verified NIP-OA auth tag, if configured. Long-lived WebSocket
+    /// sessions present it in their NIP-42 AUTH event.
+    pub fn auth_tag(&self) -> Option<&Tag> {
+        self.auth_tag.as_ref()
+    }
+
     /// Return the owner pubkey carried by the NIP-OA auth tag, if any.
     ///
     /// The auth tag is `["auth", owner_pubkey, conditions, sig]`; the
@@ -1216,6 +1222,11 @@ impl BuzzClient {
         let bytes = std::fs::read(file_path)
             .map_err(|e| CliError::Other(format!("failed to read {file_path}: {e}")))?;
 
+        self.upload_bytes(bytes).await
+    }
+
+    /// Upload already bounded in-memory content through the existing Blossom path.
+    pub(crate) async fn upload_bytes(&self, bytes: Vec<u8>) -> Result<BlobDescriptor, CliError> {
         // 2. Detect MIME from magic bytes
         let mime = infer::get(&bytes)
             .map(|t| t.mime_type().to_string())
@@ -1404,7 +1415,7 @@ pub fn normalize_relay_url(url: &str) -> String {
 }
 
 /// Convert an HTTP(S) relay base URL back to a WebSocket URL for NIP-01 connections.
-fn to_ws_url(http_url: &str) -> String {
+pub(crate) fn to_ws_url(http_url: &str) -> String {
     http_url
         .replace("https://", "wss://")
         .replace("http://", "ws://")

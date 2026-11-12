@@ -584,6 +584,35 @@ pub async fn cmd_send_message(
     // quoting — the source of countless self-inflicted command-substitution
     // bugs for agent and human users alike.
     p.content = read_or_stdin(&p.content)?;
+    let event = prepare_message(client, &p).await?;
+    let emitted_mentions = event_mention_pubkeys(&event);
+    let resp = client.submit_event(event).await?;
+    let mut output: serde_json::Value = serde_json::from_str(&normalize_write_response(&resp))
+        .unwrap_or_else(|_| serde_json::json!({ "response": resp }));
+    if let Some(object) = output.as_object_mut() {
+        object.insert(
+            "mention_pubkeys".into(),
+            serde_json::json!(emitted_mentions),
+        );
+    }
+    println!("{output}");
+    Ok(())
+}
+
+/// Build and sign the message `cmd_send_message` would send, without
+/// submitting it or printing anything.
+///
+/// Runs the whole send pipeline: content size check, mention resolution and
+/// the channel-membership preflight, media upload, NIP-10 thread resolution
+/// for `reply_to`, and NIP-30 emoji tags, so every caller produces the same
+/// event. `p.content` is used verbatim: `-` is not read from stdin here, which
+/// keeps callers that own stdio (such as `acp-bridge`) safe. The signed
+/// event's id is known before submission, so callers can correlate relay
+/// activity that races the submit response.
+pub(crate) async fn prepare_message(
+    client: &BuzzClient,
+    p: &SendMessageParams,
+) -> Result<nostr::Event, CliError> {
     validate_content_size(&p.content)?;
     if let Some(ref r) = p.reply_to {
         validate_hex64(r)?;
@@ -709,19 +738,7 @@ pub async fn cmd_send_message(
         }
     };
 
-    let event = client.sign_event(builder)?;
-    let emitted_mentions = event_mention_pubkeys(&event);
-    let resp = client.submit_event(event).await?;
-    let mut output: serde_json::Value = serde_json::from_str(&normalize_write_response(&resp))
-        .unwrap_or_else(|_| serde_json::json!({ "response": resp }));
-    if let Some(object) = output.as_object_mut() {
-        object.insert(
-            "mention_pubkeys".into(),
-            serde_json::json!(emitted_mentions),
-        );
-    }
-    println!("{output}");
-    Ok(())
+    client.sign_event(builder)
 }
 
 pub struct SendDiffParams {

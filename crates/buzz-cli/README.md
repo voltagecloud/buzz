@@ -201,6 +201,125 @@ The table below mirrors that tree for readers who are not at a terminal.
 | | `set` | Write a memory value (use `-` for stdin) |
 | | `patch` | Apply unified diff to memory value |
 | | `rm` | Publish a tombstone to delete memory |
+| `acp-bridge` | | Drive a Buzz remote agent from an ACP client (such as Paseo) over stdio |
+
+## ACP bridge
+
+`buzz acp-bridge` is an [ACP](https://agentclientprotocol.com) agent on
+stdin/stdout that drives one existing Buzz remote agent through the relay.
+An ACP client such as [Paseo](https://paseo.sh) runs it as a provider:
+
+```bash
+export BUZZ_RELAY_URL=wss://relay.example   # wss:// only; ws:// and http(s):// are refused
+export BUZZ_PRIVATE_KEY=nsec1...             # signs prompts and cancel requests
+buzz acp-bridge --agent <agent pubkey hex|npub> --channel <channel uuid>
+```
+
+```json
+{"extends": "acp", "command": ["buzz", "acp-bridge", "--agent", "<agent pubkey>", "--channel", "<channel uuid>"]}
+```
+
+| ACP | Buzz |
+|-----|------|
+| `initialize`, `session/new` | No relay write. The session's thread is created by its first prompt. |
+| first `session/prompt` | Kind 9 thread root in `--channel` that mentions `--agent`. The mention starts the agent's sandbox. |
+| later `session/prompt` | Kind 9 NIP-10 reply in that thread, mentioning the agent. |
+| `session/update` | The agent's kind 24200 telemetry (`acp_read` updates of the turn that answers the prompt). Teammates' and other agents' thread messages appear as attributed text. The agent's kind 9 replies appear too, except a reply whose text the turn already streamed. |
+| `stopReason` | `turn_completed` for that turn. Without telemetry, the prompt ends 15 s after the agent's reply. |
+| `session/cancel` | Owner-signed `cancel_turn` observer control frame. |
+
+The harness encrypts live telemetry to the owner and currently authorized gateway
+keys. Pass `--owner <owner pubkey>` when the signer is a delegated gateway.
+The relay and harness check current delegation and channel membership. Shared
+sessions without telemetry still show thread messages. Cancel requires the
+owner or an authorized gateway. stdout carries only JSON-RPC; diagnostics go to stderr.
+
+**Relay connection.** The bridge reconnects with exponential backoff and
+jitter (1 s doubling to 60 s). The backoff resets only after a connection has
+stayed live for 30 s or delivered a subscribed event, so a relay that accepts
+each connection and then drops it is backed off too. After 5 failed
+connections in a row, running prompts fail with an error that names the relay
+problem, and new prompts fail at once until the relay is live again. The
+bridge keeps retrying. A process keeps at most 64 sessions; at the cap,
+`session/new` drops the least recently used session that has no running
+prompt.
+
+**Ended sessions.** When the sandbox manager reports that the thread's agent
+session ended, the prompt ends with that notice and two commands:
+
+- `/fresh` resends the unanswered message as a new thread root, linked to the
+  ended thread. The agent starts a new session with an empty workspace.
+- `/recover` resends it in the same thread. To keep the workspace, first
+  choose Recover on the thread in the Buzz app. The manager accepts a
+  checkpoint recovery only when the agent's own key signs it, and that key
+  stays in the Buzz app.
+
+Text after either command is sent instead of the unanswered message.
+
+### Restore Paseo sessions from the relay
+
+`acp-bridge` advertises ACP `session/list` and `session/load`. Discovery returns
+canonical signed thread roots in the configured channel whenever the agent
+is mentioned or authors a message in that thread. This includes teammates'
+threads where the agent joins later. Pages contain at most 20 sessions.
+A gateway should pass
+`--owner <owner pubkey>` for own-author attribution and opaque-handle lookup.
+This grants no additional authority.
+The relay and harness enforce gateway authorization independently.
+
+Loading replays signed kind 9 messages, attributing owner prompts, agent answers,
+and teammates. The process keeps its live channel subscription during replay and
+suppresses duplicate history echoes.
+
+Listing merges agent-authored and agent-mentioned events in relay order
+(`created_at DESC, id ASC`). The latest participation sets `updatedAt`.
+Each call scans at most 1000 discovery candidates and makes at most 64 query
+operations. Batched root reads and bounded prefix checks prevent repeated
+threads across pages. A limit can return an empty page with a progressing cursor;
+continue with that cursor. Prefix checks scan at most 1000 candidates per thread.
+Reads use writer consistency so replica lag cannot hide earlier participation.
+
+Replay refuses threads exceeding 1000 events or 4 MiB of content;
+queries time out after 30 seconds and report errors instead of empty success.
+
+Paseo retains the UUID returned by `session/new`. The first signed thread root
+carries `d=buzz-acp:<UUID>`, so that original handle resolves after a restart.
+Opaque UUID lookup scans only owner- or gateway-signed candidates; another author
+cannot shadow a saved handle by copying its alias. Canonical root IDs have no
+owner/signer author restriction.
+Discovery also accepts the thread root event ID as a session ID. Older roots
+without an alias remain discoverable by root ID; their old UUID cannot be recovered.
+History reads run in at most four background jobs, keeping cancellation and live telemetry responsive.
+Late loads are fenced; up to four MiB or 1024 overlapping live events preserve the history-to-live handoff.
+Overflow fails only the loads in progress; the bridge and other sessions keep running.
+
+Kind 24200 tool telemetry is ephemeral and cannot be replayed from stored history.
+
+Reconnects use exponential jittered backoff capped at 60 seconds. A connection
+resets the failure count after 30 healthy seconds or a subscribed live event.
+After five failures, pending prompts fail visibly while reconnects continue.
+At 64 in-memory sessions, a new or loaded session evicts the oldest idle session.
+
+
+### Images and participant names
+
+The bridge accepts up to two images per prompt, each at most 1 MiB, in PNG,
+JPEG, GIF, or WebP format. The declared MIME type must match the decoded bytes.
+The JSON-RPC frame limit is 3 MiB, including base64 data. Each image uses the
+existing authenticated Blossom upload and appears in the ordinary prompt message
+as an `imeta` tag plus an image link. The sandbox agent downloads that link with
+`buzz media get <url> --output <path>` using its injected Buzz identity. An upload
+failure fails the prompt and sends no text-only message. Preparation runs outside
+the actor, with four concurrent jobs and a 120-second total deadline; cancellation
+remains responsive. Uploaded media metadata is reused by `/recover` and `/fresh`.
+
+Other participants use their signed profile's display name or name, with an
+`(agent)` marker when the profile carries the NIP-OA agent marker. Profile lookup
+is presentation-only and grants no authority. A 128-entry cache expires after
+five minutes; lookups use at most four concurrent three-second queries and fall
+back to the eight-character key prefix on missing or unavailable profiles. Each
+replay resolves at most 128 distinct participant names; additional authors use
+the prefix. Names are limited to 64 characters and have control characters removed.
 
 ## Architecture
 
