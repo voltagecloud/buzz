@@ -10,7 +10,12 @@ use super::journal::Journal;
 use super::registry::Identity;
 use super::{Error, IO_TIMEOUT};
 use crate::manager::Manager;
-use crate::mobile_launch::Start;
+use crate::mobile_launch::{GatewayRequest, Start};
+
+struct GatewayAuthors {
+    keys: Vec<nostr::PublicKey>,
+    relay: Option<nostr::PublicKey>,
+}
 
 const PAGE: usize = 1000;
 const MAX_PAGES: usize = 16;
@@ -20,9 +25,9 @@ const MAX_ATTEMPTS: u8 = 3;
 const MAX_EVENT_BYTES: usize = 60_000;
 
 enum LaunchPermission {
-    /// Deliverable; carries the trigger signer's fresh delegation when the
-    /// signer is a live owner-delegated gateway.
-    Allowed(Option<buzz_sdk::gateway::Live>),
+    /// Deliverable; carries fresh gateway authority for the direct signer or
+    /// the owner cryptographically proven by relay workflow provenance.
+    Allowed(Option<GatewayRequest>),
     UnsupportedConversation,
     NoLongerRemote,
     GatewayNotMember,
@@ -117,13 +122,27 @@ pub(super) async fn session(
         .iter()
         .map(buzz_sdk::gateway::Live::gateway)
         .collect();
+    let relay = if gateways.is_empty() {
+        None
+    } else {
+        Some(
+            crate::shared_tasks::relay_key(&identity.relay)
+                .await
+                .map_err(|_| Error::Relay)?,
+        )
+    };
+    let gateways = GatewayAuthors {
+        keys: gateways,
+        relay,
+    };
     let mut connected_at = Timestamp::now().as_secs();
     let started = tokio::time::Instant::now();
     let mut filter =
         json!({"kinds": [9, 40002], "#h":channels, "#p": [identity.keys.public_key()]});
     if !manager.sharing_enabled() {
         let mut authors = vec![identity.owner];
-        authors.extend(gateways.iter().copied());
+        authors.extend(gateways.keys.iter().copied());
+        authors.extend(gateways.relay);
         filter["authors"] = json!(authors);
     }
     let mut live = filter.clone();
@@ -263,7 +282,7 @@ fn eligible(
     journal: &Journal,
     event: &Event,
     shared: bool,
-    gateways: Option<&[nostr::PublicKey]>,
+    gateways: Option<&GatewayAuthors>,
 ) -> bool {
     if event.created_at.as_secs() < journal.state.activated
         || serde_json::to_vec(event).map_or(true, |v| v.len() > MAX_EVENT_BYTES)
@@ -273,7 +292,15 @@ fn eligible(
     if event.pubkey == identity.owner {
         return conversation(identity, event).is_ok();
     }
-    let delegated = gateways.is_none_or(|gateways| gateways.contains(&event.pubkey));
+    let delegated = gateways.is_none_or(|gateways| {
+        gateways.keys.contains(&event.pubkey)
+            || gateways
+                .relay
+                .and_then(|relay| {
+                    buzz_sdk::workflow::gateway_owner(event, relay, identity.keys.public_key())
+                })
+                .is_some_and(|owner| gateways.keys.contains(&owner))
+    });
     if delegated && gateway_thread(identity, event).is_ok() {
         return true;
     }
@@ -536,21 +563,31 @@ async fn channel_launch_allowed(
         let delegation = if trigger.pubkey == identity.owner {
             None
         } else {
-            super::gateways::read(&mut connection, identity)
+            let relay = crate::shared_tasks::relay_key(&identity.relay).await.map_err(|_| Error::Relay)?;
+            let workflow_relay = (trigger.pubkey == relay).then_some(relay);
+            let requester = if workflow_relay.is_some() {
+                buzz_sdk::workflow::gateway_owner(trigger, relay, identity.keys.public_key())
+            } else {
+                Some(trigger.pubkey)
+            };
+            let delegation = super::gateways::read(&mut connection, identity)
                 .await?
                 .into_iter()
-                .find(|live| live.gateway() == trigger.pubkey)
+                .find(|live| Some(live.gateway()) == requester);
+            if let Some(live) = &delegation {
+                if !super::gateways::member(&mut connection, identity,
+                    channel.parse().map_err(|_| Error::Registration)?, live.gateway(), relay).await? {
+                    return Ok(LaunchPermission::GatewayNotMember);
+                }
+            }
+            delegation.map(|delegation| GatewayRequest { delegation, workflow_relay })
         };
-        if delegation.is_some() && !super::gateways::member(&mut connection, identity,
-            channel.parse().map_err(|_| Error::Registration)?, trigger.pubkey).await? {
-            return Ok(LaunchPermission::GatewayNotMember);
-        }
         send(&mut connection, json!(["REQ", "mention-trigger", {"kinds":[9,40002],"ids":[trigger.id],"#h":[channel],"limit":1}])).await?;
-        send(&mut connection, json!(["REQ", "mention-channel", {"kinds":[39000],"#d":[channel],"limit":1}])).await?;
+        send(&mut connection, json!(["REQ", "mention-channel", {"kinds":[39000],"#d":[channel],"limit":1,"consistency":"strong"}])).await?;
         // Query the current coordinate without a runtime filter: an old remote
         // record must not survive a newer local record or coordinate deletion.
         let agent = identity.keys.public_key().to_hex();
-        send(&mut connection, json!(["REQ", "mention-listing", {"kinds":[30177],"authors":[identity.owner],"#d":[agent],"limit":1}])).await?;
+        send(&mut connection, json!(["REQ", "mention-listing", {"kinds":[30177],"authors":[identity.owner],"#d":[agent],"limit":1,"consistency":"strong"}])).await?;
         let (mut message_seen, mut metadata, mut trigger_done, mut channel_done, mut listing_done, mut remote) = (false, None, false, false, false, false);
         for _ in 0..16 {
             match connection.next_event(IO_TIMEOUT).await.map_err(|_| Error::Relay)? {

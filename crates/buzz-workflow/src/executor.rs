@@ -25,6 +25,10 @@ use crate::WorkflowEngine;
 /// Data extracted from the triggering event, passed to every step.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct TriggerContext {
+    /// Stored schedule trigger captured by the scheduler or owner-authorized manual trigger.
+    /// This server field is separate from untrusted inputs; old contexts default to false.
+    #[serde(default)]
+    pub scheduled: bool,
     /// Message content (message_posted trigger).
     pub text: String,
     /// Pubkey of the event author (hex string).
@@ -633,13 +637,16 @@ pub async fn dispatch_action(
                             ));
                         }
                     };
+                    let stored_definition: WorkflowDef = serde_json::from_value(workflow.definition)
+                        .map_err(|_| WorkflowError::InvalidDefinition("SendMessage: stored definition is invalid".into()))?;
+                    let authorship = crate::action_sink::MessageAuthorship::for_step(&stored_definition, &step.id, authored_text, trigger_ctx.scheduled);
                     let event_id = engine
                         .action_sink()?
                         .send_message(
                             community_id,
                             &channel_id,
                             text,
-                            authored_text,
+                            authorship,
                             &owner_pubkey_hex,
                             reply_to,
                         )
@@ -1321,6 +1328,7 @@ mod tests {
 
     fn make_trigger() -> TriggerContext {
         TriggerContext {
+            scheduled: false,
             text: "P1 incident in production".to_owned(),
             author: "abc123def456".to_owned(),
             channel_id: "channel-uuid-here".to_owned(),

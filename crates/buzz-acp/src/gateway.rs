@@ -37,16 +37,15 @@ const LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
 #[error("gateway delegation lookup failed: {0}")]
 pub(crate) struct LookupError(String);
 
+struct Authority {
+    gateways: Vec<buzz_sdk::gateway::Live>,
+    relay: Option<PublicKey>,
+}
+
 enum Cached {
     Empty,
-    Fresh {
-        at: Instant,
-        gateways: Vec<buzz_sdk::gateway::Live>,
-    },
-    Failed {
-        at: Instant,
-        error: LookupError,
-    },
+    Fresh { at: Instant, authority: Authority },
+    Failed { at: Instant, error: LookupError },
 }
 
 /// The owner's live gateways for one agent, from the relay, with a bounded
@@ -82,6 +81,10 @@ impl GatewayAccess {
     /// The live gateways now, newest delegation first, at most
     /// [`buzz_sdk::gateway::MAX_LIVE_GATEWAYS`].
     pub(crate) async fn live(&self) -> Result<Vec<PublicKey>, LookupError> {
+        Ok(self.authority().await?.0)
+    }
+
+    async fn authority(&self) -> Result<(Vec<PublicKey>, Option<PublicKey>), LookupError> {
         let mut cached = self.cached.lock().await;
         let reuse = match &*cached {
             Cached::Fresh { at, .. } => at.elapsed() < VERDICT_TTL,
@@ -93,9 +96,9 @@ impl GatewayAccess {
             // cannot extend the authority cache beyond the documented TTL.
             let lookup_started = Instant::now();
             *cached = match tokio::time::timeout(LOOKUP_TIMEOUT, self.lookup()).await {
-                Ok(Ok(gateways)) => Cached::Fresh {
+                Ok(Ok(authority)) => Cached::Fresh {
                     at: lookup_started,
-                    gateways,
+                    authority,
                 },
                 Ok(Err(error)) => Cached::Failed {
                     at: Instant::now(),
@@ -110,11 +113,15 @@ impl GatewayAccess {
         let now = unix_now();
         match &*cached {
             // A cached delegation never outlives its own expiration.
-            Cached::Fresh { gateways, .. } => Ok(gateways
-                .iter()
-                .filter(|live| live.is_live_at(now))
-                .map(|live| live.gateway())
-                .collect()),
+            Cached::Fresh { authority, .. } => Ok((
+                authority
+                    .gateways
+                    .iter()
+                    .filter(|live| live.is_live_at(now))
+                    .map(|live| live.gateway())
+                    .collect(),
+                authority.relay,
+            )),
             Cached::Failed { error, .. } => Err(error.clone()),
             Cached::Empty => Err(LookupError("no lookup".into())),
         }
@@ -128,7 +135,33 @@ impl GatewayAccess {
         Ok(self.live().await?.contains(key))
     }
 
-    async fn lookup(&self) -> Result<Vec<buzz_sdk::gateway::Live>, LookupError> {
+    /// Admit a direct gateway prompt, or a workflow prompt whose gateway owner
+    /// is proven by the current relay's signature and explicit agent mention.
+    /// Workflow routing tags alone never confer gateway authority.
+    pub(crate) async fn prompt_author(
+        &self,
+        event: &Event,
+    ) -> Result<Option<PublicKey>, LookupError> {
+        let (gateways, relay) = self.authority().await?;
+        if gateways.contains(&event.pubkey) {
+            return Ok(Some(event.pubkey));
+        }
+        let Some(relay) = relay else {
+            return Ok(None);
+        };
+        let Some(owner) = buzz_sdk::workflow::gateway_owner(event, relay, self.agent) else {
+            return Ok(None);
+        };
+        if !gateways.contains(&owner)
+            || !buzz_sdk::sharing::task::scope(event, self.agent, unix_now())
+                .is_ok_and(|scope| scope.channel == self.channel)
+        {
+            return Ok(None);
+        }
+        Ok(Some(owner))
+    }
+
+    async fn lookup(&self) -> Result<Authority, LookupError> {
         let now = unix_now();
         let heads = self
             .query(json!({
@@ -142,7 +175,10 @@ impl GatewayAccess {
             .map(|live| live.gateway().to_hex())
             .collect();
         if candidates.is_empty() {
-            return Ok(Vec::new());
+            return Ok(Authority {
+                gateways: Vec::new(),
+                relay: None,
+            });
         }
         let profiles = self
             .query(json!({
@@ -166,22 +202,31 @@ impl GatewayAccess {
             return Err(LookupError("ambiguous channel membership".into()));
         }
         let Some(roster) = rosters.first() else {
-            return Ok(Vec::new());
+            return Ok(Authority {
+                gateways: Vec::new(),
+                relay: Some(relay),
+            });
         };
         let member = |key| buzz_sdk::gateway::channel_member(roster, relay, self.channel, key);
         if !member(self.owner) || !member(self.agent) {
-            return Ok(Vec::new());
+            return Ok(Authority {
+                gateways: Vec::new(),
+                relay: Some(relay),
+            });
         }
-        Ok(buzz_sdk::gateway::resolve(
-            self.owner,
-            &heads,
-            &profiles,
-            &[self.owner, self.agent],
-            now,
-        )
-        .into_iter()
-        .filter(|live| member(live.gateway()))
-        .collect())
+        Ok(Authority {
+            gateways: buzz_sdk::gateway::resolve(
+                self.owner,
+                &heads,
+                &profiles,
+                &[self.owner, self.agent],
+                now,
+            )
+            .into_iter()
+            .filter(|live| member(live.gateway()))
+            .collect(),
+            relay: Some(relay),
+        })
     }
 
     /// One `/query`, refusing any response that is not an array of events.

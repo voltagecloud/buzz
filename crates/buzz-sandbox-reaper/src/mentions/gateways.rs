@@ -64,10 +64,8 @@ pub(super) async fn member(
     identity: &Identity,
     channel: uuid::Uuid,
     gateway: nostr::PublicKey,
+    relay: nostr::PublicKey,
 ) -> Result<bool, Error> {
-    let relay = crate::shared_tasks::relay_key(&identity.relay)
-        .await
-        .map_err(|_| Error::Relay)?;
     let rosters = fetch(
         connection,
         "mention-gateway-channel",

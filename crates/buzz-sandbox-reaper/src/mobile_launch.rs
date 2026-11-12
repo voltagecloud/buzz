@@ -178,7 +178,35 @@ struct StartPayload {
     trigger: Event,
 }
 
+/// Fresh gateway authority, optionally carrying the relay identity needed to
+/// reverify workflow provenance. This context is never accepted from the wire.
+pub(crate) struct GatewayRequest {
+    pub(crate) delegation: buzz_sdk::gateway::Live,
+    pub(crate) workflow_relay: Option<PublicKey>,
+}
+
 impl Start {
+    /// Verify gateway authority again at the launch boundary. A workflow may
+    /// act only for its proven gateway owner, never for an arbitrary tagged key.
+    pub(crate) fn gateway(
+        payload: Value,
+        request: &GatewayRequest,
+        request_time: u64,
+    ) -> Result<Self, Value> {
+        let Some(relay) = request.workflow_relay else {
+            return Self::delegated(payload, &request.delegation, request_time);
+        };
+        let parsed: StartPayload =
+            serde_json::from_value(payload.clone()).map_err(|_| invalid())?;
+        if !request.delegation.is_live_at(request_time)
+            || parsed.agent_pubkey == request.delegation.gateway()
+            || buzz_sdk::workflow::gateway_owner(&parsed.trigger, relay, parsed.agent_pubkey)
+                != Some(request.delegation.gateway())
+        {
+            return Err(invalid());
+        }
+        Self::admit_signed(payload, request.delegation.owner(), relay, request_time)
+    }
     /// Construct a confined launch only after fresh sharing verification and
     /// atomic budget admission. This never manufactures an owner-signed event.
     pub(crate) fn shared(
