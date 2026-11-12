@@ -170,6 +170,48 @@ impl Start {
 
     /// Verify the owner's signed mention and derive its immutable thread scope.
     pub fn admit(payload: Value, owner: PublicKey, request_time: u64) -> Result<Self, Value> {
+        Self::admit_signed(payload, owner, owner, request_time)
+    }
+
+    /// Verify a live owner-delegated gateway's signed mention and derive its
+    /// immutable thread scope. The launch runs exactly as the owner's own
+    /// mention would: same namespace, registration, and identity policy. The
+    /// gateway can never address itself or the owner as the agent.
+    pub(crate) fn delegated(
+        payload: Value,
+        delegation: &buzz_sdk::gateway::Live,
+        request_time: u64,
+    ) -> Result<Self, Value> {
+        if !delegation.is_live_at(request_time) {
+            return Err(invalid());
+        }
+        Self::admit_signed(
+            payload,
+            delegation.owner(),
+            delegation.gateway(),
+            request_time,
+        )
+    }
+
+    /// The channel and thread a `signer`'s mention would bind, for replies and
+    /// durable journaling only. This confers no launch authority.
+    pub(crate) fn thread_of(
+        payload: Value,
+        owner: PublicKey,
+        signer: PublicKey,
+        request_time: u64,
+    ) -> Result<(String, String), Value> {
+        let start = Self::admit_signed(payload, owner, signer, request_time)?;
+        let (channel, root) = start.conversation();
+        Ok((channel.into(), root.into()))
+    }
+
+    fn admit_signed(
+        payload: Value,
+        owner: PublicKey,
+        signer: PublicKey,
+        request_time: u64,
+    ) -> Result<Self, Value> {
         let payload: StartPayload = serde_json::from_value(payload).map_err(|_| invalid())?;
         let event = payload.trigger;
         let tags: Vec<&[String]> = event.tags.iter().map(|tag| tag.as_slice()).collect();
@@ -182,8 +224,9 @@ impl Start {
                 && t.get(1).map(String::as_str) == Some(payload.agent_pubkey.to_hex().as_str())
         });
         if event.verify().is_err()
-            || event.pubkey != owner
+            || event.pubkey != signer
             || payload.agent_pubkey == owner
+            || payload.agent_pubkey == signer
             || !matches!(event.kind.as_u16(), 9 | 40002)
             || event.created_at.as_secs() > request_time.saturating_add(60)
             || !addressed

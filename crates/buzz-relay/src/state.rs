@@ -1547,6 +1547,17 @@ pub struct AppState {
     /// for every concurrently active agent so per-request HTTP agents hit.
     #[allow(clippy::type_complexity)]
     pub observer_owner_cache: Arc<moka::sync::Cache<(CommunityId, Vec<u8>, Vec<u8>), bool>>,
+    /// Observer-frame gateway verdicts (kind 24200 between an agent and a key
+    /// its owner delegated with kind 30181). Key: (community, agent, gateway).
+    /// A short TTL bounds revocation latency across replicas; the generation
+    /// fences a lookup that raced a delegation write on this replica.
+    #[allow(clippy::type_complexity)]
+    pub(crate) observer_gateway_cache: Arc<
+        moka::sync::Cache<(CommunityId, Vec<u8>, Vec<u8>), crate::handlers::event::GatewayVerdict>,
+    >,
+    /// Bumped after every stored gateway delegation head, so a cached verdict
+    /// computed before the write is ignored.
+    pub(crate) gateway_generation: Arc<AtomicU64>,
     /// Cache for the `author_type` metric label on the ingest path.
     /// Key: (community_id, author pubkey bytes). Value: is_agent
     /// (`users.agent_owner_pubkey IS NOT NULL`). The mapping is
@@ -1854,6 +1865,13 @@ impl AppState {
                     .time_to_live(std::time::Duration::from_secs(300))
                     .build(),
             ),
+            observer_gateway_cache: Arc::new(
+                moka::sync::Cache::builder()
+                    .max_capacity(10_000)
+                    .time_to_live(crate::handlers::event::GATEWAY_VERDICT_TTL)
+                    .build(),
+            ),
+            gateway_generation: Arc::new(AtomicU64::new(0)),
             author_type_cache: Arc::new(
                 moka::sync::Cache::builder()
                     .max_capacity(10_000)

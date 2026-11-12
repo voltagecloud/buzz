@@ -2172,6 +2172,10 @@ async fn query_member_events(
     let mut catchall_results = stream::iter(catchall_queries.into_iter().map(
         |(idx, query, read_route)| {
             let db = db.clone();
+            let state = state.clone();
+            let tenant = tenant.clone();
+            let reader = pubkey_bytes.clone();
+            let filter = filters[idx].clone();
             async move {
                 // The route was resolved from client-carried `consistency`
                 // intent in phase 1 (`resolve_read_route`). `Writer` pins the
@@ -2179,7 +2183,15 @@ async fn query_member_events(
                 // replica-eligible path. Only these two directions exist — the
                 // inverse "force replica" is deliberately unrepresentable.
                 let result = match read_route {
-                    ReadRoute::Writer => db.query_events(&query).await,
+                    ReadRoute::Writer => match crate::handlers::current_members::read(
+                        &state, &tenant, &reader, &filter,
+                    )
+                    .await
+                    {
+                        Ok(Some(events)) => Ok(events),
+                        Ok(None) => db.query_events(&query).await,
+                        Err(error) => Err(error),
+                    },
                     ReadRoute::Routed => db.query_events_routed("bridge_query", &query).await,
                 };
                 (idx, result)
@@ -10224,6 +10236,47 @@ pub(crate) mod postgres_tests {
             axum::http::StatusCode::BAD_REQUEST,
             "Probe 3 FAIL — unknown consistency value must be rejected with 400"
         );
+
+        // The WS extension must reach the same writer boundary. The parser,
+        // connection options and actual REQ history dispatcher stay real.
+        let ws = CancelFixture {
+            admin: admin.clone(),
+            writer: writer_pool.clone(),
+            replica: replica_pool.clone(),
+            search: writer_pool.clone(),
+            names: [writer_name.clone(), replica_name.clone()],
+            state: state.clone(),
+            host: host.clone(),
+            community: CommunityId::from_uuid(community),
+            channel: channel_id.to_string(),
+            root: canvas_ev.id.to_hex(),
+            reader: author.clone(),
+        };
+        rt.block_on(async {
+            for (strong, expected) in [(false, 0), (true, 1)] {
+                let mut filter = serde_json::json!({"kinds":[buzz_core::kind::KIND_CANVAS], "#h":[channel_id], "limit":10});
+                if strong { filter["consistency"] = serde_json::json!("strong"); }
+                let raw = serde_json::json!(["REQ", "strong-ws", filter]).to_string();
+                let crate::protocol::ClientMessage::Req { sub_id, filters, before_ids, writer_reads } =
+                    crate::protocol::ClientMessage::parse(&raw).unwrap() else { panic!("expected REQ"); };
+                let (conn, mut rx) = ws.ws_conn();
+                crate::handlers::req::handle_req_consistent(sub_id, filters, before_ids, writer_reads, conn.clone(), state.clone()).await;
+                let mut delivered = 0;
+                let mut eose = false;
+                while let Ok(axum::extract::ws::Message::Text(frame)) = rx.try_recv() {
+                    let value: serde_json::Value = serde_json::from_str(frame.as_str()).unwrap();
+                    match value[0].as_str() {
+                        Some("EVENT") => delivered += 1,
+                        Some("EOSE") => eose = true,
+                        _ => panic!("unexpected WS frame: {frame}"),
+                    }
+                }
+                assert!(eose, "the WS history read completed");
+                assert_eq!(delivered, expected, "WS writer pin strong={strong}");
+                crate::handlers::close::handle_close("strong-ws".into(), conn, state.clone()).await;
+            }
+        });
+        drop(ws);
 
         // --- teardown --------------------------------------------------------
         rt.block_on(async {

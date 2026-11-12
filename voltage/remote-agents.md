@@ -8,6 +8,10 @@ Every commit an agent makes is signed with a key that is on your GitHub account,
 - **Admins:** start at [Onboard a developer](#onboard-a-developer).
 - **Developers:** start at [Set up your agents](#set-up-your-agents).
 
+A Paseo daemon uses its own gateway key. Follow
+[Gateway keys](../docs/agent-gateway-key.md) to admit that key and grant access
+to your agents. The daemon never needs your main Nostr secret.
+
 ## How it works
 
 An unchanged phone app can trigger registered agents through [server mention launches](../docs/server-mention-launch.md).

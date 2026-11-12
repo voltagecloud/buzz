@@ -552,6 +552,8 @@ fn map_push_accept_error(error: super::push_lease::AcceptError) -> IngestError {
 fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static str> {
     match kind {
         buzz_core::kind::KIND_AGENT_CHANNEL_GRANT => Ok(Scope::MessagesWrite),
+        // Owner-managed global authority, like a profile or managed-agent record.
+        buzz_core::kind::KIND_AGENT_GATEWAY_DELEGATION => Ok(Scope::UsersWrite),
         KIND_PROFILE => Ok(Scope::UsersWrite),
         KIND_TEXT_NOTE | KIND_LONG_FORM | buzz_core::kind::KIND_ARTIFACT => Ok(Scope::MessagesWrite),
         KIND_CONTACT_LIST | KIND_READ_STATE | KIND_USER_STATUS | KIND_AGENT_ENGRAM
@@ -786,6 +788,8 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             | KIND_MANAGED_AGENT
             | KIND_PRIVATE_MANAGED_AGENT
             | KIND_TEAM_CATALOG
+            // Gateway delegations (30181) are owner-wide, never channel-scoped.
+            | buzz_core::kind::KIND_AGENT_GATEWAY_DELEGATION
             // NIP-34: git events use `a` tags (repo reference), not `h` tags (channel scope).
             // Parameterized replaceable kinds are keyed by (pubkey, kind, d_tag).
             | KIND_GIT_REPO_ANNOUNCEMENT
@@ -2823,6 +2827,34 @@ async fn ingest_event_inner(
         ));
     }
 
+    // Consumers verify every head themselves; ingest only refuses heads that
+    // could never be live or revoke, so a coordinate always holds a parseable
+    // head.
+    if kind_u32 == buzz_core::kind::KIND_AGENT_GATEWAY_DELEGATION {
+        let (delegation, _) = buzz_sdk::gateway::Delegation::parse(&event)
+            .map_err(|_| IngestError::Rejected("invalid: malformed gateway delegation".into()))?;
+        if delegation.enabled {
+            let policies = state
+                .db
+                .get_agent_channel_policies(
+                    tenant.community(),
+                    &[
+                        event.pubkey.to_bytes().to_vec(),
+                        delegation.gateway.to_bytes().to_vec(),
+                    ],
+                )
+                .await
+                .map_err(|error| IngestError::Internal(error.to_string()))?;
+            if policies.values().any(|(_, owner)| owner.is_some())
+                || buzz_sdk::gateway::profile_claims_agent(&event)
+            {
+                return Err(IngestError::Rejected(
+                    "restricted: agent keys cannot grant or receive gateway authority".into(),
+                ));
+            }
+        }
+    }
+
     // A verified owner must be able to revoke after removal or archive.
     // Enabling still requires explicit membership in the grant validator.
     let disabled_agent_grant = if kind_u32 == buzz_core::kind::KIND_AGENT_CHANNEL_GRANT {
@@ -3743,6 +3775,13 @@ async fn ingest_event_inner(
             accepted: true,
             message: "duplicate:".into(),
         });
+    }
+
+    // Fence observer gateway verdicts computed before this committed head.
+    if kind_u32 == buzz_core::kind::KIND_AGENT_GATEWAY_DELEGATION {
+        state
+            .gateway_generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     }
 
     // Workflow deletion, kind 5 / 9005 deletions of `e` targets, kind:9000 and

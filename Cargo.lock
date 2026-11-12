@@ -1459,6 +1459,7 @@ dependencies = [
  "anyhow",
  "axum",
  "base64 0.22.1",
+ "buzz-backend-kubernetes",
  "buzz-core",
  "buzz-persona",
  "buzz-sdk",

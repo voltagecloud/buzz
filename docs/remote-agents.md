@@ -2,6 +2,10 @@
 
 `draft`
 
+Owner-delegated gateway keys let an orchestrator drive the owner’s agents without
+holding the owner key. See [Gateway keys](agent-gateway-key.md) for the scoped
+grant, membership prerequisites, revocation, and rollout.
+
 ## Abstract
 
 This document specifies the protocol by which Buzz Desktop delegates the

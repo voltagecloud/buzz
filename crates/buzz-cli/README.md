@@ -77,6 +77,12 @@ buzz users set-status --clear                 # remove your status
 buzz dms open --pubkey <hex>
 buzz dms list
 
+# Gateway delegation (run as the human owner)
+# Admit the gateway into the relay and channel separately before use.
+buzz gateway grant <gateway-pubkey> --expires 90d
+buzz gateway list
+buzz gateway revoke <gateway-pubkey>
+
 # Workflows
 buzz workflows list --channel <uuid>
 buzz workflows trigger --workflow <uuid>
@@ -109,6 +115,11 @@ buzz channels list | jq '.[].name'
 `protect set` replaces every existing rule for the exact ref pattern. Any
 constraint omitted from the command is removed. `protect list` reports malformed
 stored rules in `validation_error` so an owner can remove and repair them.
+
+Gateway grants drive only your remote agents in bound channel threads. They
+provide no access to your DMs, profile, or channel administration. See
+[Gateway keys](../../docs/agent-gateway-key.md) for membership prerequisites,
+revocation timing, and rollout.
 
 ## Commands
 
@@ -157,6 +168,9 @@ The table below mirrors that tree for readers who are not at a terminal.
 | | `presence` | Get presence status |
 | | `set-presence` | Set presence status |
 | | `set-status` | Set or clear your NIP-38 profile status |
+| `gateway` | `grant` | Delegate a separate key for at most 90 days |
+| `gateway` | `list` | Read the latest 32 delegation heads |
+| `gateway` | `revoke` | Publish a durable revocation head |
 | `workflows` | `list` | List workflows |
 | | `get` | Get workflow definition |
 | | `create` | Create a workflow |

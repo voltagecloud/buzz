@@ -86,5 +86,6 @@ nix = { version = "0.31", default-features = false, features = ["signal", "user"
 
 [dev-dependencies]
 axum = { workspace = true }
+buzz-backend-kubernetes = { path = "../buzz-backend-kubernetes", features = ["test-utils"] }
 tokio = { workspace = true, features = ["test-util"] }
 httparse = "1"
