@@ -576,6 +576,9 @@ pub enum MessagesCmd {
         /// Message text — supports @mentions and markdown. Use '-' to read from stdin.
         #[arg(long)]
         content: String,
+        /// Validated Paseo transcript correlation; not a general tag surface.
+        #[arg(long, hide = true)]
+        paseo_transcript: Option<String>,
         /// Nostr event kind (default: channel default)
         #[arg(long)]
         kind: Option<u16>,
