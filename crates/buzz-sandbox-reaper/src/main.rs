@@ -6,6 +6,13 @@
 //! once their 30-day checkpoint retention has passed. It never starts or
 //! resumes a session; only an explicit recovery does that.
 //!
+//! An explicit recovery is a desktop recovery action, or, in `serve`, a
+//! mention in the ended thread signed by the agent's owner or by a gateway the
+//! owner has live-delegated (kind 30181), for a session that ended before the
+//! mention. It restores the tombstone's checkpoint and is replayed into the
+//! recovered session.
+//! Shared-task mentions and scheduled workflow prompts never recover a session.
+//!
 //! `serve` is the session manager (§Relay transport): it runs developers'
 //! provider requests, received over the Buzz relay, in their namespaces.
 

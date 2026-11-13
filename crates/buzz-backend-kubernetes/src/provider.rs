@@ -5,6 +5,8 @@
 use crate::wire::{self, Request, Response};
 use crate::{client, cluster, config, env, identity, naming, reconcile, sandbox};
 
+pub use crate::sandbox::RECOVERY_BUDGET_SECS;
+
 /// The provider a shared-compute agent resolves to. Refused here as the
 /// spec's backstop: a mesh agent runs on the relay's compute, so deploying it
 /// as a pod would create a second, contending consumer of the same agent

@@ -1,6 +1,7 @@
 //! A black-box client sends only ordinary signed chat events. A real WebSocket
 //! drives the production supervisor/worker and provider against a fake cluster.
 
+mod ended;
 mod gateway;
 mod live_relay;
 mod relay;
@@ -419,106 +420,6 @@ async fn registration_binds_owner_relay_key_and_attestation() {
         *data = serde_json::to_vec(&value).unwrap();
         assert!(Identity::read(corrupt, NS, keys("33").public_key(), &relay.url).is_err());
     }
-    relay.stop().await;
-}
-
-#[tokio::test]
-async fn ended_session_posts_an_ordinary_reply_without_recovering_the_sandbox() {
-    let relay = relay::Relay::start().await;
-    let cluster = sandbox_fake::Shared::default();
-    let identity = register(&cluster, &relay.url).await;
-    let manager = manager(&cluster);
-    let event = message("@agent original task", None);
-    assert_eq!(
-        manager
-            .start_mention(
-                identity.owner,
-                identity.keys.public_key(),
-                &identity.relay,
-                &event,
-                None,
-            )
-            .await["ok"],
-        true
-    );
-    {
-        let mut state = cluster.lock().unwrap();
-        for sandbox in state.sandboxes.values_mut() {
-            sandbox["metadata"]["annotations"][buzz_backend_kubernetes::lifecycle::LIFECYCLE] =
-                json!("ended");
-        }
-        state.pods.clear();
-    }
-    let mut journal = Journal::acquire(
-        sandbox_fake::client(&cluster),
-        &identity,
-        "test",
-        Timestamp::now().as_secs(),
-    )
-    .await
-    .unwrap();
-    let retry = message("@agent continue ended session", Some(&event.id.to_hex()));
-    relay.events.lock().unwrap().push(retry.clone());
-    journal.enqueue(retry.clone()).await.unwrap();
-    relay
-        .lose_next_ack
-        .store(true, std::sync::atomic::Ordering::SeqCst);
-    let first_identity = register(&cluster, &relay.url).await;
-    let first_manager = Arc::clone(&manager);
-    let previous = relay.count("mentions-history");
-    let first = tokio::spawn(async move {
-        worker::session(
-            &first_manager,
-            &first_identity,
-            &mut journal,
-            &Semaphore::new(1),
-        )
-        .await
-    });
-    relay.wait_after("mentions-history", previous).await;
-    assert!(completed(&cluster, &retry));
-    first.abort();
-    let _ = first.await;
-    let mut journal = Journal::acquire(
-        sandbox_fake::client(&cluster),
-        &identity,
-        "test",
-        Timestamp::now().as_secs(),
-    )
-    .await
-    .unwrap();
-    assert!(journal.state.pending.is_none());
-    assert_eq!(journal.state.outbox.len(), 1);
-    let notice_id = journal.state.outbox[0].event.id;
-    let task = tokio::spawn(async move {
-        worker::session(&manager, &identity, &mut journal, &Semaphore::new(1)).await
-    });
-    wait_for(|| {
-        inbox(&cluster)["outbox"]
-            .as_array()
-            .is_some_and(|v| v.is_empty())
-    })
-    .await;
-    let notices: Vec<_> = relay
-        .events
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|e| e.pubkey == keys("22").public_key())
-        .cloned()
-        .collect();
-    assert_eq!(notices.len(), 1);
-    assert_eq!(notices[0].id, notice_id);
-    assert!(notices[0].content.contains("Recover it from desktop"));
-    assert_eq!(notices[0].kind.as_u16(), 9);
-    assert!(notices[0]
-        .tags
-        .iter()
-        .any(|tag| tag.as_slice() == ["e", &event.id.to_hex(), "", "root"]));
-    assert_eq!(cluster.lock().unwrap().sandboxes.len(), 1);
-    assert!(cluster.lock().unwrap().pods.is_empty());
-    task.abort();
-    let _ = task.await;
     relay.stop().await;
 }
 

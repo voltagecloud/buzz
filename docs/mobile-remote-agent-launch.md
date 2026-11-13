@@ -27,7 +27,9 @@ sequenceDiagram
 The manager derives the channel, thread root, and replay floor from the original signed message.
 The harness replays the triggering message after startup.
 An existing session keeps its current workspace and configuration.
-An ended session requires explicit recovery from desktop, or a new thread.
+An ended session requires explicit recovery, or a new thread.
+With server mention launch enabled, the owner's mention itself requests checkpoint recovery ([server mention launch](server-mention-launch.md)).
+The phone's own `start` request never recovers; it can report `session_ended` while the mention launcher restores the session.
 
 The phone shows startup progress above the composer.
 A startup failure leaves the accepted message in place and offers **Retry** and **Dismiss**.

@@ -35,7 +35,8 @@ sequenceDiagram
 | Observer telemetry | Agent ownership verified by relay; separate NIP-44 copy for each live gateway |
 | Owner DMs, profile and channel administration | No delegated authority |
 | Model changes and owner announcements | Owner key required |
-| Explicit checkpoint/fresh recovery requests | Not delegated; existing agent-signed deployment remains required |
+| Checkpoint recovery of an ended thread | Mention launch only: the gateway's own mention in that thread restores the last checkpoint of a session that ended before it; its scheduled workflow prompts do not ([server mention launch](server-mention-launch.md)) |
+| Fresh recovery and direct recovery deploys | Not delegated; existing agent-signed deployment remains required |
 
 A gateway remains a separate ordinary relay member. A grant provides neither
 relay membership nor channel membership. It does not impersonate the owner.

@@ -350,6 +350,7 @@ async fn live_controller_reuses_scopes_and_refuses_lost_workspaces() {
     let fresh = Options::Thread {
         recovery: Some(Recovery {
             mode: RecoveryMode::Fresh,
+            ended_before: None,
         }),
         channel_id: second_scope.channel_id().to_owned(),
         thread_root: second_scope.scope_key().into_owned(),
@@ -399,6 +400,7 @@ async fn live_controller_reuses_scopes_and_refuses_lost_workspaces() {
     let from_checkpoint = Options::Thread {
         recovery: Some(Recovery {
             mode: RecoveryMode::Checkpoint,
+            ended_before: None,
         }),
         channel_id: second_scope.channel_id().to_owned(),
         thread_root: second_scope.scope_key().into_owned(),
@@ -468,7 +470,10 @@ fn fake_scope_with(recovery: Option<RecoveryMode>) -> Options {
     Options::Thread {
         channel_id: "0b6c1f3e-5a7d-4c2b-9e8f-1a2b3c4d5e6f".into(),
         thread_root: "d".repeat(64),
-        recovery: recovery.map(|mode| Recovery { mode }),
+        recovery: recovery.map(|mode| Recovery {
+            mode,
+            ended_before: None,
+        }),
     }
 }
 
@@ -901,6 +906,86 @@ async fn recovery_is_refused_on_a_live_session_and_without_a_tombstone_checkpoin
         LIFECYCLE_ENDED,
         "a refused recovery must leave the tombstone in place"
     );
+}
+
+/// A mention's recovery (`ended_before`) restores only a tombstone that ended
+/// strictly earlier, also from the journaled copy an interrupted recovery
+/// keeps. A desktop recovery sets no bound. Mutation: drop the `ended_before`
+/// check in `recover`, and the refused rows recover.
+#[tokio::test(start_paused = true)]
+async fn a_mention_recovers_only_a_session_that_ended_before_it() {
+    let mention: i64 = 1_800_000_000;
+    let end = |ended: &Ended, secs: i64| {
+        let at = DateTime::from_timestamp(secs, 0)
+            .unwrap()
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let mut state = ended.state.lock().unwrap();
+        let sandbox = state.sandboxes.get_mut(&ended.name).unwrap();
+        sandbox["metadata"]["annotations"][ENDED_AT] = at.into();
+    };
+    let recover = |ended: &Ended, ended_before: Option<i64>| {
+        let mut scope = fake_scope_with(Some(RecoveryMode::Checkpoint));
+        if let Options::Thread {
+            recovery: Some(recovery),
+            ..
+        } = &mut scope
+        {
+            recovery.ended_before = ended_before;
+        }
+        let state = ended.state.clone();
+        let (identity, cfg) = (ended.identity.clone(), ended.cfg.clone());
+        async move { deploy_to(&state, &identity, &cfg, &scope).await }
+    };
+    for (ended_at, ended_before, recovers) in [
+        (None, Some(mention), false),
+        (Some(mention), Some(mention), false),
+        (Some(mention + 10), Some(mention), false),
+        (Some(mention - 1), Some(mention), true),
+        (Some(mention + 10), None, true),
+    ] {
+        let ended = Ended::new().await;
+        if let Some(secs) = ended_at {
+            end(&ended, secs);
+        }
+        let tombstone = ended.sandbox();
+        let result = recover(&ended, ended_before).await;
+        let row = format!("{ended_at:?} before {ended_before:?}");
+        if recovers {
+            result.expect(&row);
+            let annotations = &ended.sandbox()["metadata"]["annotations"];
+            assert_eq!(
+                annotations[RECOVERED_FROM],
+                ended.previous.as_str(),
+                "{row}"
+            );
+            assert_eq!(annotations[RESTORE_CHECKPOINT], ended.key.as_str(), "{row}");
+        } else {
+            let error = result.unwrap_err();
+            assert_eq!(error.code, Some(ErrorCode::SessionEnded), "{row}: {error}");
+            assert_eq!(ended.sandbox(), tombstone, "{row}");
+            assert!(
+                ended.journal().is_none(),
+                "{row}: a refused recovery must not start"
+            );
+        }
+    }
+
+    // A desktop recovery deleted the tombstone and stopped. A mention that
+    // predates the end does not finish it; a later one does.
+    let ended = Ended::new().await;
+    end(&ended, mention + 10);
+    ended.state.lock().unwrap().fail_sandbox_creates = 1;
+    recover(&ended, None).await.unwrap_err();
+    assert!(ended.journal().is_some());
+    let refused = recover(&ended, Some(mention)).await.unwrap_err();
+    assert_eq!(refused.code, Some(ErrorCode::SessionEnded), "{refused}");
+    assert!(
+        ended.journal().is_some(),
+        "the journal stays for a later recovery"
+    );
+    recover(&ended, Some(mention + 11)).await.unwrap();
+    let annotations = &ended.sandbox()["metadata"]["annotations"];
+    assert_eq!(annotations[RESTORE_CHECKPOINT], ended.key.as_str());
 }
 
 #[tokio::test(start_paused = true)]

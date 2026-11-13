@@ -4,7 +4,10 @@
 //! Lifecycle (`docs/remote-agents.md` §Sandbox lifecycle): a session that ended
 //! — stopped, completed, replaced, lost, or abandoned while binding — is
 //! tombstoned by `buzz-sandbox-reaper` and is only ever resumed by an explicit
-//! `recovery` deploy, never by an ordinary one.
+//! `recovery` deploy, never by an ordinary one. A desktop sends that recovery
+//! on a user action; the session manager sends it for a mention in the ended
+//! thread signed by the owner or a live owner-delegated gateway, limited to a
+//! tombstone that ended before that mention by [`Recovery::ended_before`].
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -12,8 +15,9 @@ use std::time::Duration;
 use crate::lifecycle::{
     annotation, is_checkpoint_key, owned_pod, sandbox_resource, EndedReason, Lifecycle,
     OperatingMode, BIND_TIMEOUT_SECS, CHANNEL, CHECKPOINT, CHECKPOINTING, CHECKPOINTING_DISABLED,
-    CHECKPOINTING_ENABLED, ENDED_REASON, GENERATION, INITIAL_POD, LIFECYCLE, LIFECYCLE_ENDING,
-    OWNER, RECOVERED_FROM, RESTORE_CHECKPOINT, SANDBOX_BINDING_VERSION, SESSION, THREAD,
+    CHECKPOINTING_ENABLED, ENDED_AT, ENDED_REASON, GENERATION, INITIAL_POD, LIFECYCLE,
+    LIFECYCLE_ENDING, OWNER, RECOVERED_FROM, RESTORE_CHECKPOINT, SANDBOX_BINDING_VERSION, SESSION,
+    THREAD,
 };
 use chrono::{DateTime, Utc};
 use k8s_openapi::api::core::v1::{EnvVar, EnvVarSource, ObjectFieldSelector, Pod, Secret};
@@ -50,12 +54,14 @@ const CLOCK_SKEW_SECS: i64 = 60;
 const RECOVERY_DELETE_WAIT_SECS: u64 = crate::config::TERMINATION_GRACE_SECONDS as u64;
 /// Allowance for apiserver round trips outside the timed waits.
 const DEADLINE_MARGIN_SECS: u64 = 60;
-const _: () = assert!(
-    RECOVERY_DELETE_WAIT_SECS + 2 * DEPLOY_DEADLINE_SECS + DEADLINE_MARGIN_SECS
-        <= crate::gc::OPERATION_DEADLINE_SECS as u64
-);
+/// Longest one recovery deploy can take: the delete wait, then the binding and
+/// startup waits.
+pub const RECOVERY_BUDGET_SECS: u64 =
+    RECOVERY_DELETE_WAIT_SECS + 2 * DEPLOY_DEADLINE_SECS + DEADLINE_MARGIN_SECS;
+const _: () = assert!(RECOVERY_BUDGET_SECS <= crate::gc::OPERATION_DEADLINE_SECS as u64);
 
-/// How an ended session is resumed. Sent only on explicit user action.
+/// How an ended session is resumed. Sent only on explicit user action: a
+/// desktop recovery, or an owner or delegated-gateway mention in the thread.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RecoveryMode {
@@ -69,6 +75,12 @@ pub enum RecoveryMode {
 #[serde(deny_unknown_fields)]
 pub struct Recovery {
     pub mode: RecoveryMode,
+    /// Unix seconds, set by the session manager for a mention. Recover only a
+    /// tombstone whose [`ENDED_AT`] is earlier. A session that ended after
+    /// the mention, such as one the user stopped or one this mention already
+    /// recovered, is refused as `session_ended`.
+    #[serde(default)]
+    pub ended_before: Option<i64>,
 }
 
 /// Immutable workspace scope plus an optional explicit recovery request.
@@ -449,6 +461,7 @@ pub async fn deploy(
             None,
             Some(Recovery {
                 mode: RecoveryMode::Checkpoint,
+                ..
             }),
         ) => {
             return Err(ProviderError::refused(
@@ -657,6 +670,18 @@ async fn recover(
                 ErrorCode::SessionActive,
                 "recovery requires an ended session; this Sandbox is still active, so end it first",
             )
+        }
+    }
+    if let Some(before) = recovery.ended_before {
+        // A tombstone without a readable end time is not provably older.
+        let ended = annotation(&tombstone, ENDED_AT)
+            .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
+            .map(|at| at.timestamp());
+        if !ended.is_some_and(|ended| ended < before) {
+            return refused(
+                ErrorCode::SessionEnded,
+                "this session ended after the mention that requested its recovery; send a new mention to recover it",
+            );
         }
     }
     let previous = annotation(&tombstone, GENERATION)

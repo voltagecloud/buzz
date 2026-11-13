@@ -478,7 +478,9 @@ pub fn config_schema() -> serde_json::Value {
                                 "additionalProperties": false,
                                 "required": ["mode"],
                                 "properties": {
-                                    "mode": {"type": "string", "enum": ["checkpoint", "fresh"]}
+                                    "mode": {"type": "string", "enum": ["checkpoint", "fresh"]},
+                                    "ended_before": {"type": "integer", "minimum": 0,
+                                        "description": "Set by the session manager for a mention: recover only a session that ended before this Unix time."}
                                 }
                             }
                         }
@@ -491,7 +493,8 @@ pub fn config_schema() -> serde_json::Value {
                                 "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
                             "recovery": {"type": "object", "additionalProperties": false,
                                 "required": ["mode"],
-                                "properties": {"mode": {"type": "string", "enum": ["checkpoint", "fresh"]}}}
+                                "properties": {"mode": {"type": "string", "enum": ["checkpoint", "fresh"]},
+                                    "ended_before": {"type": "integer", "minimum": 0}}}
                         }
                     }
                 ],

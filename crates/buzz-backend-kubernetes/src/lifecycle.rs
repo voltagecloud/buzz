@@ -6,6 +6,10 @@
 //! is in. Planning in the reaper turns a state into at most one action. No
 //! state maps to "set `operatingMode: Running`" or "create a Sandbox": a
 //! session that has ended is only ever resumed by an explicit recovery deploy.
+//! That deploy comes from a desktop recovery action, or from the session
+//! manager for a mention in the ended thread that the owner or a live
+//! owner-delegated gateway signed, and only for a tombstone that ended before
+//! that mention ([`ENDED_AT`]). A mention from anyone else never does.
 
 use chrono::{DateTime, Duration, Utc};
 use k8s_openapi::api::core::v1::Pod;

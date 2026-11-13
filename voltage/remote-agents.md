@@ -379,7 +379,10 @@ That section defines the core Claude-only daemon and its separate selected-repos
 3. Reply in the same thread to continue the session.
 4. Select **End session** in the thread banner to save a checkpoint and stop the Sandbox. Select **Recover from checkpoint** to continue from that checkpoint later.
 
-When a mention fails because its session ended, recovery replays that mention after restoring or starting the workspace.
+When you or your delegated Paseo gateway mention the agent in a thread whose session ended, the manager restores the last checkpoint and the agent answers that mention.
+If the session has no checkpoint, the agent replies that it cannot be restored; mention it in a new thread.
+Teammates who use the agent through sharing, and scheduled workflow prompts, cannot restore an ended session.
+When a mention fails because its session ended, desktop recovery replays that mention after restoring or starting the workspace.
 This requires an updated desktop and host; existing clients retain their earlier recovery behavior.
 The replay timestamp belongs to that recovery request and does not change the saved agent configuration.
 

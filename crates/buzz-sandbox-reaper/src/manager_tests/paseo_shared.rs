@@ -446,3 +446,6 @@ async fn managed_gateways_never_fall_back_to_human_sharing_after_authority_loss(
         .await
         .is_err());
 }
+
+#[path = "ended_shared.rs"]
+mod ended_shared;

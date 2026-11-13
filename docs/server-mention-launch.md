@@ -33,7 +33,9 @@ The owner private key stays on the client.
 
 The manager reuses the existing launch registration, provider confinement, and thread session identity.
 Replies reuse that session. A new root message selects a separate session.
-Ended sessions require desktop recovery or a new thread.
+When the thread's session ended, a mention from the owner or a live owner-delegated gateway restores the session from its last checkpoint, then the recovered session answers the mention.
+This uses the provider's checkpoint recovery path, and only for a session that ended before the mention, so a retried mention never undoes a later end ([remote agents](remote-agents.md#sandbox-lifecycle), **Recovery from a mention**).
+Shared-task mentions and scheduled workflow prompts in an ended thread get a reply instead; they never recover a session.
 This feature supports channel messages of kinds 9 and 40002, with an addressed `p` tag.
 Display-only `mention` tags, edits, DMs, and Solo session management are outside this launch contract.
 
@@ -75,7 +77,7 @@ Lost acknowledgements retry the same event ID.
 Each reply gets three delivery attempts; exhausted replies remain in the journal for operator investigation.
 An undeliverable reply does not block launches in other channels.
 A fresh owner mention creates a new attempt after a terminal failure.
-The system never automatically recovers an explicitly ended session.
+A shared-task mention never recovers an ended session. An owner or delegated-gateway mention is an explicit recovery request.
 
 ## Rollout
 
@@ -108,7 +110,8 @@ Use the installed phone application without rebuilding it.
 5. Mention it again inside the thread. Confirm the existing Sandbox is reused.
 6. Mention it in another new thread. Confirm a separate Sandbox starts.
 7. Restart the manager during startup. Confirm the original message remains singular and the launch eventually converges.
-8. End a session from desktop. Mention it from the phone and confirm a recovery instruction appears.
+8. End a session from desktop and wait for its tombstone. Mention it from the phone in that thread. Confirm the session restarts from its checkpoint and answers the mention.
+   Repeat with a session that has no checkpoint and confirm the reply says it cannot be restored.
 9. Mention the agent from another owner's identity. Confirm no Sandbox starts for that message.
 
 Record the application build, community, thread IDs, and observed results.
@@ -135,4 +138,4 @@ These tests do not establish physical-phone, real-cluster, or model-runtime beha
 | `inbox_lease_unavailable` | Check for another manager replica. After a crash, allow up to six minutes for takeover. |
 | `mention_capacity_exceeded` | Inspect backlog size and registration count without printing Secret contents. Escalate before changing or deleting the journal. |
 | `mention_relay_failed` | Check relay connectivity and the agent's channel membership. |
-| Ended-session reply | Recover from desktop or begin a new channel thread. |
+| Ended-session reply | The session could not be restored: no checkpoint, a concurrent recovery, a session that ended after (or within 60s before) the mention, a shared-task mention, or a scheduled workflow prompt. Mention the agent in a new channel thread, or have the owner mention it in the thread again. |
