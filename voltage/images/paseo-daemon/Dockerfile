@@ -44,13 +44,14 @@ RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack 
     && rm -f /usr/local/bin/{npm,npx,corepack,yarn,yarnpkg} \
     && rm -rf /var/lib/apt/lists /usr/lib/apt /root/.npm \
     && rm -f /usr/bin/apt* /usr/bin/dpkg* /usr/bin/cpan* \
-    && install -d -o root -g root -m 0555 /opt/paseo-buzz/no-terminal-worker /opt/paseo-buzz/no-hooks /etc/paseo-buzz
+    && install -d -o root -g root -m 0555 /opt/paseo-buzz/no-terminal-worker /opt/paseo-buzz/no-hooks /etc/paseo-buzz /etc/paseo-buzz/agents /usr/local/lib/paseo-buzz
 COPY --from=builder /out/buzz /usr/local/bin/buzz
 COPY voltage/images/paseo-daemon/recorder /opt/paseo-buzz/recorder
 COPY --chmod=0644 voltage/images/paseo-daemon/assistant.md /etc/paseo-buzz/assistant.md
 COPY --chmod=0755 voltage/images/paseo-daemon/entrypoint.sh /usr/local/bin/paseo-buzz-entrypoint
 COPY --chmod=0755 voltage/images/paseo-daemon/code.mjs /usr/local/bin/paseo-code
 COPY --chmod=0755 voltage/images/paseo-daemon/workspaces.mjs /usr/local/bin/paseo-workspaces
+COPY --chmod=0644 voltage/images/paseo-daemon/providers.mjs voltage/images/paseo-daemon/agents-watch.mjs /usr/local/lib/paseo-buzz/
 # Relay-only and TLS-only. The listener is loopback, for the in-container
 # CLI, the agent MCP server, and the health check. Clients, including the web
 # app at app.paseo.sh, reach the daemon only through the relay. The daemon's

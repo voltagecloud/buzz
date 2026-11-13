@@ -87,5 +87,7 @@ voltage/
 !voltage/images/paseo-daemon/assistant.md
 !voltage/images/paseo-daemon/code.mjs
 !voltage/images/paseo-daemon/workspaces.mjs
+!voltage/images/paseo-daemon/providers.mjs
+!voltage/images/paseo-daemon/agents-watch.mjs
 
 !voltage/images/paseo-daemon/recorder/**

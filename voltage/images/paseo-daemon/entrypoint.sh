@@ -122,37 +122,15 @@ const assistant = claudeToken ? "claude" : "";
 const reserved = ["claude", "codex", "copilot", "cursor", "opencode", "pi", "omp", "antigravity", "hoplite", "muse"];
 const providers = Object.fromEntries(reserved.map((id) => [id, { enabled: false }]));
 
+// The same builder, shared with paseo-agents-watch, validates the manager's
+// agent list and writes one provider per remote agent.
+const { buzzProviders } = await import("/usr/local/lib/paseo-buzz/providers.mjs");
 const agents = env.BUZZ_PASEO_AGENTS ? parse("BUZZ_PASEO_AGENTS") : [];
-if (!Array.isArray(agents) || agents.length > 64) fail("BUZZ_PASEO_AGENTS must be a JSON array of at most 64 providers");
 const owner = env.BUZZ_PASEO_OWNER ?? "";
-if (owner && !HEX_PUBKEY.test(owner)) fail("BUZZ_PASEO_OWNER must be a 64-character hex pubkey");
-if (agents.length && !owner) fail("BUZZ_PASEO_OWNER is required with remote providers");
-for (const [index, agent] of agents.entries()) {
-  const where = `BUZZ_PASEO_AGENTS[${index}]`;
-  const { id, label, agent: pubkey, channel } = agent ?? {};
-  if (typeof id !== "string" || !/^[a-z][a-z0-9-]*$/.test(id)) fail(`${where}.id must match ^[a-z][a-z0-9-]*$`);
-  if (Object.hasOwn(providers, id)) fail(`${where}.id "${id}" is reserved or duplicated`);
-  if (typeof label !== "string" || label.trim() === "") fail(`${where}.label must be a non-empty string`);
-  if (typeof pubkey !== "string" || !HEX_PUBKEY.test(pubkey)) fail(`${where}.agent must be a 64-character hex pubkey`);
-  if (typeof channel !== "string" || !UUID.test(channel)) fail(`${where}.channel must be a UUID`);
-  // buzz acp-bridge gets BUZZ_RELAY_URL and BUZZ_PRIVATE_KEY from the
-  // inherited environment, so config.json holds no secrets. The env overlay
-  // blanks the secrets that the bridge does not use. The bridge gets no Paseo
-  // tools, no MCP servers, no terminals, and no file access from the daemon.
-  providers[id] = {
-    extends: "acp",
-    label,
-    command: ["buzz", "acp-bridge", "--agent", pubkey, "--channel", channel, "--owner", owner],
-    env: { PASEO_PASSWORD: "", CLAUDE_CODE_OAUTH_TOKEN: "", CODEX_ACCESS_TOKEN: "", GITHUB_READ_TOKEN: "", github_read_token: "" },
-    options: {
-      supportsMcpServers: false,
-      clientCapabilities: { terminal: false, fs: { readTextFile: false, writeTextFile: false } },
-    },
-    paseoTools: { enabled: false },
-    // One model, preselected: the bridge offers no ACP model choice, so the
-    // picker should not ask for one.
-    models: [{ id: "buzz", label, isDefault: true }],
-  };
+try {
+  Object.assign(providers, buzzProviders(agents, owner, Object.keys(providers)));
+} catch (error) {
+  fail(error.message);
 }
 
 // Tool policy reduces mistakes; shell access makes it unsuitable as an
@@ -293,4 +271,7 @@ cd "$HOME/assistant"
 # daemon answers, so paired apps show file trees. Best-effort and bounded; it
 # logs to stderr and never blocks startup.
 /usr/local/bin/paseo-workspaces </dev/null >/dev/null &
+# Apply the manager's agent-list changes from the mounted Secret key without a
+# restart: rewrite the Buzz providers and run `paseo reload`. No mount, no-op.
+node /usr/local/lib/paseo-buzz/agents-watch.mjs </dev/null >/dev/null &
 exec /usr/bin/tini -- /usr/local/bin/paseo-docker-entrypoint

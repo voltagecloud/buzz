@@ -305,6 +305,7 @@ jq -e 'any(.[]; .id == "buzz-recorder" and .status == "running")' "$stubs/plugin
 node "$(dirname "$0")/test-recorder.mjs"
 node "$(dirname "$0")/test-code.mjs"
 node "$(dirname "$0")/test-workspaces.mjs"
+node "$(dirname "$0")/test-agents-watch.mjs"
 node "$(dirname "$0")/test-code-git.mjs"
 # The fake Git executable needs an owned executable bind: /tmp stays noexec.
 docker run --rm "${HARDENED[@]}" --entrypoint node -e PASEO_CODE_HELPER=/usr/local/bin/paseo-code -e TMPDIR=/test-work \
