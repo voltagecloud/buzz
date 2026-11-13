@@ -4,6 +4,8 @@ on:
   pull_request:
     paths:
       - .github/workflows/voltage-cli-release.yml
+      - flake.nix
+      - flake.lock
   workflow_dispatch:
     inputs:
       publish:
@@ -80,9 +82,105 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  linux:
+    name: Build and test Linux ${{ matrix.arch }} CLI
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    env:
+      TARGET: ${{ matrix.target }}
+      ARCH: ${{ matrix.arch }}
+      CC_x86_64_unknown_linux_musl: musl-gcc
+      CC_aarch64_unknown_linux_musl: musl-gcc
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install musl compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      - name: Fetch Hermit tools
+        run: scripts/ci-hermit-retry.sh ./bin/cargo --version
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          key: voltage-cli-${{ matrix.target }}
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - name: Test CLI on native Linux
+        run: |
+          rustup target add "$TARGET"
+          cargo test --locked -p buzz-cli --target "$TARGET"
+      - name: Build CLI
+        run: cargo build --locked --release -p buzz-cli --target "$TARGET"
+      - name: Verify portable binary
+        run: |
+          set -euo pipefail
+          binary="target/$TARGET/release/buzz"
+          readelf --program-headers "$binary" > /tmp/buzz-program-headers
+          readelf --dynamic "$binary" > /tmp/buzz-dynamic
+          if grep -E 'INTERP' /tmp/buzz-program-headers || grep -E '\(NEEDED\)' /tmp/buzz-dynamic; then
+            echo 'Linux CLI must have no dynamic loader or shared-library dependencies' >&2
+            exit 1
+          fi
+          "$binary" --help
+          "$binary" paseo setup --help
+          "$binary" paseo pairing --help
+      - name: Package
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist/package
+          install -m 755 "target/$TARGET/release/buzz" dist/package/buzz
+          printf '%s\n' "$SOURCE_SHA" > dist/package/SOURCE_REVISION
+          archive="buzz-cli-linux-$ARCH.tar.gz"
+          tar -czf "dist/$archive" -C dist/package buzz SOURCE_REVISION
+          cd dist
+          sha256sum "$archive" > "$archive.sha256"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: buzz-cli-linux-${{ matrix.arch }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+  nix:
+    name: Nix CLI (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      - name: Evaluate Linux outputs
+        run: nix flake check --no-build --all-systems
+      - name: Build and check the installed CLI
+        run: nix flake check
+      - name: Exercise the default app
+        run: nix run . -- paseo setup --help
+
   publish:
     name: Publish CLI prerelease
-    needs: build
+    needs: [build, linux, nix]
     if: github.repository == 'voltagecloud/buzz' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.publish
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -92,6 +190,11 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: buzz-cli-macos-arm64
+          path: dist
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: buzz-cli-linux-*
+          merge-multiple: true
           path: dist
       - name: Publish immutable asset
         env:
@@ -105,5 +208,5 @@ jobs:
           # an existing CLI asset or move its source tag on a rerun.
           gh release create "$tag" --target "$SOURCE_SHA" \
             --title "Buzz CLI ${SOURCE_SHA:0:12}" --prerelease --latest=false \
-            --notes "Apple Silicon macOS CLI built from $SOURCE_SHA. Includes a SHA-256 checksum and source revision." \
-            dist/buzz-cli-macos-arm64.tar.gz dist/SHA256SUMS
+            --notes "CLI built from $SOURCE_SHA for Apple Silicon macOS and Linux x86_64/aarch64. Linux archives are statically linked for NixOS and other Linux distributions. Each archive includes its source revision. SHA256SUMS covers the macOS archive; each Linux archive has its own .sha256 file." \
+            dist/*.tar.gz dist/SHA256SUMS dist/*.sha256
