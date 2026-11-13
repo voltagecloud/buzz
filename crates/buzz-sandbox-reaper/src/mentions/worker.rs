@@ -556,7 +556,7 @@ fn failure_notice(identity: &Identity, event: &Event, code: &str) -> Result<Even
         "shared_task_denied" => "Shared task refused: current sharing permission, channel membership, or handoff budget does not permit this request. Ask the agent owner to check sharing.",
         "gateway_not_member" => "This gateway is not a current posting member of this channel, so I did not start. Ask the channel owner to restore membership.",
         "gateway_not_delegated" => "This gateway key is not currently delegated by my owner, so I did not start. Ask my owner to check `buzz gateway list`.",
-        "shared_task_retry" => "Current sharing authorization is unavailable. Mention me again to retry; this request has not been allowed to run.",
+        "shared_task_retry" => "A temporary authorization lookup failure prevented this task from running. Permission has not been determined. Mention me again to retry; a missing sharing grant has not been established.",
         _ => "Agent startup could not be confirmed. Mention me again to retry.",
     };
     let tags = [
