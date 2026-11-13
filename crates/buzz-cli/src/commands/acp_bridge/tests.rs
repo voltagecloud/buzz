@@ -1854,3 +1854,6 @@ mod participant_tests;
 
 #[path = "participation_tests.rs"]
 mod participation_tests;
+
+#[path = "transcript_replay_tests.rs"]
+mod transcript_replay_tests;

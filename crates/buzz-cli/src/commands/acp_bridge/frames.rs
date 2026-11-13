@@ -270,7 +270,7 @@ fn token_count(value: Option<&Value>) -> Option<u64> {
 /// window, > 0) and `used` (tokens in context), plus `cost` when it has a
 /// finite `amount` and a short `currency`. Any other field is dropped, and the
 /// update is dropped when `size` or `used` is invalid.
-fn usage_update(update: &Value) -> Option<Value> {
+pub(crate) fn usage_update(update: &Value) -> Option<Value> {
     let size = token_count(update.get("size")).filter(|size| *size > 0)?;
     let used = token_count(update.get("used"))?;
     let mut rebuilt = json!({"sessionUpdate": "usage_update", "size": size, "used": used});
@@ -292,7 +292,7 @@ fn usage_update(update: &Value) -> Option<Value> {
 /// Rebuild a prompt response's ACP `Usage` from its known token counts.
 /// `None` when a count the ACP schema requires is missing or invalid, so the
 /// client never sees a partial or zero-filled `Usage`.
-fn prompt_usage(usage: &Value) -> Option<Value> {
+pub(crate) fn prompt_usage(usage: &Value) -> Option<Value> {
     let mut rebuilt = serde_json::Map::new();
     for &(field, required) in USAGE_FIELDS {
         match token_count(usage.get(field)) {
