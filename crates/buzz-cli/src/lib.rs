@@ -447,14 +447,14 @@ pub enum AgentsCmd {
         #[arg(long)]
         channel: uuid::Uuid,
     },
-    /// Read this owner's current sharing grant for one agent and channel
+    /// Read sharing grants with verified agent-owner and query-key diagnostics
     Sharing {
         /// Agent pubkey (hex)
         agent: String,
         /// Channel UUID
         #[arg(long)]
         channel: uuid::Uuid,
-        /// Human owner pubkey; defaults to the signing identity
+        /// Owner or delegated gateway pubkey; defaults to the verified agent owner
         #[arg(long)]
         owner: Option<String>,
     },
