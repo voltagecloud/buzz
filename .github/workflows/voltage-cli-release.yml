@@ -1,0 +1,109 @@
+name: Voltage CLI release
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/voltage-cli-release.yml
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish an immutable CLI prerelease from main
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: voltage-cli-release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: Build and test macOS arm64 CLI
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      - name: Fetch Hermit tools
+        run: scripts/ci-hermit-retry.sh ./bin/cargo --version
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          key: voltage-cli-macos-arm64
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - name: Test CLI
+        run: cargo test --locked -p buzz-cli
+      - name: Build CLI
+        run: |
+          rustup target add aarch64-apple-darwin
+          cargo build --locked --release -p buzz-cli --target aarch64-apple-darwin
+      - name: Verify native binary
+        run: |
+          set -euo pipefail
+          binary=target/aarch64-apple-darwin/release/buzz
+          lipo "$binary" -verify_arch arm64
+          # A CLI installed through gh does not need a GUI bundle. Keep its
+          # native ad-hoc signature valid; no Developer ID is claimed here.
+          codesign --force --sign - "$binary"
+          codesign --verify --strict "$binary"
+          "$binary" --help
+          "$binary" paseo setup --help
+          "$binary" paseo pairing --help
+          # Refuse accidental Homebrew or runner-local dynamic dependencies.
+          otool -L "$binary" | tail -n +2 | awk '{print $1}' > /tmp/buzz-libraries
+          if grep -Ev '^(/usr/lib/|/System/Library/)' /tmp/buzz-libraries; then
+            echo 'CLI has a non-system dynamic dependency' >&2
+            exit 1
+          fi
+      - name: Package
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist/package
+          install -m 755 target/aarch64-apple-darwin/release/buzz dist/package/buzz
+          printf '%s\n' "$SOURCE_SHA" > dist/package/SOURCE_REVISION
+          tar -czf dist/buzz-cli-macos-arm64.tar.gz -C dist/package buzz SOURCE_REVISION
+          cd dist
+          shasum -a 256 buzz-cli-macos-arm64.tar.gz > SHA256SUMS
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: buzz-cli-macos-arm64
+          path: |
+            dist/buzz-cli-macos-arm64.tar.gz
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish CLI prerelease
+    needs: build
+    if: github.repository == 'voltagecloud/buzz' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: buzz-cli-macos-arm64
+          path: dist
+      - name: Publish immutable asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          tag="buzz-cli-${SOURCE_SHA:0:12}"
+          # Keep the desktop app's latest release unchanged. Never overwrite
+          # an existing CLI asset or move its source tag on a rerun.
+          gh release create "$tag" --target "$SOURCE_SHA" \
+            --title "Buzz CLI ${SOURCE_SHA:0:12}" --prerelease --latest=false \
+            --notes "Apple Silicon macOS CLI built from $SOURCE_SHA. Includes a SHA-256 checksum and source revision." \
+            dist/buzz-cli-macos-arm64.tar.gz dist/SHA256SUMS

@@ -481,9 +481,9 @@ You need only the `buzz` CLI and a Paseo app; the Buzz app is optional.
      the new team channel with your daemon. A `warnings` entry means the agent runs but your
      daemon's agent list was not refreshed; run `buzz paseo setup --update` and press Enter at
      each prompt, which enrolls again and rebuilds the list.
-3. Scan the QR code with the Paseo app, or open the printed link. Paseo saves the host but does
-   not ask for the password: open the host's settings, enter the pairing password, and connect.
-   The password appears only on the terminal; `buzz paseo pairing --manager <key>` shows it again.
+3. Scan the QR code with the Paseo app, or open the printed link. The connection link includes
+   the pairing password, so no separate password entry is needed. Both are private terminal
+   output; `buzz paseo pairing --manager <key>` shows them again.
 4. Confirm that the connection uses `wss://buzz.voltage.cloud/ws`.
 5. From **New workspace**, open **Import session** and choose the remote provider's session.
 6. If an existing workspace filters the list, select **Show all**.
