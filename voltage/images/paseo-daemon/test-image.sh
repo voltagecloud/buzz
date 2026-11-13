@@ -160,9 +160,23 @@ if [ "$1 $2" = "messages send" ]; then
   printf '{"accepted":true,"event_id":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}\n'
   exit 0
 fi
+# With the marker, the bridge speaks just enough ACP to list and load one session.
+if [ "$1" = acp-bridge ] && [ -e /tmp/records/fake-acp ]; then exec node /tmp/stubs/fake-acp.mjs; fi
 printf '%s\n' "$@" >/tmp/buzz.args
 env >/tmp/buzz.env
 exit 1
+STUB
+cat >"$stubs/fake-acp.mjs" <<'STUB'
+import { createInterface } from "node:readline";
+const send = (message) => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
+createInterface({ input: process.stdin }).on("line", (line) => {
+  const { id, method } = JSON.parse(line);
+  if (id === undefined) return;
+  if (method === "initialize") send({ id, result: { protocolVersion: 1, agentCapabilities: { loadSession: true, sessionCapabilities: { list: {} } } } });
+  else if (method === "session/list") send({ id, result: { sessions: [{ sessionId: "f".repeat(64), cwd: "/", title: "Restored", updatedAt: new Date().toISOString() }] } });
+  else if (method === "session/load") send({ id, result: {} });
+  else send({ id, error: { code: -32601, message: "unsupported" } });
+});
 STUB
 chmod 0755 "$stubs/claude" "$stubs/buzz"
 # Exercise a different UID even on developer machines where the daemon and
@@ -201,6 +215,36 @@ docker exec "$NAME" node -e '
     offer.relay?.endpoint === "relay.invalid:443" && offer.relay?.useTls === true;
   if (!ok) { console.error(JSON.stringify({ ...offer, daemonPublicKeyB64: undefined })); process.exit(1); }
 ' "$offer" "$PUBLIC_KEY" || fail "pairing offer does not match the provided identity"
+
+# Startup registers ~/buzz and runs the restore, which logs the failing bridge
+# and schedules a retry. Its launch record is removed so the next check sees the daemon's.
+restored() {
+  local logs=""
+  for _ in $(seq 90); do logs=$(docker logs "$1" 2>&1); grep -q '^paseo-restore: retrying' <<<"$logs" && break; sleep 1; done
+  grep -q '^paseo-restore: done: 0 imported, 0 already present, 1 failed' <<<"$logs" ||
+    fail "$1 startup restore: $(grep '^paseo-' <<<"$logs")"
+  grep -q '^paseo-restore: retrying brokkr in 300 s (attempt 2 of 3)' <<<"$logs" ||
+    fail "$1 startup restore scheduled no retry: $(grep '^paseo-' <<<"$logs")"
+  [ "$(docker inspect -f '{{.State.Running}}' "$1")" = true ] || fail "$1 exited after the restore"
+  docker exec "$1" paseo project ls --json | jq -e 'any(.[]; .path == "/home/paseo/buzz")' >/dev/null || fail "$1 has no ~/buzz project"
+}
+restored "$NAME"
+docker exec "$NAME" rm -f /tmp/buzz.args /tmp/buzz.env
+
+# A listed conversation without a project is imported into ~/buzz through the
+# real daemon. The next run leaves the provider alone: Paseo has its agents.
+touch "$stubs/records/fake-acp"
+restore=(docker exec -e HOME=/home/paseo -e PASEO_HOME=/home/paseo/.paseo "$NAME" node /usr/local/lib/paseo-buzz/restore.mjs)
+restore_log=$("${restore[@]}" 2>&1)
+grep -q 'done: 1 imported, 0 already present, 0 failed' <<<"$restore_log" || fail "restore did not import the listed conversation: $restore_log"
+docker exec "$NAME" paseo agent ls -g --json | jq -e 'map(select(.provider == "brokkr" and .cwd == "~/buzz")) | length == 1' >/dev/null ||
+  fail "restored agent: $(docker exec "$NAME" paseo agent ls -g --json)"
+restore_log=$("${restore[@]}" 2>&1)
+grep -q 'left brokkr alone: Paseo already has its agents' <<<"$restore_log" && grep -q 'done: 0 imported, 0 already present, 0 failed' <<<"$restore_log" ||
+  fail "restore listed a provider that Paseo already has: $restore_log"
+docker exec "$NAME" paseo agent ls -g --json | jq -e 'map(select(.provider == "brokkr")) | length == 1' >/dev/null ||
+  fail "restore imported a duplicate: $(docker exec "$NAME" paseo agent ls -g --json)"
+rm "$stubs/records/fake-acp"
 
 # The bridge gets the Buzz relay and key, and no Paseo password or model token.
 docker exec -w /home/paseo/assistant "$NAME" paseo run --no-wait --provider brokkr "hello" >/dev/null 2>&1 || true
@@ -321,6 +365,7 @@ node "$(dirname "$0")/test-recorder.mjs"
 node "$(dirname "$0")/test-code.mjs"
 node "$(dirname "$0")/test-workspaces.mjs"
 node "$(dirname "$0")/test-agents-watch.mjs"
+node "$(dirname "$0")/test-restore.mjs"
 node "$(dirname "$0")/test-code-git.mjs"
 # The fake Git executable needs an owned executable bind: /tmp stays noexec.
 docker run --rm "${HARDENED[@]}" --entrypoint node -e PASEO_CODE_HELPER=/usr/local/bin/paseo-code -e TMPDIR=/test-work \
@@ -386,6 +431,8 @@ docker rm "$NAME-shutdown-slow" >/dev/null
 docker run -d --name "$NAME-replacement" "${HARDENED[@]}" "${ENV[@]}" "$IMAGE" >/dev/null
 replacement_status=$(wait_running "$NAME-replacement" "$NAME-shutdown-slow")
 [ "$(jq -r .serverId <<<"$replacement_status")" = srv_paseodaemontest ] || fail "replacement server identity changed"
+# The real bridge cannot reach the relay here; the restore logs and the daemon stays up.
+restored "$NAME-replacement"
 replacement_offer=$(docker exec "$NAME-replacement" paseo daemon pair --json | jq -r .url | sed 's/.*#offer=//')
 docker exec "$NAME-replacement" node -e '
   const offer = JSON.parse(Buffer.from(process.argv[1], "base64url").toString());

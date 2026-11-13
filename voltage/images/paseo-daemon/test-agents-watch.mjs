@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { buzzProviders, withAgents } from "./providers.mjs";
-import { checkOnce } from "./agents-watch.mjs";
+import { checkOnce, watchOnce } from "./agents-watch.mjs";
+import { createRestorer } from "./restore.mjs";
 
 const owner = "b".repeat(64);
 const agent = (id, label, key) => ({ id, label, agent: key.repeat(64), channel: "6f1c1b2e-3d4a-4b5c-8d9e-0f1a2b3c4d5e" });
@@ -52,6 +53,7 @@ assert.equal(result.outcome, "unchanged", "formatting alone does not reload");
 assert.equal(reloads, 0);
 result = await checkOnce({ state, ...deps(JSON.stringify([brokkr, tyr])) });
 assert.equal(result.outcome, "reloaded");
+assert.deepEqual(result.added, ["tyr"], "only the new provider's conversations are restored");
 assert.deepEqual(Object.keys(written.agents.providers).sort(), ["brokkr", "claude", "codex", "tyr"]);
 assert.equal(reloads, 1);
 state = result.state;
@@ -61,9 +63,32 @@ assert.equal(result.outcome, "invalid");
 assert.equal(written, null, "an invalid list never rewrites the config");
 result = await checkOnce({ state, ...deps("{not json") });
 assert.equal(result.outcome, "invalid");
+const moved = { ...brokkr, channel: "0f1c1b2e-3d4a-4b5c-8d9e-0f1a2b3c4d5e" };
+result = await checkOnce({ state, ...deps(JSON.stringify([moved, tyr])) });
+assert.equal(result.outcome, "reloaded");
+assert.deepEqual(result.added, [], "a changed provider is not restored: Paseo already has its conversations");
 reloadOk = false;
 result = await checkOnce({ state, ...deps(JSON.stringify([tyr])) });
 assert.equal(result.outcome, "reload_failed");
 assert.equal(result.state, state, "a failed reload is retried on the next check");
 assert.ok(!logs.join(" ").includes(owner));
+
+// The loop iteration hands only added providers to the restorer, and starts
+// its attempts even when the check fails.
+reloadOk = true;
+const passes = [];
+const restorer = createRestorer({ pass: async (tasks) => { passes.push(tasks); return new Map(); } });
+// Lets a started pass finish without starting one.
+const settle = () => new Promise((resolve) => setImmediate(resolve));
+result = await watchOnce({ state: { applied: JSON.stringify([brokkr]) }, ...deps(JSON.stringify([brokkr, tyr])), restorer });
+assert.equal(result.outcome, "reloaded");
+await settle();
+assert.deepEqual(passes, [[{ id: "tyr", sessions: null }]], "the added provider is restored");
+await watchOnce({ state: result.state, ...deps(JSON.stringify([moved, tyr])), restorer });
+await settle();
+assert.equal(passes.length, 1, "a changed provider is not restored");
+restorer.add(["brokkr"]);
+await assert.rejects(watchOnce({ state, ...deps(null), readAgents: async () => { throw new Error("read failed"); }, restorer }));
+await settle();
+assert.deepEqual(passes[1], [{ id: "brokkr", sessions: null }], "a failed check still starts due restores");
 console.log("agents-watch: ok");

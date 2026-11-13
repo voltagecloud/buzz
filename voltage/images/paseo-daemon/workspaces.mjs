@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // Clone each repository the daemon's Git read token covers and register it
 // as a Paseo project, so a paired app shows file trees without manual setup.
+// First it registers ~/buzz, the home of restored conversations that have no
+// project, so the restore (which waits for it) does not wait for clones.
 // Runs once in the background at startup. Idempotent: an existing checkout is
 // not cloned again and a registered project is not registered again. A
 // repository the token cannot read is logged and skipped. Never prints tokens.
@@ -31,12 +33,13 @@ export function run(command, args, timeoutMs = RUN_TIMEOUT_MS) {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
- * Clone and register `repos` (normalized `owner/name`) under `home/code`.
- * Waits for the daemon by polling `paseo project ls`, at most `attempts`
- * times. Returns one `{repo, state}` per repository.
+ * Register the existing `projects` directories, then clone and register
+ * `repos` (normalized `owner/name`) under `home/code`. Waits for the daemon
+ * by polling `paseo project ls`, at most `attempts` times. Returns one
+ * `{project, state}` per directory, then one `{repo, state}` per repository.
  */
-export async function sync({ repos, home, exec = run, log = () => {}, attempts = 60, delayMs = 2000, exists = existsSync }) {
-  if (repos.length === 0) return [];
+export async function sync({ repos, projects: directories = [], home, exec = run, log = () => {}, attempts = 60, delayMs = 2000, exists = existsSync }) {
+  if (repos.length === 0 && directories.length === 0) return [];
   let projects = null;
   for (let attempt = 0; attempt < attempts && projects === null; attempt++) {
     const listed = await exec("paseo", ["project", "ls", "--json"]);
@@ -50,10 +53,22 @@ export async function sync({ repos, home, exec = run, log = () => {}, attempts =
   }
   if (projects === null) {
     log("the daemon did not answer; repositories were not registered as projects");
-    return repos.map((repo) => ({ repo, state: "daemon_unavailable" }));
+    return [...directories.map((project) => ({ project, state: "daemon_unavailable" })),
+      ...repos.map((repo) => ({ repo, state: "daemon_unavailable" }))];
   }
   const registered = new Set(projects.map((project) => path.resolve(String(project.path ?? ""))));
+  const register = async (directory) => {
+    if (registered.has(path.resolve(directory))) return "registered";
+    if ((await exec("paseo", ["project", "create", directory])).code !== 0) return "register_failed";
+    registered.add(path.resolve(directory));
+    return "registered";
+  };
   const results = [];
+  for (const project of directories) {
+    const state = await register(project);
+    if (state !== "registered") log(`could not register ${project} as a Paseo project`);
+    results.push({ project, state });
+  }
   for (const repo of repos) {
     const directory = path.join(home, "code", repo);
     if (!exists(directory)) {
@@ -64,19 +79,9 @@ export async function sync({ repos, home, exec = run, log = () => {}, attempts =
         continue;
       }
     }
-    if (registered.has(path.resolve(directory))) {
-      results.push({ repo, state: "registered" });
-      continue;
-    }
-    const created = await exec("paseo", ["project", "create", directory]);
-    if (created.code !== 0) {
-      log(`could not register ${repo} as a Paseo project`);
-      results.push({ repo, state: "register_failed" });
-      continue;
-    }
-    registered.add(path.resolve(directory));
-    log(`registered ${repo}`);
-    results.push({ repo, state: "registered" });
+    const state = await register(directory);
+    log(state === "registered" ? `registered ${repo}` : `could not register ${repo} as a Paseo project`);
+    results.push({ repo, state });
   }
   return results;
 }
@@ -88,5 +93,5 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
     repos = scope.code === 0 ? JSON.parse(scope.stdout) : [];
   } catch { repos = []; }
   const log = (message) => process.stderr.write(`paseo-workspaces: ${message}\n`);
-  await sync({ repos, home: process.env.HOME, log });
+  await sync({ repos, projects: [path.join(process.env.HOME, "buzz")], home: process.env.HOME, log });
 }

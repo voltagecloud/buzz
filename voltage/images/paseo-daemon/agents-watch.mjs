@@ -3,6 +3,8 @@
 // agent list without restarting the daemon. Kubernetes refreshes the mounted
 // copy of the daemon Secret's BUZZ_PASEO_AGENTS key after the manager changes
 // it; this rewrites config.json's Buzz providers and runs `paseo reload`.
+// It also drives the conversation restore (restore.mjs): every configured
+// provider at startup and each provider that a reload adds, with retries.
 // An absent file (no mount) does nothing. An invalid list is logged and the
 // current providers stay. Never prints secret values.
 import { spawn } from "node:child_process";
@@ -10,6 +12,7 @@ import { readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { withAgents } from "./providers.mjs";
+import { buzzProvidersFromConfig, createRestorer, daemonPass } from "./restore.mjs";
 
 const MAX_FILE_BYTES = 256 * 1024;
 const RELOAD_TIMEOUT_MS = 60_000;
@@ -18,9 +21,20 @@ const RELOAD_TIMEOUT_MS = 60_000;
 const canonical = (agents) => JSON.stringify(agents);
 
 /**
+ * Ids of the agents in `agents` that `applied` does not have. A changed
+ * agent is not added: Paseo already has its conversations as agents.
+ */
+function addedIds(agents, applied) {
+  let before = [];
+  try { before = JSON.parse(applied ?? "[]"); } catch { /* Nothing was applied. */ }
+  const previous = new Set((Array.isArray(before) ? before : []).map((agent) => agent?.id));
+  return agents.filter((agent) => !previous.has(agent.id)).map((agent) => agent.id);
+}
+
+/**
  * One check. `state.applied` is the canonical list last applied. Returns the
  * new state and what happened: "absent", "unchanged", "invalid", "reload_failed"
- * or "reloaded".
+ * or "reloaded". A reload also returns `added`, the ids of new agents.
  */
 export async function checkOnce({ state, readAgents, readConfig, writeConfig, reload, owner, log }) {
   const text = await readAgents();
@@ -46,8 +60,24 @@ export async function checkOnce({ state, readAgents, readConfig, writeConfig, re
     log("paseo reload failed; retrying on the next check");
     return { state, outcome: "reload_failed" };
   }
-  log(`reloaded ${Array.isArray(agents) ? agents.length : 0} Buzz agent provider(s)`);
-  return { state: { applied: canonical(agents) }, outcome: "reloaded" };
+  log(`reloaded ${agents.length} Buzz agent provider(s)`);
+  return { state: { applied: canonical(agents) }, outcome: "reloaded", added: addedIds(agents, state.applied) };
+}
+
+/**
+ * One loop iteration: `checkOnce`, queue the added providers on `restorer`
+ * (from `createRestorer`), and start its due restore attempts. Returns the
+ * check, without waiting for the attempts.
+ */
+export async function watchOnce({ restorer, ...check }) {
+  try {
+    const result = await checkOnce(check);
+    if (result.added?.length) restorer.add(result.added);
+    return result;
+  } finally {
+    // Not awaited: an attempt can take minutes, and checks continue meanwhile.
+    restorer.tick();
+  }
 }
 
 function reloadDaemon() {
@@ -77,10 +107,17 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
   let state = { applied: (() => {
     try { return canonical(JSON.parse(process.env.BUZZ_PASEO_AGENTS || "[]")); } catch { return null; }
   })() };
+  const restoreLog = (message) => process.stderr.write(`paseo-restore: ${message}\n`);
+  const restorer = createRestorer({ pass: daemonPass(restoreLog), log: restoreLog });
+  try {
+    restorer.add((await buzzProvidersFromConfig(configFile)).map((provider) => provider.id));
+  } catch (error) {
+    restoreLog(`could not read the providers: ${String(error?.message ?? error).slice(0, 200)}`);
+  }
   for (;;) {
     try {
-      ({ state } = await checkOnce({ state, readAgents, readConfig, writeConfig, reload: reloadDaemon,
-        owner: process.env.BUZZ_PASEO_OWNER ?? "", log }));
+      ({ state } = await watchOnce({ state, readAgents, readConfig, writeConfig, reload: reloadDaemon,
+        owner: process.env.BUZZ_PASEO_OWNER ?? "", log, restorer }));
     } catch (error) {
       log(`check failed: ${String(error?.message ?? error).slice(0, 200)}`);
     }

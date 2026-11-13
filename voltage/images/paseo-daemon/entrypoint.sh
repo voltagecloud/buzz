@@ -33,7 +33,7 @@ esac
 : "${PASEO_HOME:=$HOME/.paseo}"
 export HOME PASEO_HOME
 umask 077
-mkdir -p "$PASEO_HOME" "$HOME/assistant" "$HOME/.claude" "$HOME/code"
+mkdir -p "$PASEO_HOME" "$HOME/assistant" "$HOME/.claude" "$HOME/code" "$HOME/buzz"
 
 # The same parser gates startup and each credential lookup. Empty scope permits
 # anonymous public reads but never sends the token to an unconfigured path.
@@ -291,11 +291,14 @@ ln -s /opt/paseo-buzz/no-terminal-worker "$PASEO_HOME/terminal-worker"
 # process environment.
 unset PASEO_DAEMON_KEYPAIR
 cd "$HOME/assistant"
-# Clone the token's repositories and register them as Paseo projects once the
-# daemon answers, so paired apps show file trees. Best-effort and bounded; it
-# logs to stderr and never blocks startup.
+# Register ~/buzz, then clone the token's repositories and register them as
+# Paseo projects once the daemon answers, so paired apps show file trees.
+# Best-effort and bounded; it logs to stderr and never blocks startup.
 /usr/local/bin/paseo-workspaces </dev/null >/dev/null &
 # Apply the manager's agent-list changes from the mounted Secret key without a
 # restart: rewrite the Buzz providers and run `paseo reload`. No mount, no-op.
+# It also imports each Buzz provider's recent conversations from the relay as
+# soon as the daemon answers with ~/buzz registered, without waiting for the
+# clones, so History survives pod replacement. Failures retry with backoff.
 node /usr/local/lib/paseo-buzz/agents-watch.mjs </dev/null >/dev/null &
 exec /usr/bin/tini -- /usr/local/bin/paseo-docker-entrypoint
