@@ -66,6 +66,7 @@ paseo-code clone voltagecloud/buzz
 paseo-code fetch voltagecloud/buzz review/branch
 paseo-code diff voltagecloud/buzz origin/main HEAD
 paseo-code show voltagecloud/buzz origin/review/branch
+paseo-code view voltagecloud/buzz review/branch
 ```
 
 Clone and fetch always request `--filter=blob:none` and disable tag fetching.
@@ -77,13 +78,22 @@ At startup, `paseo-workspaces` clones each `GITHUB_READ_TOKEN_REPOSITORIES` entr
 Paired apps then list those repositories as projects with file trees, with no manual step.
 It runs in the background after the daemon answers `paseo project ls`, polling at most 60 times.
 It never clones an existing checkout again or registers a project twice.
+Before any clone, it registers `~/buzz`, the project of restored conversations without one (see [Conversation restore](#conversation-restore)).
 A repository the token cannot read is logged to stderr and skipped; startup never waits for it.
 Fetch with a branch updates `origin/<branch>` and detaches the checkout at that fetched branch.
 It refuses to overwrite local changes and creates no worktrees.
 The developer compares the current branch against `origin/main` in Paseo's diff view.
 Fetch without a branch refreshes remote refs without changing the checkout.
+View fetches one branch and puts it in a detached worktree at `$HOME/code/<owner>/<repository>@<branch>`, beside the checkout.
+It clones the repository first when needed and never moves the main checkout.
+A later view of the same branch moves the existing worktree to the fetched head and discards changes to tracked files there.
+View accepts only `GITHUB_READ_TOKEN_REPOSITORIES` entries and refuses a branch whose view would nest inside another view.
+The PA runs clone, fetch, diff, and show without approval.
+`view` is not on the PA's allowlist, so the PA must get the developer's approval for each `paseo-code view`; the bridge, a provider process, is its intended caller.
+The bridge passes `--inherit-process-group` so Git stays inside its bounded process group.
+Deploy this helper before the file-view bridge; older helpers reject that flag before starting Git.
 Claude's Read, Glob, and Grep tools remain available; Write and Edit tools are disabled.
-The helper has only clone, fetch, diff, and show operations.
+The helper has only clone, fetch, diff, show, and view operations.
 The credential helper sends credentials only to configured HTTPS `github.com` repository paths, outside argv, URLs, and repository config.
 Git hooks, submodule recursion, automatic maintenance, and non-HTTPS transports are disabled by generated configuration.
 Git operations have a three-minute process-group deadline.
@@ -112,12 +122,6 @@ The bridge receives the gateway key and relay URL, without model, pairing, or Gi
 The bridge in #149 supplies relay-backed session list/load; #154 supplies gateway authority.
 The final image must include current #149, #154, and manager #150 through the adopted core stack.
 No parked feature is required.
-
-After replacement, choose **Import session → Show all**, then select the remote provider and conversation.
-Remote sessions use the virtual directory `/`; a checkout-scoped history filter hides them.
-Paseo's [upstream import sheet](https://github.com/getpaseo/paseo/blob/v0.15.3/packages/app/src/components/import-session-sheet.tsx) supports this global view without a fork.
-The replacement test exercises the same daemon discovery, preview, import, and timeline APIs.
-Visual client interaction remains part of the human acceptance test.
 
 | Variable | Contract |
 | --- | --- |
@@ -148,16 +152,65 @@ The obsolete host-tools switch has no effect; terminals stay disabled.
 Pairing links use `https://app.paseo.sh` even when the daemon's local web UI is disabled.
 Desktop, mobile, and web clients use the relay endpoint embedded in the offer.
 
+## Conversation restore
+
+The daemon's home is pod-local, so a new pod starts with no Paseo agents, but every remote-agent conversation is still a Buzz thread.
+`paseo-agents-watch` restores each configured Buzz provider at startup, and each provider that a later reload adds.
+It starts when the daemon answers `paseo project ls` with `~/buzz` registered, and does not wait for repository clones.
+For each provider, `restore.mjs` does these steps:
+
+1. It restores the provider only when `$PASEO_HOME/agents` has no record of it, active or archived. It checks before and after the listing.
+2. It starts the provider's own bridge command with the provider's environment and sends ACP `initialize` and `session/list`.
+3. It keeps the 20 newest sessions updated in the last 14 days, reading at most 10 pages. When a later page fails, it keeps the earlier pages.
+4. It runs `paseo import --provider <id> --cwd <dir> -- <session>`, newest first, with the provider's environment.
+
+Restore applies only to a fresh home for that provider.
+A conversation started in Paseo stores the bridge's own session id, not the thread id that `session/list` reports.
+So a provider with any record (a kept home after a container restart, or a conversation started in Paseo) is left alone, and restore never imports a duplicate.
+A provider whose entry changes in a reload is not restored again.
+
+The directory is the listed `cwd` when it is an existing directory under `$HOME`, outside hidden directories and reached without symlinks.
+Otherwise it is `~/buzz`, a project registered at startup; today's bridge lists `/` for every session.
+A conversation whose repository is not cloned yet also goes to `~/buzz`.
+
+| Bound | Value |
+| --- | --- |
+| ACP request | 30 seconds |
+| One provider's bridge, spawn to kill | 60 seconds |
+| One `paseo import` | 60 seconds |
+| Whole run | 5 minutes |
+| Bridges or imports at once | 2 |
+| Non-archived agents of Buzz providers, restored or started in Paseo | 40; restore imports nothing above it |
+| Bridge stdout | 4 MiB, at most 1 MiB per line |
+| Daemon readiness wait | 60 polls, 2 seconds apart |
+| Attempts per provider | 3: at startup, after 5 minutes, after 10 more minutes |
+
+Each bridge and import runs in its own process group, which is killed at completion or at its deadline.
+Each live Paseo agent can keep its own idle bridge process (about 7 MiB RSS each, measured without a relay connection).
+The cap counts the live agents of all Buzz providers, so restored agents stay at most 40, about 280 MiB of bridges, over any number of runs.
+A failure is logged to stderr and never blocks or stops the daemon.
+When the daemon is not ready, a listing fails, or an import fails or misses the run deadline, the restorer tries that provider again after the backoff.
+A retry after a failed import imports only the failed sessions and skips any session that Paseo has meanwhile.
+After the third failed attempt, it logs `gave up restoring <provider>` and stops.
+The developer then imports the remaining conversations by hand: choose **Import session → Show all**, then select the remote provider and conversation.
+The same sheet opens older conversations and those above the cap.
+Paseo's [upstream import sheet](https://github.com/getpaseo/paseo/blob/v0.15.3/packages/app/src/components/import-session-sheet.tsx) supports this global view without a fork.
+`node restore.mjs [provider…]` runs one attempt without retries, and exits 1 when something failed.
+The image test imports a listed session through the real daemon and checks that a second run leaves the provider alone.
+Visual client interaction remains part of the human acceptance test.
+
 ## State and replacement
 
 | State | Store | New pod behavior |
 | --- | --- | --- |
 | Pairing key, server ID, password, gateway key, narrow GitHub token | Per-developer Kubernetes Secret | Regenerate files from the same identity. |
-| Remote-agent conversations | Buzz relay | List and load through the ACP bridge. |
+| Remote-agent conversations | Buzz relay | Startup imports each provider's 20 newest conversations from the last 14 days; older ones through **Import session**. |
 | Accepted assistant transcript messages | Buzz recording channel | New assistant session reads the latest 20 records for context. |
 | Assistant memory (rules, preferences, lessons) | NIP-AE engrams on the Buzz relay, written by the gateway key for the owner | New assistant session reads `core` and follows its `[[mem/…]]` links. |
 | Unsent transcript intents and dead letters | Pod-local `$PASEO_HOME/buzz-recording` | Lost on pod replacement. |
-| Native Claude sessions and Paseo's local agent list | Pod-local home | Start a new native assistant session. No v1 restore. |
+| Native Claude sessions | Pod-local home | Start a new native assistant session. No v1 restore. |
+| Paseo's agent list and project registry | Pod-local `$PASEO_HOME` | Rebuilt at startup: token repositories and `~/buzz` as projects, restored remote-agent conversations as agents. |
+| Branch views | Pod-local `$HOME/code/<owner>/<repository>@<branch>` | `paseo-code view` again on demand. |
 | Git checkout | Pod-local `$HOME/code` | Partial clone again on demand. |
 | Paseo config and instructions | Generated from env and this image | Regenerate at startup. |
 | Local schedules and heartbeats | Disabled | No persistence promised. |
@@ -241,6 +294,7 @@ docker build -f voltage/images/paseo-daemon/Dockerfile -t paseo-daemon:local .
 bash voltage/images/paseo-daemon/test-image.sh paseo-daemon:local
 node voltage/images/paseo-daemon/test-recorder.mjs
 node voltage/images/paseo-daemon/test-code.mjs
+node voltage/images/paseo-daemon/test-restore.mjs
 ```
 
 The image contract uses synthetic credentials, no network, a read-only root, UID 1000, and dropped capabilities.

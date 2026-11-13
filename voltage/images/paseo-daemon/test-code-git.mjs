@@ -45,8 +45,8 @@ try {
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${server.address().port}/`;
   await writeFile(path.join(env.HOME, ".gitconfig"), `[url "${base}"]\n insteadOf = https://github.com/\n[protocol "http"]\n allow = always\n[core]\n hooksPath = /dev/null\n`);
-  const run = (args) => new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [helper, ...args], { env }); let output = ""; let errors = "";
+  const run = (args, extra = {}) => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [helper, ...args], { env: { ...env, ...extra } }); let output = ""; let errors = "";
     child.stdout.on("data", (chunk) => { output += chunk; }); child.stderr.on("data", (chunk) => { errors += chunk; }); child.on("error", reject);
     child.on("close", (code) => { try { assert.equal(code, 0, errors); resolve(output); } catch (error) { reject(error); } });
   });
@@ -63,5 +63,24 @@ try {
   const diff = await run(["diff", "fixture/repo", "origin/main", "HEAD"]);
   assert.match(diff, /\+sandbox pushed change/);
   assert.equal(git(["status", "--porcelain"], checkout), "");
-  console.log("PASS: real Git partial clone, lazy file checkout, sandbox branch fetch, detached file view and diff");
+  // A branch view is a detached worktree beside the checkout; a later push
+  // updates it in place, and the checkout itself does not move.
+  git(["switch", "-c", "agent/view"], source);
+  await writeFile(path.join(source, "code.txt"), "agent branch v1\n");
+  git(["add", "."], source); git(["-c", "commit.gpgsign=false", "commit", "-m", "agent v1"], source);
+  git(["push", origin, "agent/view"], source);
+  const before = git(["rev-parse", "HEAD"], checkout);
+  const scoped = { GITHUB_READ_TOKEN_REPOSITORIES: '["fixture/repo"]' };
+  await run(["view", "fixture/repo", "agent/view"], scoped);
+  const view = `${checkout}@agent/view`;
+  assert.equal(await readFile(path.join(view, "code.txt"), "utf8"), "agent branch v1\n");
+  await writeFile(path.join(source, "code.txt"), "agent branch v2\n");
+  git(["-c", "commit.gpgsign=false", "commit", "-am", "agent v2"], source);
+  git(["push", origin, "agent/view"], source);
+  await run(["view", "fixture/repo", "agent/view"], scoped);
+  assert.equal(await readFile(path.join(view, "code.txt"), "utf8"), "agent branch v2\n");
+  assert.equal(git(["rev-parse", "HEAD"], view), git(["rev-parse", "agent/view"], source));
+  assert.equal(git(["rev-parse", "HEAD"], checkout), before);
+  await assert.rejects(run(["view", "fixture/repo", "agent/view"]), "a repository outside the token scope has no view");
+  console.log("PASS: real Git partial clone, lazy file checkout, sandbox branch fetch, detached file view and diff, branch view");
 } finally { await new Promise((resolve) => server.close(resolve)); await rm(directory, { recursive: true, force: true }); }
