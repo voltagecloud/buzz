@@ -14,7 +14,9 @@ mod frames;
 mod names;
 mod projects;
 mod prompt;
+mod views;
 mod wire;
+mod workspace_paths;
 
 #[cfg(test)]
 mod tests;
@@ -115,6 +117,7 @@ pub(crate) async fn run(
         agent,
         channel,
         home: dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/")),
+        paseo_code: std::path::PathBuf::from("paseo-code"),
     };
 
     let (relay_tx, relay_rx) = mpsc::channel(RELAY_QUEUE);

@@ -412,6 +412,7 @@ impl<R: BridgeRelay> Bridge<R> {
             events.into_iter().chain(overlap).collect(),
             labels,
             turns,
+            &self.views,
         ) {
             self.send(wire::session_update(raw, update)).await?;
         }

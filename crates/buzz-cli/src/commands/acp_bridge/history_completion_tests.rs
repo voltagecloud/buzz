@@ -26,10 +26,12 @@ fn sample_bridge() -> (Bridge<NoRelay>, mpsc::Receiver<Value>) {
         agent: Keys::generate().public_key(),
         channel: uuid::Uuid::new_v4(),
         home: std::path::PathBuf::from("/nonexistent"),
+        paseo_code: std::path::PathBuf::from("/nonexistent/paseo-code"),
     };
     let (out, replies) = mpsc::channel(4);
     let (ops, _) = mpsc::channel(4);
     let bridge = Bridge {
+        views: BranchViews::new(scope.paseo_code.clone(), scope.home.clone()),
         scope,
         relay: Arc::new(NoRelay),
         out,

@@ -1,5 +1,6 @@
 //! Merge validated transcript turns with durable conversation messages.
 use super::*;
+use crate::commands::acp_bridge::{views::BranchViews, workspace_paths};
 
 /// Preserve durable posts unless the transcript contains that exact answer.
 /// A tool may publish a message that differs from its ACP assistant text.
@@ -8,6 +9,7 @@ pub(super) fn updates(
     mut events: Vec<Event>,
     labels: HashMap<PublicKey, String>,
     turns: Vec<transcripts::ReplayTurn>,
+    views: &Arc<BranchViews>,
 ) -> Vec<Value> {
     events.sort_by_key(|event| (event.created_at, event.id));
     events.dedup_by_key(|event| event.id);
@@ -31,7 +33,7 @@ pub(super) fn updates(
                 || (turn.started == event.created_at.as_secs() && event.pubkey == scope.agent)
         }) {
             if let Some(turn) = pending.next() {
-                append_turn(turn, &mut output, &mut agent_side);
+                append_turn(turn, scope, views, &mut output, &mut agent_side);
             }
         }
         if event.pubkey == scope.agent
@@ -66,16 +68,27 @@ pub(super) fn updates(
         output.push(update);
     }
     for turn in pending {
-        append_turn(turn, &mut output, &mut agent_side);
+        append_turn(turn, scope, views, &mut output, &mut agent_side);
     }
     output
 }
 
-fn append_turn(turn: &transcripts::ReplayTurn, output: &mut Vec<Value>, agent_side: &mut bool) {
-    for update in turn.payload.updates.clone() {
+fn append_turn(
+    turn: &transcripts::ReplayTurn,
+    scope: &Scope,
+    views: &Arc<BranchViews>,
+    output: &mut Vec<Value>,
+    agent_side: &mut bool,
+) {
+    for mut update in turn.payload.updates.clone() {
         if update["sessionUpdate"] == "agent_message_chunk" && *agent_side {
             output.push(wire::agent_text_chunk("\n\n"));
             *agent_side = false;
+        }
+        for view in
+            workspace_paths::prepare_update(&mut update, &turn.payload.workspace, &scope.home)
+        {
+            views.request(view);
         }
         output.push(update);
     }
