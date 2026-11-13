@@ -521,6 +521,32 @@ mod tests {
         );
     }
 
+    /// NIP-AT: only the `p` recipient reads a transcript part through a
+    /// kindless `ids` lookup; the authoring agent and the channel's other
+    /// members do not.
+    #[test]
+    fn reader_authorized_for_event_gates_agent_session_transcript_by_p() {
+        let agent = Keys::generate();
+        let recipient = Keys::generate().public_key().to_hex();
+        let member = Keys::generate().public_key().to_hex();
+        let part = EventBuilder::new(
+            Kind::Custom(crate::kind::KIND_AGENT_SESSION_TRANSCRIPT as u16),
+            "ciphertext",
+        )
+        .tags([
+            Tag::parse(["p", &recipient]).unwrap(),
+            Tag::parse(["h", "0b6c1f0e-2a7d-4c1e-9f3a-5d2b8e4c7a10"]).unwrap(),
+        ])
+        .sign_with_keys(&agent)
+        .expect("sign");
+        assert!(reader_authorized_for_event(&part, &recipient));
+        assert!(!reader_authorized_for_event(&part, &member));
+        assert!(!reader_authorized_for_event(
+            &part,
+            &agent.public_key().to_hex()
+        ));
+    }
+
     #[test]
     fn reader_authorized_for_event_gates_sandbox_session_control_by_p() {
         let sender = Keys::generate();

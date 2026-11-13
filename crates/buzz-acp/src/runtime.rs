@@ -84,8 +84,22 @@ fn make_prompt_context(
     let cwd = current_working_directory()?;
     let sharing =
         crate::sharing::Client::from_config(config, &rest_client)?.map(std::sync::Arc::new);
+    let mcp_servers = build_mcp_servers(config);
+    // Every environment the agent or its tools receive: the inherited harness
+    // environment, persona variables, and the MCP tool environment.
+    let transcript_secrets = crate::transcript::Secrets::collect(
+        Some(&config.keys),
+        std::env::vars()
+            .chain(config.persona_env_vars.iter().cloned())
+            .chain(
+                mcp_servers
+                    .iter()
+                    .flat_map(|server| &server.env)
+                    .map(|var| (var.name.clone(), var.value.clone())),
+            ),
+    );
     Ok(PromptContext {
-        mcp_servers: build_mcp_servers(config),
+        mcp_servers,
         initial_message: config.initial_message.clone(),
         idle_timeout: Duration::from_secs(config.idle_timeout_secs),
         max_turn_duration: Duration::from_secs(config.max_turn_duration_secs),
@@ -127,6 +141,8 @@ fn make_prompt_context(
         memory_enabled: config.memory_enabled,
         sharing,
         gateways: None,
+        transcript_secrets: std::sync::Arc::new(transcript_secrets),
+        transcript_tasks: Default::default(),
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
     })

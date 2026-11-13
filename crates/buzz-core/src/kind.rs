@@ -180,6 +180,9 @@ pub fn k_tag_kinds(event: &nostr::Event) -> impl Iterator<Item = u32> + '_ {
 pub const RESULT_GATED_KINDS: &[u32] = &[
     KIND_DM_VISIBILITY,
     KIND_AGENT_TURN_METRIC,
+    // NIP-AT: a transcript's cleartext envelope names its thread and channel,
+    // so knowing its id is not authorization.
+    KIND_AGENT_SESSION_TRANSCRIPT,
     KIND_MEMBER_ADDED_NOTIFICATION,
     KIND_MEMBER_REMOVED_NOTIFICATION,
     // Sandbox session control events carry agent keys and launch secrets as
@@ -193,12 +196,14 @@ pub const RESULT_GATED_KINDS: &[u32] = &[
 ///
 /// The relay enforces this at the filter layer (`p_gated_filters_authorized`):
 /// a REQ that can match any kind in this set is closed unless the filter's
-/// `#p` values exactly equal the authenticated reader's pubkey. For stored
-/// (non-ephemeral) kinds in this set, the storage layer additionally writes a
-/// NULL `search_tsv` so the event is unsearchable through NIP-50 FTS
-/// (`schema/schema.sql` and `migrations/0001_initial_schema.sql` — drift
-/// caught by `p_gated_persistent_kinds_have_storage_null_tsvector` in
-/// `crates/buzz-search/tests/fts_integration.rs`).
+/// `#p` values exactly equal the authenticated reader's pubkey. A stored
+/// (non-ephemeral) kind in this set also needs a NULL `search_tsv`, so the
+/// event is unsearchable through NIP-50 FTS (`schema/tables/public/events.sql`
+/// and the migrations — drift caught by
+/// `p_gated_persistent_kinds_have_storage_null_tsvector` in
+/// `crates/buzz-search/tests/postgres_fts_integration.rs`), unless ingest
+/// enforces ciphertext-only content for it: see
+/// [`CIPHERTEXT_ONLY_P_GATED_KINDS`].
 ///
 /// Ephemeral kinds (20000–29999, e.g. [`KIND_AGENT_OBSERVER_FRAME`]) are
 /// included for filter-layer enforcement but are never stored, so the
@@ -213,10 +218,26 @@ pub const P_GATED_KINDS: &[u32] = &[
     // readable by any unauthenticated or non-owner party, including via `ids`
     // filters — see NIP-AM §Relay Behavior.
     KIND_AGENT_TURN_METRIC,
+    // NIP-AT: agent session transcripts are encrypted to one recipient each
+    // (the owner or a live gateway); only that recipient may read them, even
+    // by `ids`.
+    KIND_AGENT_SESSION_TRANSCRIPT,
     // Only the `p`-tagged provider or session manager may see that a request
     // or reply exists.
     KIND_SANDBOX_SESSION_CONTROL,
 ];
+
+/// Stored [`P_GATED_KINDS`] exempt from the NULL `search_tsv` rule because
+/// relay ingest admits them only with NIP-44 v2 ciphertext content (base64,
+/// version byte `0x02`, NIP-44 length bounds).
+///
+/// Indexing such content tokenizes base64 ciphertext, which reveals nothing
+/// about the plaintext, so the kind needs no `search_tsv` schema change (a
+/// change to that generated column rewrites the whole events table; see
+/// `docs/database.md`). The filter-level `#p` gate still guards every read.
+/// Ingest enforces the content rule for every kind listed here, so adding a
+/// kind here is what makes the exemption safe.
+pub const CIPHERTEXT_ONLY_P_GATED_KINDS: &[u32] = &[KIND_AGENT_SESSION_TRANSCRIPT];
 
 /// NIP-AP: Agent Persona (parameterized replaceable, owner-authored).
 ///
@@ -620,6 +641,18 @@ pub const KIND_MEMBER_REMOVED_NOTIFICATION: u32 = 44101;
 /// See `docs/nips/NIP-AM.md`.
 pub const KIND_AGENT_TURN_METRIC: u32 = 44200;
 
+/// NIP-AT: Agent Session Transcript — durable, bounded record of one agent
+/// turn's ACP `session/update` items (agent-authored).
+///
+/// Regular stored event (append-only, never replaced). At every turn end the
+/// harness publishes up to 8 parts per recipient, each NIP-44 encrypted to one
+/// recipient: the agent's owner and each live owner-delegated gateway. Tags:
+/// exactly one `p` (recipient), one root `e` (thread root), one `h` (channel)
+/// and one `turn` (`turn_id`, part index, part count); nothing else. Reads are
+/// p-gated, including `ids` lookups. Content must be NIP-44 v2 ciphertext,
+/// which ingest enforces. See `docs/nips/NIP-AT.md`.
+pub const KIND_AGENT_SESSION_TRANSCRIPT: u32 = 44201;
+
 // Forum / social (45000–45999)
 // V1 used addressable range (30001–30003) — wrong.
 /// A forum post (thread root).
@@ -813,6 +846,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_MEMBER_ADDED_NOTIFICATION,
     KIND_MEMBER_REMOVED_NOTIFICATION,
     KIND_AGENT_TURN_METRIC,
+    KIND_AGENT_SESSION_TRANSCRIPT,
     KIND_WORKFLOW_DEF,
     KIND_LONG_FORM,
     KIND_USER_STATUS,
@@ -984,6 +1018,11 @@ const _: () = assert!(!is_ephemeral(KIND_AGENT_TURN_METRIC));
 const _: () = assert!(!is_replaceable(KIND_AGENT_TURN_METRIC));
 const _: () = assert!(!is_parameterized_replaceable(KIND_AGENT_TURN_METRIC));
 const _: () = assert!(KIND_AGENT_TURN_METRIC <= u16::MAX as u32);
+// Compile-time: KIND_AGENT_SESSION_TRANSCRIPT is a regular stored kind.
+const _: () = assert!(!is_ephemeral(KIND_AGENT_SESSION_TRANSCRIPT));
+const _: () = assert!(!is_replaceable(KIND_AGENT_SESSION_TRANSCRIPT));
+const _: () = assert!(!is_parameterized_replaceable(KIND_AGENT_SESSION_TRANSCRIPT));
+const _: () = assert!(KIND_AGENT_SESSION_TRANSCRIPT <= u16::MAX as u32);
 // Moderation kinds fit u16 and are neither replaceable nor ephemeral:
 // 1984 is a regular event (persisted to the queue, never fanned out);
 // 9040–9044 are direct commands (executed, never stored).
@@ -1003,6 +1042,19 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for &k in ALL_KINDS {
             assert!(seen.insert(k), "duplicate kind value: {k}");
+        }
+    }
+
+    #[test]
+    fn agent_session_transcript_is_recipient_gated_and_ciphertext_only() {
+        assert_eq!(KIND_AGENT_SESSION_TRANSCRIPT, 44201);
+        assert!(P_GATED_KINDS.contains(&KIND_AGENT_SESSION_TRANSCRIPT));
+        assert!(RESULT_GATED_KINDS.contains(&KIND_AGENT_SESSION_TRANSCRIPT));
+        assert!(ALL_KINDS.contains(&KIND_AGENT_SESSION_TRANSCRIPT));
+        // The search exemption only covers stored p-gated kinds.
+        for &kind in CIPHERTEXT_ONLY_P_GATED_KINDS {
+            assert!(P_GATED_KINDS.contains(&kind), "kind {kind}");
+            assert!(!is_ephemeral(kind), "kind {kind}");
         }
     }
 

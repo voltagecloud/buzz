@@ -19,6 +19,10 @@ pub(crate) struct FakeRelay {
     pub(crate) queries: Arc<AtomicUsize>,
     pub(crate) rest: RestClient,
     pub(crate) members: Arc<Mutex<Vec<PublicKey>>>,
+    /// Events submitted through `POST /events`, in arrival order.
+    /// Read only by the Unix-only transcript tests (`pool/transcript_tests.rs`).
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) published: Arc<Mutex<Vec<Event>>>,
     /// Authority reads that did not ask for writer consistency.
     replica_reads: Arc<AtomicUsize>,
     task: tokio::task::JoinHandle<()>,
@@ -59,14 +63,16 @@ pub(crate) async fn fake_relay() -> FakeRelay {
     let fail = Arc::new(AtomicBool::new(false));
     let queries = Arc::new(AtomicUsize::new(0));
     let replica_reads = Arc::new(AtomicUsize::new(0));
+    let published = Arc::new(Mutex::new(Vec::<Event>::new()));
     let task = {
-        let (heads, profiles, fail, queries, members, replica_reads) = (
+        let (heads, profiles, fail, queries, members, replica_reads, published) = (
             heads.clone(),
             profiles.clone(),
             fail.clone(),
             queries.clone(),
             members.clone(),
             replica_reads.clone(),
+            published.clone(),
         );
         tokio::spawn(async move {
             loop {
@@ -123,6 +129,11 @@ pub(crate) async fn fake_relay() -> FakeRelay {
                 if replica_read {
                     replica_reads.fetch_add(1, Ordering::SeqCst);
                 }
+                if text.starts_with("POST /events") {
+                    if let Ok(event) = serde_json::from_str::<Event>(body) {
+                        published.lock().unwrap().push(event);
+                    }
+                }
                 let (status, payload) = if replica_read {
                     ("400 Bad Request", "{}".to_string())
                 } else if fail.load(Ordering::SeqCst) {
@@ -168,6 +179,7 @@ pub(crate) async fn fake_relay() -> FakeRelay {
         heads,
         profiles,
         members,
+        published,
         fail,
         queries,
         replica_reads,

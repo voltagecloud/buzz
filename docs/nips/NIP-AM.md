@@ -268,6 +268,9 @@ queries.
 - [NIP-AO](NIP-AO.md): same agent↔owner encryption and tag scoping, but
   ephemeral and transcript-grade. NIP-AM events MUST NOT carry conversation
   content, tool calls, or protocol frames — usage numbers and identifiers only.
+- [NIP-AT](NIP-AT.md): the durable, encrypted turn transcript (kind 44201),
+  which carries conversation content and tool calls under a fixed size bound.
+  NIP-AM stays a usage record only.
 - [NIP-09](09.md): the authoring agent (or its owner via relay policy) may
   request deletion; relays apply standard deletion semantics.
 - [NIP-40](40.md): publishers MAY set `expiration` to bound retention.

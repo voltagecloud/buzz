@@ -3414,6 +3414,48 @@ mod tests {
         );
     }
 
+    /// NIP-AT: a non-recipient cannot read kind 44201 even by naming its id;
+    /// only a filter whose `#p` is exactly the reader passes.
+    /// Mutation: drop 44201 from `RESULT_GATED_KINDS` and the `ids` cases
+    /// pass; drop it from `P_GATED_KINDS` and the kind-only case passes.
+    #[test]
+    fn agent_session_transcript_requires_p_tag_even_with_ids() {
+        let p_tag = SingleLetterTag::lowercase(Alphabet::P);
+        let reader = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let id = nostr::EventId::from_hex(
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        )
+        .unwrap();
+        let kind = nostr::Kind::Custom(buzz_core::kind::KIND_AGENT_SESSION_TRANSCRIPT as u16);
+        let cases = [
+            ("kind only", Filter::new().kind(kind), false),
+            ("kind and ids", Filter::new().kind(kind).id(id), false),
+            (
+                "kind, ids and another #p",
+                Filter::new().kind(kind).id(id).custom_tags(p_tag, [other]),
+                false,
+            ),
+            (
+                "kind and own #p",
+                Filter::new().kind(kind).custom_tags(p_tag, [reader]),
+                true,
+            ),
+            (
+                "kind, ids and own #p",
+                Filter::new().kind(kind).id(id).custom_tags(p_tag, [reader]),
+                true,
+            ),
+        ];
+        for (name, filter, allowed) in cases {
+            assert_eq!(
+                p_gated_filters_authorized(&[filter], reader),
+                allowed,
+                "{name}"
+            );
+        }
+    }
+
     /// Kind 24210 loses the `ids` exemption like 30622 and 44200: a request's
     /// id is visible in its reply's `e` tag, so knowing it is not authorization.
     #[test]

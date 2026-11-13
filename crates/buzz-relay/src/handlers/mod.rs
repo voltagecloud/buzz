@@ -3,6 +3,8 @@ pub mod admin_action_worker;
 pub mod admin_outbox_worker;
 /// Owner-signed channel invocation grants for remote agents.
 mod agent_grant;
+#[cfg(test)]
+mod agent_transcript_postgres_tests;
 /// NIP-AR Sync subscriptions.
 pub mod artifact_sync;
 #[cfg(test)]
