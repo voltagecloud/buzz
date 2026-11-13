@@ -1,4 +1,5 @@
-//! Managed daemon keys cannot acquire independent human-sharing authority.
+//! A managed daemon key acts for its owner only while the owner delegates it,
+//! and never acquires independent human-sharing authority.
 use super::*;
 use base64::Engine;
 use futures_util::StreamExt;
@@ -6,11 +7,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 type MembershipHook = Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>;
+/// A `kinds` filter value the fake relay refuses with CLOSED, as an outage.
+type FailKinds = Arc<Mutex<Option<Value>>>;
 
 struct Relay {
     url: String,
     events: Arc<Mutex<Vec<Event>>>,
     after_membership: MembershipHook,
+    fail_kinds: FailKinds,
     task: tokio::task::JoinHandle<()>,
 }
 impl Drop for Relay {
@@ -24,6 +28,8 @@ impl Relay {
         let captured = events.clone();
         let after_membership = Arc::new(Mutex::new(None));
         let hook = after_membership.clone();
+        let fail_kinds: FailKinds = Arc::new(Mutex::new(None));
+        let fail = fail_kinds.clone();
         let app = axum::Router::new().route(
             "/",
             axum::routing::get(
@@ -33,11 +39,12 @@ impl Relay {
                 >| {
                     let events = captured.clone();
                     let hook = hook.clone();
+                    let fail = fail.clone();
                     async move {
                         use axum::response::IntoResponse;
                         match upgrade {
                             Ok(upgrade) => upgrade
-                                .on_upgrade(move |socket| serve(socket, events, hook))
+                                .on_upgrade(move |socket| serve(socket, events, hook, fail))
                                 .into_response(),
                             Err(_) => axum::Json(json!({"self":manager_keys().public_key()}))
                                 .into_response(),
@@ -53,6 +60,7 @@ impl Relay {
             url,
             events,
             after_membership,
+            fail_kinds,
             task,
         }
     }
@@ -61,6 +69,7 @@ async fn serve(
     mut socket: axum::extract::ws::WebSocket,
     events: Arc<Mutex<Vec<Event>>>,
     after_membership: MembershipHook,
+    fail_kinds: FailKinds,
 ) {
     use axum::extract::ws::Message;
     let frame = |v: Value| Message::Text(v.to_string().into());
@@ -86,11 +95,13 @@ async fn serve(
                     filter["consistency"], "strong",
                     "authority must read the writer"
                 );
-                assert_ne!(
-                    filter["kinds"],
-                    json!([30181]),
-                    "human fallback must not depend on an expiring/bounded delegation list"
-                );
+                if fail_kinds.lock().unwrap().as_ref() == Some(&filter["kinds"]) {
+                    socket
+                        .send(frame(json!(["CLOSED", input[1], "error: unavailable"])))
+                        .await
+                        .unwrap();
+                    continue;
+                }
                 let nostr_filter: nostr::Filter = serde_json::from_value(filter.clone()).unwrap();
                 let mut matches = events.lock().unwrap().iter().filter(|event| {
                     let expired = event.tags.iter().any(|tag| matches!(tag.as_slice(),[name,value] if name=="expiration" && value.parse::<u64>().is_ok_and(|v|v<=Timestamp::now().as_secs())));
@@ -125,8 +136,21 @@ fn event(signer: &Keys, kind: u16, tags: Vec<Tag>, text: &str, created: u64) -> 
         .unwrap()
 }
 
-#[tokio::test]
-async fn managed_gateways_never_fall_back_to_human_sharing_after_authority_loss() {
+/// A manager with shared tasks on, the developer's managed daemon gateway, and
+/// the registered `agent()` shared in one channel where the owner, a teammate
+/// human, the gateway, `agent()` and `other_agent()` are members. No
+/// delegation head exists yet.
+struct Setup {
+    relay: Relay,
+    cluster: buzz_backend_kubernetes::sandbox_fake::Shared,
+    manager: Manager,
+    developer: crate::manager::Developer,
+    gateway: Keys,
+    channel: uuid::Uuid,
+    initial: Vec<Event>,
+}
+
+async fn setup() -> Setup {
     let relay = Relay::start().await;
     let cluster = buzz_backend_kubernetes::sandbox_fake::Shared::default();
     let mut manager = super::manager();
@@ -181,6 +205,7 @@ async fn managed_gateways_never_fall_back_to_human_sharing_after_authority_loss(
         (stranger().public_key(), "member"),
         (gateway.public_key(), "member"),
         (agent().public_key(), "bot"),
+        (other_agent().public_key(), "bot"),
     ] {
         roster.push(Tag::parse(["p", &key.to_hex(), "", role]).unwrap());
         if role == "member" {
@@ -199,6 +224,28 @@ async fn managed_gateways_never_fall_back_to_human_sharing_after_authority_loss(
         "",
         created,
     ));
+    Setup {
+        relay,
+        cluster,
+        manager,
+        developer,
+        gateway,
+        channel,
+        initial,
+    }
+}
+
+#[tokio::test]
+async fn managed_gateways_never_fall_back_to_human_sharing_after_authority_loss() {
+    let Setup {
+        relay,
+        cluster,
+        manager,
+        developer,
+        gateway,
+        channel,
+        initial,
+    } = setup().await;
     for state in ["revoked", "expired", "displaced"] {
         let now = Timestamp::now().as_secs();
         let mut heads = vec![];
@@ -434,18 +481,241 @@ async fn managed_gateways_never_fall_back_to_human_sharing_after_authority_loss(
         );
     }
     cluster.lock().unwrap().fail_secret_reads = 1;
+    let bound = (owner().public_key(), developer);
     let failed = manager
         .enrollment
-        .shared_daemon_keys(std::slice::from_ref(&developer))
+        .shared_daemon_keys(std::slice::from_ref(&bound))
         .await
         .unwrap_err();
     assert_eq!(failed["code"], "shared_task_retry");
     assert!(manager
         .enrollment
-        .shared_daemon_keys(&vec![developer; 65])
+        .shared_daemon_keys(&vec![bound; 65])
         .await
         .is_err());
 }
 
 #[path = "ended_shared.rs"]
 mod ended_shared;
+/// Rows through the production admission: a live managed gateway's direct
+/// prompt, and a handoff rooted in its prompt to the owner's other agent, admit
+/// with the owner as the human and write the owner's budget, even when a
+/// stranger's head also names the gateway. A revoked or expired gateway and an
+/// owner without a profile are permanent denials; a delegation read failure is
+/// a retry. When a bound owner's head names a teammate's key, the teammate's
+/// direct prompt and the handoff it roots stay the teammate's own. A gateway
+/// key held by two developers' Secrets is refused whichever owner delegates it.
+/// Mutations: refuse every managed key in `check_shared_human` again (the old
+/// rule) and the live rows fail; drop its owner binding and the two-Secret row
+/// fails; trust any bound owner's heads in the policy and the teammate rows
+/// fail.
+#[tokio::test]
+async fn a_live_managed_gateway_acts_as_its_owner_for_shared_tasks() {
+    let Setup {
+        relay,
+        cluster,
+        manager,
+        gateway,
+        channel,
+        mut initial,
+        ..
+    } = setup().await;
+    let now = Timestamp::now().as_secs();
+    let initial_agent = other_agent();
+    let auth = buzz_sdk::nip_oa::parse_auth_tag(&tag(&owner(), &initial_agent, "")).unwrap();
+    initial.push(event(&initial_agent, 0, vec![auth], "{}", now - 100));
+    let delegate = |owner: &Keys, key: PublicKey, created, expires| {
+        buzz_sdk::gateway::Delegation::grant(key, expires, created)
+            .unwrap()
+            .sign_with_keys(owner)
+            .unwrap()
+    };
+    let grant = |created, expires| delegate(&owner(), gateway.public_key(), created, expires);
+    let revoke = buzz_sdk::gateway::Delegation::revoke(gateway.public_key(), now - 10)
+        .unwrap()
+        .sign_with_keys(&owner())
+        .unwrap();
+    let daemon = cluster.lock().unwrap().secrets["paseo-daemon-dev"].clone();
+    for (state, handoff, refusal) in [
+        ("live", false, None),
+        ("live", true, None),
+        ("stranger_names_gateway", false, None),
+        ("stranger_names_gateway", true, None),
+        ("teammate_names_requester", false, None),
+        ("teammate_names_root_author", true, None),
+        (
+            "gateway_bound_to_two_owners",
+            false,
+            Some(("shared_task_denied", "managed Paseo")),
+        ),
+        // Judged as itself, the key needs the initial agent's sharing grant.
+        ("revoked", true, Some(("shared_task_denied", "private"))),
+        (
+            "revoked",
+            false,
+            Some(("shared_task_denied", "managed Paseo")),
+        ),
+        ("expired", true, Some(("shared_task_denied", "private"))),
+        (
+            "expired",
+            false,
+            Some(("shared_task_denied", "managed Paseo")),
+        ),
+        (
+            "owner_without_profile",
+            true,
+            Some(("shared_task_denied", "has no profile")),
+        ),
+        ("relay_failure", true, Some(("shared_task_retry", ""))),
+    ] {
+        let mut events = initial.clone();
+        let mut root_signer = gateway.clone();
+        match state {
+            "revoked" => events.extend([grant(now - 20, now + 3600), revoke.clone()]),
+            "expired" => events.push(grant(now - 50, now - 1)),
+            "owner_without_profile" => {
+                events.retain(|e| !(e.kind == Kind::Metadata && e.pubkey == owner().public_key()));
+                events.push(grant(now - 20, now + 3600));
+            }
+            "stranger_names_gateway" => events.extend([
+                grant(now - 20, now + 3600),
+                delegate(&stranger(), gateway.public_key(), now - 15, now + 3600),
+            ]),
+            // The owner is bound to the managed gateway; its head naming the
+            // teammate's key must not make the teammate speak for the owner.
+            "teammate_names_requester" | "teammate_names_root_author" => {
+                root_signer = stranger();
+                events.extend([
+                    grant(now - 20, now + 3600),
+                    delegate(&owner(), stranger().public_key(), now - 15, now + 3600),
+                    buzz_sdk::sharing::Grant::builder(initial_agent.public_key(), channel, true)
+                        .unwrap()
+                        .custom_created_at(Timestamp::from(now - 20))
+                        .sign_with_keys(&owner())
+                        .unwrap(),
+                ]);
+            }
+            // Both developers' Secrets hold the key and both owners delegate it.
+            "gateway_bound_to_two_owners" => {
+                cluster
+                    .lock()
+                    .unwrap()
+                    .secrets
+                    .insert("paseo-daemon-another-dev".into(), daemon.clone());
+                events.extend([
+                    grant(now - 20, now + 3600),
+                    delegate(&stranger(), gateway.public_key(), now - 15, now + 3600),
+                ]);
+            }
+            _ => events.push(grant(now - 20, now + 3600)),
+        }
+        *relay.fail_kinds.lock().unwrap() = (state == "relay_failure").then(|| json!([30181]));
+        let first = if handoff {
+            initial_agent.public_key()
+        } else {
+            agent().public_key()
+        };
+        let root = event(
+            &root_signer,
+            9,
+            vec![
+                Tag::parse(["h", &channel.to_string()]).unwrap(),
+                Tag::public_key(first),
+            ],
+            &format!("{state}/{handoff}"),
+            now - 5,
+        );
+        events.push(root.clone());
+        let request = root.id.to_hex();
+        let trigger = if handoff {
+            let link = buzz_sdk::sharing::task::handoff(
+                &root,
+                first,
+                agent().public_key(),
+                "please review",
+                now,
+            )
+            .unwrap()
+            .custom_created_at(Timestamp::from(now - 4))
+            .sign_with_keys(&initial_agent)
+            .unwrap();
+            events.push(link.clone());
+            link
+        } else {
+            root
+        };
+        *relay.events.lock().unwrap() = events;
+        let journal_before = journal(&cluster);
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            manager.admit_shared(
+                owner().public_key(),
+                agent().public_key(),
+                NAMESPACE,
+                &crate::shared_tasks::Request {
+                    relay_url: relay.url.clone(),
+                    trigger,
+                },
+            ),
+        )
+        .await
+        .unwrap();
+        cluster
+            .lock()
+            .unwrap()
+            .secrets
+            .remove("paseo-daemon-another-dev");
+        let row = format!("{state}/{handoff}: {result}");
+        let journal_after = journal(&cluster);
+        match refusal {
+            None => {
+                let human = if root_signer.public_key() == gateway.public_key() {
+                    owner().public_key()
+                } else {
+                    root_signer.public_key()
+                };
+                assert_eq!(result["ok"], true, "{row}");
+                assert_eq!(result["human"], json!(human), "{row}");
+                // The budget is the human's; its receipt keeps the actual signer.
+                let budget = &journal_after[format!("{request}:{}", first.to_hex())];
+                assert_eq!(budget["human"], json!(human), "{row}");
+                assert_eq!(
+                    budget["receipts"][0]["requester"],
+                    json!(root_signer.public_key()),
+                    "{row}"
+                );
+            }
+            Some((code, reason)) => {
+                assert_eq!(result["code"], code, "{row}");
+                assert!(result["error"].as_str().unwrap().contains(reason), "{row}");
+                assert_eq!(
+                    journal_after, journal_before,
+                    "refusal precedes budget: {row}"
+                );
+            }
+        }
+    }
+}
+
+/// The owner namespace's shared admission journal tasks, empty before the first.
+fn journal(cluster: &buzz_backend_kubernetes::sandbox_fake::Shared) -> Value {
+    let cluster = cluster.lock().unwrap();
+    let Some((_, secret)) = cluster
+        .secrets
+        .iter()
+        .find(|(name, _)| name.starts_with("buzz-shared-admissions-"))
+    else {
+        return json!({});
+    };
+    let text = match secret["stringData"].as_object() {
+        Some(data) => data.values().next().unwrap().as_str().unwrap().to_owned(),
+        None => {
+            let encoded = secret["data"].as_object().unwrap().values().next().unwrap();
+            let raw = base64::engine::general_purpose::STANDARD
+                .decode(encoded.as_str().unwrap())
+                .unwrap();
+            String::from_utf8(raw).unwrap()
+        }
+    };
+    serde_json::from_str::<Value>(&text).unwrap()["tasks"].clone()
+}

@@ -21,6 +21,7 @@ pub fn task() -> Task {
             parent: id,
         },
         human,
+        gateway: None,
         origin_owner: human,
         trigger: id,
         handoff: false,

@@ -163,30 +163,19 @@ impl GatewayAccess {
 
     async fn lookup(&self) -> Result<Authority, LookupError> {
         let now = unix_now();
-        let heads = self
-            .query(json!({
-                "kinds": [buzz_sdk::kind::KIND_AGENT_GATEWAY_DELEGATION],
-                "authors": [self.owner.to_hex()],
-                "limit": buzz_sdk::gateway::LOOKUP_LIMIT,
-            }))
-            .await?;
-        let candidates: Vec<String> = buzz_sdk::gateway::live_heads(self.owner, &heads, now)
-            .iter()
-            .map(|live| live.gateway().to_hex())
-            .collect();
-        if candidates.is_empty() {
+        let live = buzz_sdk::gateway::lookup(
+            |filter| self.query(filter),
+            self.owner,
+            &[self.owner, self.agent],
+            now,
+        )
+        .await?;
+        if live.is_empty() {
             return Ok(Authority {
                 gateways: Vec::new(),
                 relay: None,
             });
         }
-        let profiles = self
-            .query(json!({
-                "kinds": [0],
-                "authors": candidates,
-                "limit": candidates.len(),
-            }))
-            .await?;
         let relay = self
             .rest
             .relay_self()
@@ -215,16 +204,10 @@ impl GatewayAccess {
             });
         }
         Ok(Authority {
-            gateways: buzz_sdk::gateway::resolve(
-                self.owner,
-                &heads,
-                &profiles,
-                &[self.owner, self.agent],
-                now,
-            )
-            .into_iter()
-            .filter(|live| member(live.gateway()))
-            .collect(),
+            gateways: live
+                .into_iter()
+                .filter(|live| member(live.gateway()))
+                .collect(),
             relay: Some(relay),
         })
     }

@@ -33,6 +33,7 @@ sequenceDiagram
 | Thread prompt | Bound channel thread in strict owner mode; live grant checked at ingress and again before queued model dispatch |
 | Turn cancellation | Live grant; signed, fresh NIP-44 observer control; command exactly `cancel_turn` |
 | Observer telemetry | Agent ownership verified by relay; separate NIP-44 copy for each live gateway |
+| Shared tasks and handoffs | Managed Paseo daemon key: judged as its bound owner while delegated. Other keys: judged as themselves. See [Shared tasks](#shared-tasks-and-handoffs) |
 | Owner DMs, profile and channel administration | No delegated authority |
 | Model changes and owner announcements | Owner key required |
 | Checkpoint recovery of an ended thread | Mention launch only: the gateway's own mention in that thread restores the last checkpoint of a session that ended before it; its scheduled workflow prompts do not ([server mention launch](server-mention-launch.md)) |
@@ -93,15 +94,76 @@ Relay expiration rules can omit expired grants.
 At 28 heads it warns on stderr that the lookup window is nearly full.
 Renew an active gateway grant to move that coordinate back into the window.
 
-Gateway keys retain independent ordinary-account permissions. A generic key may
-also have separate channel-sharing rights; revoking delegation does not revoke
-those independent rights. Managed Paseo keys use the manager restriction below.
+A managed Paseo daemon key uses its owner's sharing permissions while its
+delegation is live, as the next section describes. Every other gateway key keeps
+only its independent ordinary-account permissions, including any separate
+channel-sharing rights. Revoking its delegation does not revoke those rights.
+
+## Shared tasks and handoffs
+
+Shared-task admission treats a managed Paseo daemon key as its owner only when
+two records agree:
+
+1. The manager's own binding. The manager reads the key from the daemon Secret
+   of a configured developer. That developer's `owner_pubkey` is the bound
+   owner.
+2. The bound owner's live delegation. The manager reads the owner's newest 32
+   heads (`authors` set to the owner). This is the same lookup that the harness
+   uses for a direct gateway prompt, so revocation and expiry apply in the same
+   way.
+
+The manager never reads heads from other authors. A delegation is one-sided:
+any member can publish a head that names any key, and the named key never
+agrees to it. Such a head therefore cannot change how a member is judged, and
+it cannot claim or block a managed gateway.
+
+The mapping applies wherever the sharing policy judges a requester or the
+original human request: a gateway's mention of another owner's agent, and every
+handoff in a task that the gateway started. The manager checks it again at each
+admission.
+
+All sharing checks then apply to the owner: profile, workspace membership,
+channel membership, channel sharing grants, ancestry, and the handoff budget.
+The gateway receives exactly the owner's result:
+
+- The owner's own agents accept the task.
+- A teammate's agent accepts the task only where it is shared in that channel.
+- A teammate's agent that is private in that channel refuses the task.
+
+The gateway itself must also remain a posting member of the channel. The budget
+journal records the owner as the human. Its receipts keep the gateway as the
+actual signer. A gateway workflow acts for its owner only through a literal
+scheduled prompt, as described below.
+
+These refusals are permanent, with code `shared_task_denied`:
+
+- A managed daemon key whose bound owner revoked its delegation, or whose
+  delegation expired or left the 32-head window. The manager refuses the key; it
+  never uses sharing permissions of its own.
+- A daemon key that is held in the Secrets of two developers.
+- An owner without a profile, or an owner who is not a channel member.
+
+A relay, Kubernetes, or timeout failure returns `shared_task_retry`. The
+manager logs the failing stage and the refusal reason for each refused
+admission. The log never contains secrets or message content.
+
+This reverses the earlier rule that refused every managed Paseo gateway in
+shared-task admission.
+
+Known limitation: a gateway key that no manager Secret holds is judged as
+itself, as before this change. A generic gateway, for example one created with
+`buzz gateway grant` for another tool, therefore does not get its owner's
+sharing permissions in shared-task admission. Usually it has no profile, so it
+is refused. A possible later change is a consent record signed by the gateway
+key that names its owner. That record does not exist yet.
 
 For managed Paseo key rotation, revoke the old delegation and retire the old
 community membership before deleting or rotating the daemon Secret.
-The matching manager identifies current daemon keys from their Secrets and
-refuses independent human-sharing admission for them. Delete that identity
-only after retiring its community membership.
+The matching manager identifies current daemon keys, and the owner of each,
+from their Secrets. It admits a daemon key only as a gateway that its bound
+owner currently delegates, with that owner as the task's human. It refuses
+independent human-sharing admission for a daemon key in every other case.
+Delete that identity only after retiring its community membership.
 An operator then deletes the daemon Secret. The owner enrolls again to generate
 new credentials. Admit the new public key, join its channels, and grant access.
 
@@ -149,7 +211,8 @@ List and delete schedules through the existing workflow commands.
 Stored relay schedules survive daemon replacement; local Paseo schedules do not.
 Queued prompts are checked again before dispatch. Revocation, expiry, or channel
 removal stop further delegated prompts under the same bounds as direct gateway use.
-Use the matching manager's managed-key restriction to prevent human-sharing fallback.
+The matching manager's managed-key restriction prevents human-sharing fallback
+after revocation or expiry.
 Workflows cannot grant owner administration, model changes, or owner DM access.
 
 ## Revocation and failure behavior
@@ -220,5 +283,5 @@ and channel, grant it, and send a mention using the gateway key. Confirm one
 sandbox starts and answers. Confirm the gateway receives encrypted observer
 telemetry and can cancel a turn. Revoke it and wait 30 seconds. Confirm its next
 prompt and cancellation are refused, while the owner's prompt still works.
-Confirm a second owner's agent and the owner's DMs remain inaccessible through
-the grant.
+Confirm a second owner's agent that is private in that channel, and the owner's
+DMs, remain inaccessible through the grant.

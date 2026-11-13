@@ -23,6 +23,7 @@ use zeroize::Zeroizing;
 
 use crate::manager::Developer;
 use crate::mobile_launch::{self, Registration, CHANNEL_ANNOTATION, DATA_KEY, LABEL};
+use buzz_sdk::sharing::policy::ManagedGateway;
 
 /// The namespace every developer's daemon runs in (Terraform `buzz-paseo`).
 pub const NAMESPACE: &str = "buzz-paseo";
@@ -438,20 +439,21 @@ impl DaemonSecrets {
         Err(Failed("conflict"))
     }
 
-    /// Read current configured daemon identities directly from Kubernetes.
+    /// Read current configured daemon identities directly from Kubernetes,
+    /// each bound to the owner whose configured developer Secret holds it.
     /// This classification survives delegation expiry and bounded relay lookups.
     /// It does not classify generic gateway keys or retired/deleted Secrets.
     pub async fn gateway_keys(
         &self,
-        developers: &[Developer],
-    ) -> Result<Vec<nostr::PublicKey>, Failed> {
+        developers: &[(nostr::PublicKey, Developer)],
+    ) -> Result<Vec<ManagedGateway>, Failed> {
         if developers.len() > MAX_DAEMON_IDENTITIES {
             return Err(Failed("too_many_daemons"));
         }
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             let api: Api<Secret> = Api::namespaced(self.client.clone(), &self.namespace);
             let mut keys = Vec::with_capacity(developers.len());
-            for developer in developers {
+            for (owner, developer) in developers {
                 let Some(secret) = api
                     .get_opt(&Self::name(&developer.id))
                     .await
@@ -471,7 +473,10 @@ impl DaemonSecrets {
                     })
                     .ok_or(Failed("invalid_gateway_key"))?;
                 let key = nostr::Keys::parse(key).map_err(|_| Failed("invalid_gateway_key"))?;
-                keys.push(key.public_key());
+                keys.push(ManagedGateway {
+                    owner: *owner,
+                    key: key.public_key(),
+                });
             }
             Ok(keys)
         })

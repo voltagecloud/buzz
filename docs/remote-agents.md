@@ -2205,6 +2205,10 @@ because the manager cannot see its permissions. Omitting `paseo` keeps the
 stored token. To remove it, send `{"paseo": {"github_read_token": null}}`;
 `"paseo": null` is refused.
 The gateway needs an owner-signed grant before it can drive remote agents.
+While that grant is live, shared-task admission judges this daemon gateway as
+the owner whose Secret holds it, so its handoffs and its mentions of shared
+teammate agents get the owner's result
+([Gateway keys](agent-gateway-key.md#shared-tasks-and-handoffs)).
 To rotate both identities, first revoke the old gateway grant and have an
 operator retire the old gateway key's community membership, and confirm both.
 Only then delete the daemon Secret and enroll again: the manager recognizes a
