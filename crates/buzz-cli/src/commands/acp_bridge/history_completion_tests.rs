@@ -25,6 +25,7 @@ fn sample_bridge() -> (Bridge<NoRelay>, mpsc::Receiver<Value>) {
         signer,
         agent: Keys::generate().public_key(),
         channel: uuid::Uuid::new_v4(),
+        home: std::path::PathBuf::from("/nonexistent"),
     };
     let (out, replies) = mpsc::channel(4);
     let (ops, _) = mpsc::channel(4);
@@ -41,6 +42,7 @@ fn sample_bridge() -> (Bridge<NoRelay>, mpsc::Receiver<Value>) {
             HistoryLoad {
                 token: 1,
                 overflowed: false,
+                project: None,
             },
         )]),
         history_live: Vec::new(),
@@ -80,7 +82,7 @@ async fn missing_root_completion_answers_error_and_keeps_session_creation_availa
         .unwrap()
         .contains("missing a valid thread root"));
     assert!(bridge.sessions.is_empty());
-    bridge.on_session_new(json!(8)).await.unwrap();
+    bridge.on_session_new(json!(8), &json!({})).await.unwrap();
     let next = replies.recv().await.unwrap();
     assert_eq!(next["id"], 8);
     assert!(next["result"]["sessionId"].is_string());
@@ -89,7 +91,7 @@ async fn missing_root_completion_answers_error_and_keeps_session_creation_availa
 #[tokio::test]
 async fn delayed_peer_name_cannot_duplicate_a_newer_replay() {
     let (mut bridge, mut replies) = sample_bridge();
-    bridge.on_session_new(json!(1)).await.unwrap();
+    bridge.on_session_new(json!(1), &json!({})).await.unwrap();
     let response = replies.recv().await.unwrap();
     let session = response["result"]["sessionId"].as_str().unwrap().to_owned();
     let state = bridge.sessions.get_mut(&session).unwrap();

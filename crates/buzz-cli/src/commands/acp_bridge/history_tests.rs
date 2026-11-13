@@ -393,3 +393,252 @@ async fn a_history_result_is_fenced_when_the_session_changes() {
     drop(harness.client);
     harness.bridge.await.unwrap().unwrap();
 }
+
+/// A root signed by the configured signer that mentions the agent, with
+/// extra tags.
+fn tagged_root(ids: &Ids, text: &str, extra: &[[&str; 2]]) -> Event {
+    root_by(&ids.signer, ids, text, extra)
+}
+
+/// A root signed by `author` that mentions the agent, with extra tags.
+fn root_by(author: &Keys, ids: &Ids, text: &str, extra: &[[&str; 2]]) -> Event {
+    let agent = ids.agent.public_key().to_hex();
+    let mut builder =
+        buzz_sdk::build_message(ids.channel, text, None, &[&agent], false, &[], &[]).unwrap();
+    for parts in extra {
+        builder = builder.tag(Tag::parse(*parts).unwrap());
+    }
+    builder.sign_with_keys(author).unwrap()
+}
+
+/// Notifications up to the commands the bridge offers after a session ended.
+async fn ended_shown(harness: &mut Harness) -> Vec<Value> {
+    let mut notes = Vec::new();
+    loop {
+        let line = tokio::time::timeout(WAIT, harness.client.stdout.next_line())
+            .await
+            .expect("ended notice")
+            .unwrap()
+            .expect("bridge stdout open");
+        let note: Value = serde_json::from_str(&line).unwrap();
+        let done = note["params"]["update"]["sessionUpdate"] == "available_commands_update";
+        notes.push(note);
+        if done {
+            return notes;
+        }
+    }
+}
+
+/// Session id and listed `cwd` of one `session/list` page, sorted.
+async fn listed(harness: &mut Harness, id: u64, params: Value) -> Vec<(String, String)> {
+    let (page, _) = harness.client.request(id, "session/list", params).await;
+    let mut sessions: Vec<_> = page["result"]["sessions"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{page}"))
+        .iter()
+        .map(|s| {
+            (
+                s["sessionId"].as_str().unwrap().to_owned(),
+                s["cwd"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    sessions.sort();
+    sessions
+}
+
+/// After the daemon is replaced, Paseo rebuilds its project groups from the
+/// relay: a session started in a project lists under that project's
+/// directory, everything else under `$HOME/buzz`, and the `cwd` filter
+/// selects by the same mapping.
+#[tokio::test]
+async fn sessions_list_under_their_recorded_project_directory() {
+    let ids = Ids::new();
+    let home = ids.home.path().to_str().unwrap().to_owned();
+    let project = format!("{home}/code/block/buzz");
+    let buzz = format!("{home}/buzz");
+    std::fs::create_dir_all(&project).unwrap();
+    let mut harness = start(&ids, Timing::default());
+    harness.relay_tx.send(RelayInbound::Live).await.unwrap();
+
+    // session/new in a branch view's subdirectory records the project.
+    let (new, _) = harness
+        .client
+        .request(
+            1,
+            "session/new",
+            json!({"cwd": format!("{home}/code/block/buzz@feat/x/src"), "mcpServers": []}),
+        )
+        .await;
+    let session = new["result"]["sessionId"].as_str().unwrap().to_owned();
+    harness
+        .client
+        .send(prompt(2, &session, "in a project"))
+        .await;
+    let in_project = recv(&mut harness.submitted).await;
+    let project_tag = vec!["paseo-project".to_owned(), "block/buzz".to_owned()];
+    assert_eq!(tag(&in_project, "paseo-project"), [project_tag.as_slice()]);
+    // Anywhere else records nothing.
+    for (id, cwd) in [(3, "/tmp/elsewhere".to_owned()), (5, home.clone())] {
+        let (new, _) = harness
+            .client
+            .request(id, "session/new", json!({"cwd": cwd, "mcpServers": []}))
+            .await;
+        let other = new["result"]["sessionId"].as_str().unwrap().to_owned();
+        harness
+            .client
+            .send(prompt(id + 1, &other, "elsewhere"))
+            .await;
+        assert!(tag(&recv(&mut harness.submitted).await, "paseo-project").is_empty());
+    }
+
+    let untagged = tagged_root(&ids, "no project", &[]);
+    let gone = tagged_root(&ids, "deleted clone", &[["paseo-project", "acme/gone"]]);
+    // `$HOME/code/../etc` exists, so only the name check keeps it out.
+    std::fs::create_dir_all(ids.home.path().join("etc")).unwrap();
+    let traversal = tagged_root(&ids, "traversal", &[["paseo-project", "../etc"]]);
+    let ambiguous = tagged_root(
+        &ids,
+        "two projects",
+        &[
+            ["paseo-project", "block/buzz"],
+            ["paseo-project", "acme/gone"],
+        ],
+    );
+    // Another channel member cannot choose the project, even an existing one.
+    let member = root_by(
+        &Keys::generate(),
+        &ids,
+        "member thread",
+        &[["paseo-project", "block/buzz"]],
+    );
+    harness.history.lock().unwrap().0 = vec![
+        in_project.clone(),
+        untagged.clone(),
+        gone.clone(),
+        traversal.clone(),
+        ambiguous.clone(),
+        member.clone(),
+    ];
+    let mut fallback: Vec<_> = [&untagged, &gone, &traversal, &ambiguous, &member]
+        .iter()
+        .map(|root| (root.id.to_hex(), buzz.clone()))
+        .collect();
+    fallback.sort();
+    let in_project_row = vec![(in_project.id.to_hex(), project.clone())];
+    let mut all = fallback.clone();
+    all.extend(in_project_row.clone());
+    all.sort();
+    assert_eq!(listed(&mut harness, 10, json!({})).await, all);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&buzz).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+    }
+
+    for (id, cwd, want) in [
+        (11, project.clone(), &in_project_row),
+        (12, format!("{project}/"), &in_project_row),
+        (13, format!("{project}@main"), &in_project_row),
+        (14, format!("{project}/crates/x"), &in_project_row),
+        (
+            15,
+            format!("{home}/code/other/../block/buzz"),
+            &in_project_row,
+        ),
+        (16, buzz.clone(), &fallback),
+        (17, format!("{buzz}/notes"), &fallback),
+        (18, format!("{home}/code/acme/gone"), &vec![]),
+        (19, format!("{home}/code/block/other"), &vec![]),
+        (20, home.clone(), &vec![]),
+        (21, "relative/path".to_owned(), &vec![]),
+    ] {
+        assert_eq!(
+            &listed(&mut harness, id, json!({"cwd": cwd})).await,
+            want,
+            "{cwd}"
+        );
+    }
+
+    drop(harness.client);
+    harness.bridge.await.unwrap().unwrap();
+
+    // After a restart, a loaded thread keeps its project: `/fresh` after the
+    // session ended records it on the new root. A tagged root keeps its own
+    // project; an untagged root adopts the client's; a member's tag is
+    // ignored.
+    let mut restarted = start(&ids, Timing::default());
+    restarted.relay_tx.send(RelayInbound::Live).await.unwrap();
+    restarted.history.lock().unwrap().0 =
+        vec![in_project.clone(), untagged.clone(), member.clone()];
+    for (id, root, cwd, want) in [
+        (30, &in_project, home.clone(), vec![project_tag.as_slice()]),
+        (
+            40,
+            &untagged,
+            format!("{project}@main"),
+            vec![project_tag.as_slice()],
+        ),
+        (50, &member, "/tmp/elsewhere".to_owned(), vec![]),
+    ] {
+        let loaded_id = root.id.to_hex();
+        let (loaded, _) = restarted
+            .client
+            .request(
+                id,
+                "session/load",
+                json!({"sessionId": loaded_id, "cwd": cwd, "mcpServers": []}),
+            )
+            .await;
+        assert!(loaded.get("result").is_some(), "{loaded}");
+        // The manager cannot restore this thread: only `/fresh` is offered.
+        restarted
+            .inject(thread_message(
+                &ids.agent,
+                ids.channel,
+                &loaded_id,
+                NO_CHECKPOINT_NOTICE,
+            ))
+            .await;
+        let notes = ended_shown(&mut restarted).await;
+        let shown = texts(&notes).join("");
+        assert!(
+            shown.contains(&format!("> {NO_CHECKPOINT_NOTICE}"))
+                && shown.contains("/fresh")
+                && !shown.contains("/recover"),
+            "{shown}"
+        );
+        assert_eq!(advertised(&notes), Some(vec!["fresh".to_owned()]));
+        restarted
+            .client
+            .send(prompt(id + 1, &loaded_id, "/fresh start over"))
+            .await;
+        let fresh = recv(&mut restarted.submitted).await;
+        assert!(fresh.content.starts_with("start over"), "{}", fresh.content);
+        assert_eq!(tag(&fresh, "paseo-project"), want, "{cwd}");
+    }
+    drop(restarted.client);
+    restarted.bridge.await.unwrap().unwrap();
+}
+
+/// Without a usable `$HOME/buzz`, sessions list under `$HOME` itself.
+#[tokio::test]
+async fn sessions_list_under_home_when_the_buzz_directory_cannot_be_created() {
+    let ids = Ids::new();
+    let home = ids.home.path().to_str().unwrap().to_owned();
+    std::fs::write(ids.home.path().join("buzz"), "not a directory").unwrap();
+    let mut harness = start(&ids, Timing::default());
+    let root = tagged_root(&ids, "missing project", &[["paseo-project", "block/buzz"]]);
+    harness.history.lock().unwrap().0 = vec![root.clone()];
+    let row = vec![(root.id.to_hex(), home.clone())];
+    assert_eq!(listed(&mut harness, 1, json!({})).await, row);
+    assert_eq!(listed(&mut harness, 2, json!({"cwd": home})).await, row);
+    assert!(
+        listed(&mut harness, 3, json!({"cwd": format!("{home}/buzz")}))
+            .await
+            .is_empty()
+    );
+    drop(harness.client);
+    harness.bridge.await.unwrap().unwrap();
+}

@@ -22,6 +22,7 @@ fn scope() -> Scope {
         signer,
         agent: Keys::generate().public_key(),
         channel: Uuid::new_v4(),
+        home: std::path::PathBuf::from("/nonexistent"),
     }
 }
 
