@@ -12,6 +12,7 @@
 mod bridge;
 mod frames;
 mod names;
+mod projects;
 mod prompt;
 mod wire;
 
@@ -113,6 +114,7 @@ pub(crate) async fn run(
             .unwrap_or_else(|| client.keys().public_key()),
         agent,
         channel,
+        home: dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/")),
     };
 
     let (relay_tx, relay_rx) = mpsc::channel(RELAY_QUEUE);

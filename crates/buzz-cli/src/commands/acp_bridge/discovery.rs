@@ -2,6 +2,8 @@
 //! The cursor orders participation events. A prefix check suppresses roots
 //! already represented on earlier pages without a growing list of seen ids.
 //! Writer reads keep a lagging replica from hiding a previously observed witness.
+//! Each session reports the working directory of its recorded project, and a
+//! `cwd` filter keeps only sessions with that directory (see `projects`).
 
 use super::*;
 
@@ -139,11 +141,19 @@ fn budget_response(sessions: Vec<Value>, next: Option<String>) -> Result<Value, 
 }
 
 /// List canonical roots in participation order, preserving a bounded scan position.
+/// Roots outside the `cwd` filter still advance the cursor.
 pub(super) async fn history_list<R: BridgeRelay>(
     relay: &R,
     scope: &Scope,
     params: &Value,
 ) -> Result<Value, CliError> {
+    // A filter that is not an absolute path matches no session.
+    let only = params
+        .get("cwd")
+        .and_then(Value::as_str)
+        .map(|cwd| projects::filter_cwd(&scope.home, cwd));
+    let mut fallback = None;
+    let trusted = authors(scope);
     let raw = params
         .get("cursor")
         .map(|value| {
@@ -220,6 +230,15 @@ pub(super) async fn history_list<R: BridgeRelay>(
                                     continue;
                                 }
                             }
+                            let cwd =
+                                projects::session_cwd(&scope.home, root, &trusted, &mut fallback);
+                            if only
+                                .as_ref()
+                                .is_some_and(|only| only.as_ref() != Some(&cwd))
+                            {
+                                next = Some(cursor(&event));
+                                continue;
+                            }
                             let title: String = root.content.chars().take(120).collect();
                             let updated = chrono::DateTime::from_timestamp(
                                 i64::try_from(event.created_at.as_secs())
@@ -228,7 +247,7 @@ pub(super) async fn history_list<R: BridgeRelay>(
                             )
                             .ok_or_else(|| problem("invalid session timestamp"))?
                             .to_rfc3339();
-                            sessions.push(json!({"sessionId":root.id.to_hex(),"cwd":"/","title":title,"updatedAt":updated}));
+                            sessions.push(json!({"sessionId":root.id.to_hex(),"cwd":cwd.to_string_lossy(),"title":title,"updatedAt":updated}));
                         }
                     }
                 }

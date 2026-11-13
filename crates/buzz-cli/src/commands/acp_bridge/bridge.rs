@@ -18,6 +18,7 @@ use tokio::time::Instant;
 
 use super::frames::{self, Scope, Signal};
 use super::names::{self, Names};
+use super::projects;
 use super::prompt::{self, Prompt};
 use super::wire::{self, Inbound, StdinMsg};
 use crate::error::CliError;
@@ -56,6 +57,8 @@ const WRITER_DRAIN: Duration = Duration::from_secs(5);
 /// ended thread session (`failure_notice` in
 /// `crates/buzz-sandbox-reaper/src/mentions/worker.rs`).
 pub(crate) const SESSION_ENDED_NOTICE: &str = "This thread's agent session ended";
+/// Most characters of the manager's ended notice repeated to the user.
+const ENDED_REASON_CHARS: usize = 1000;
 
 /// Reply that resends the unanswered message in the same thread.
 pub(crate) const RECOVER_COMMAND: &str = "/recover";
@@ -233,9 +236,13 @@ struct Session {
     replay_epoch: u64,
     /// Thread root event id, once the first prompt is signed.
     root: Option<String>,
-    /// The sandbox manager reported this thread's agent session ended. New
-    /// prompts are not posted until the user replies `/recover` or `/fresh`.
-    ended: bool,
+    /// The `<owner>/<repo>` project of the `session/new` working directory,
+    /// or of a loaded thread's root; recorded on each new thread root.
+    project: Option<String>,
+    /// The sandbox manager's notice that this thread's agent session ended,
+    /// up to [`ENDED_REASON_CHARS`]. New prompts are not posted until the
+    /// user replies `/recover` or `/fresh`.
+    ended: Option<String>,
     generation: u64,
     /// [`Bridge::tick`] when the session was created or last prompted.
     last_used: u64,
@@ -261,7 +268,8 @@ struct Session {
 /// A reply that continues an ended session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Recovery {
-    /// Resend in the same thread (after recovering it in the Buzz app).
+    /// Resend in the same thread. The new mention lets the sandbox manager
+    /// try to restore the session.
     SameThread,
     /// Resend as a new thread root: a new session with an empty workspace.
     NewThread,
@@ -316,6 +324,8 @@ enum Op {
 struct HistoryLoad {
     token: u64,
     overflowed: bool,
+    /// The project of the client's `cwd`, adopted by an untagged root.
+    project: Option<String>,
 }
 
 /// Run the bridge until the client closes stdin (`Ok`) or stdout, stdin, or
@@ -489,7 +499,7 @@ impl<R: BridgeRelay> Bridge<R> {
                 .await
             }
             "authenticate" => self.send(wire::ok(id, json!({}))).await,
-            "session/new" => self.on_session_new(id).await,
+            "session/new" => self.on_session_new(id, &params).await,
             "session/list" => self.on_history_list(id, &params).await,
             "session/load" => self.on_history_load(id, &params).await,
             "session/prompt" => self.on_prompt(id, &params).await,
@@ -504,7 +514,7 @@ impl<R: BridgeRelay> Bridge<R> {
         }
     }
 
-    async fn on_session_new(&mut self, id: Value) -> Result<(), CliError> {
+    async fn on_session_new(&mut self, id: Value, params: &Value) -> Result<(), CliError> {
         if self.sessions.len() >= MAX_SESSIONS && !self.evict_idle_session() {
             return self
                 .respond_error(
@@ -518,13 +528,18 @@ impl<R: BridgeRelay> Bridge<R> {
         }
         let session_id = uuid::Uuid::new_v4().to_string();
         let last_used = self.next_tick();
+        let project = params
+            .get("cwd")
+            .and_then(Value::as_str)
+            .and_then(|cwd| projects::project_of_cwd(&self.scope.home, cwd));
         self.sessions.insert(
             session_id.clone(),
             Session {
                 id: session_id.clone(),
                 replay_epoch: 0,
                 root: None,
-                ended: false,
+                project,
+                ended: None,
                 generation: 0,
                 last_used,
                 own_events: RecentIds::new(OWN_EVENT_CAP),
@@ -587,7 +602,7 @@ impl<R: BridgeRelay> Bridge<R> {
             let message = error.clone();
             return self.respond_error(id, wire::INTERNAL_ERROR, &message).await;
         }
-        if session.ended {
+        if session.ended.is_some() {
             return self.on_ended_prompt(id, session_id, text).await;
         }
         self.begin_prompt(id, session_id, text.clone(), text);
@@ -621,7 +636,7 @@ impl<R: BridgeRelay> Bridge<R> {
                 .send(wire::ok(id, json!({ "stopReason": "end_turn" })))
                 .await;
         };
-        session.ended = false;
+        session.ended = None;
         let posted = match command {
             Recovery::SameThread => body.clone(),
             Recovery::NewThread => match session.root.take() {
@@ -645,14 +660,13 @@ impl<R: BridgeRelay> Bridge<R> {
         Ok(())
     }
 
-    /// Tell the user the session ended and offer `/recover` and `/fresh`.
+    /// Tell the user the session ended, why, and offer `/fresh`, plus
+    /// `/recover` when the manager's notice invites a mention here.
     async fn show_ended(&self, session_id: &str) -> Result<(), CliError> {
-        let root = self
-            .sessions
-            .get(session_id)
-            .and_then(|s| s.root.as_deref())
-            .unwrap_or_default();
-        let notice = ended_notice(&message_link(self.scope.channel, root));
+        let session = self.sessions.get(session_id);
+        let root = session.and_then(|s| s.root.as_deref()).unwrap_or_default();
+        let reason = session.and_then(|s| s.ended.as_deref()).unwrap_or_default();
+        let notice = ended_notice(reason, &message_link(self.scope.channel, root));
         self.send(wire::session_update(
             session_id,
             wire::agent_text_chunk(&notice),
@@ -660,16 +674,7 @@ impl<R: BridgeRelay> Bridge<R> {
         .await?;
         self.send(wire::session_update(
             session_id,
-            wire::available_commands(&[
-                (
-                    RECOVER_COMMAND.trim_start_matches('/'),
-                    "Resend your message in this thread, after choosing Recover on the thread in the Buzz app",
-                ),
-                (
-                    FRESH_COMMAND.trim_start_matches('/'),
-                    "Resend your message as a new thread, in a new session with an empty workspace",
-                ),
-            ]),
+            wire::available_commands(&ended_commands(reason)),
         ))
         .await
     }
@@ -876,10 +881,17 @@ impl<R: BridgeRelay> Bridge<R> {
                 };
                 if state.root.is_none() {
                     let mut tags = event.tags.to_vec();
-                    match nostr::Tag::parse(["d".to_owned(), format!("buzz-acp:{session}")])
+                    let mut added = vec![["d".to_owned(), format!("buzz-acp:{session}")]];
+                    if let Some(project) = &state.project {
+                        added.push([projects::PROJECT_TAG.to_owned(), project.clone()]);
+                    }
+                    match added
+                        .into_iter()
+                        .map(nostr::Tag::parse)
+                        .collect::<Result<Vec<_>, _>>()
                         .map_err(|e| CliError::Other(e.to_string()))
-                        .and_then(|tag| {
-                            tags.push(tag);
+                        .and_then(|added| {
+                            tags.extend(added);
                             nostr::EventBuilder::new(event.kind, event.content.clone())
                                 .tags(tags)
                                 .custom_created_at(event.created_at)
@@ -1297,7 +1309,7 @@ impl<R: BridgeRelay> Bridge<R> {
         if !for_pending && (stale || session.pending.is_some()) {
             return Ok(());
         }
-        session.ended = true;
+        session.ended = Some(event.content.chars().take(ENDED_REASON_CHARS).collect());
         self.show_ended(session_id).await?;
         if for_pending {
             return self.finish(session_id, "end_turn").await;
@@ -1491,17 +1503,58 @@ pub(crate) fn message_link(channel: uuid::Uuid, event_id: &str) -> String {
     format!("buzz://message?channel={channel}&id={event_id}")
 }
 
+/// Whether the sandbox manager's ended notice (`reason`) leaves a mention in
+/// this thread as a way to restore the session: it invites a mention here
+/// and does not say the checkpoint cannot be restored. A notice that only
+/// points to a new thread (no saved checkpoint, or a manager that cannot
+/// restore on a mention) gives `false`.
+pub(crate) fn mention_may_restore(reason: &str) -> bool {
+    let reason = reason.to_ascii_lowercase();
+    reason.contains("me here") && !reason.contains("cannot be restored")
+}
+
+/// The commands offered after the thread's session ended, for the
+/// manager's `reason`. `/recover` stays accepted either way.
+fn ended_commands(reason: &str) -> Vec<(&'static str, &'static str)> {
+    let fresh = (
+        FRESH_COMMAND.trim_start_matches('/'),
+        "Resend your message as a new thread, in a new session with an empty workspace",
+    );
+    if !mention_may_restore(reason) {
+        return vec![fresh];
+    }
+    vec![
+        (
+            RECOVER_COMMAND.trim_start_matches('/'),
+            "Resend your message in this thread; the new mention lets the agent's manager try to restore the session",
+        ),
+        fresh,
+    ]
+}
+
 /// What the user can do after the thread's session ended. The bridge signs
-/// with the owner's (or a gateway) key, but the manager accepts a recovery
-/// deploy only when signed by the agent's own key, which stays with the Buzz
-/// app; so checkpoint recovery happens there, and `/recover` resends after it.
-fn ended_notice(thread_link: &str) -> String {
+/// with the owner's (or a delegated gateway) key. `/recover` resends the
+/// message with a new mention of the agent in this thread, so the sandbox
+/// manager can try to restore the session; it is offered only when the
+/// manager's `reason` invites that (see [`mention_may_restore`]).
+fn ended_notice(reason: &str, thread_link: &str) -> String {
+    let fresh = format!(
+        "- Reply `{FRESH_COMMAND}` to resend it as a new thread. The agent starts a new session with an empty workspace."
+    );
+    let choices = if mention_may_restore(reason) {
+        format!(
+            "- Reply `{RECOVER_COMMAND}` to resend it in this thread ({thread_link}). \
+             That mentions the agent here again, so its manager can try to restore the session.\n\
+             {fresh}\n\n\
+             Add text after either command to send that text instead."
+        )
+    } else {
+        format!("{fresh}\n\nAdd text after the command to send that text instead.")
+    };
     format!(
         "This thread's agent session has ended, so the agent did not get your message.\n\n\
-         - Reply `{FRESH_COMMAND}` to resend it as a new thread. The agent starts a new session with an empty workspace.\n\
-         - To keep the workspace, open the thread in the Buzz app and choose Recover: {thread_link}\n  \
-         Then reply `{RECOVER_COMMAND}` to resend your message in this thread.\n\n\
-         Add text after either command to send that text instead."
+         > {reason}\n\n\
+         {choices}"
     )
 }
 

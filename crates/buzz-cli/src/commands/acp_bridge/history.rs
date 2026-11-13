@@ -189,6 +189,10 @@ impl<R: BridgeRelay> Bridge<R> {
             HistoryLoad {
                 token,
                 overflowed: false,
+                project: params
+                    .get("cwd")
+                    .and_then(Value::as_str)
+                    .and_then(|cwd| projects::project_of_cwd(&self.scope.home, cwd)),
             },
         );
         self.history_ops += 1;
@@ -245,6 +249,7 @@ impl<R: BridgeRelay> Bridge<R> {
                 .respond_error(id, wire::INVALID_REQUEST, "session load superseded; retry")
                 .await;
         }
+        let cwd_project = self.loading.get(&raw).and_then(|load| load.project.clone());
         if self
             .loading
             .remove(&raw)
@@ -285,10 +290,16 @@ impl<R: BridgeRelay> Bridge<R> {
                     .await
             }
         };
-        let Some(root_id) = events
+        let Some((root_id, project)) = events
             .iter()
             .find(|event| root_for(&self.scope, event))
-            .map(|event| event.id.to_hex())
+            .map(|event| {
+                // An untagged root adopts the client's project, so a later
+                // `/fresh` records it on the new root.
+                let project =
+                    projects::project_of_root(event, &authors(&self.scope)).or(cwd_project);
+                (event.id.to_hex(), project)
+            })
         else {
             return self
                 .respond_error(
@@ -339,7 +350,8 @@ impl<R: BridgeRelay> Bridge<R> {
                 id: raw.to_owned(),
                 replay_epoch: last_used,
                 root: Some(root_id.clone()),
-                ended: false,
+                project,
+                ended: None,
                 generation: 0,
                 last_used,
                 own_events,

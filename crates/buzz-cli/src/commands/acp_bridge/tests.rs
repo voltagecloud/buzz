@@ -25,6 +25,8 @@ struct Ids {
     signer: Keys,
     agent: Keys,
     channel: Uuid,
+    /// The bridge's home directory, removed when the test ends.
+    home: tempfile::TempDir,
 }
 
 impl Ids {
@@ -33,6 +35,7 @@ impl Ids {
             signer: Keys::generate(),
             agent: Keys::generate(),
             channel: Uuid::new_v4(),
+            home: tempfile::tempdir().unwrap(),
         }
     }
 
@@ -42,6 +45,7 @@ impl Ids {
             owner: self.signer.public_key(),
             agent: self.agent.public_key(),
             channel: self.channel,
+            home: self.home.path().to_path_buf(),
         }
     }
 
@@ -335,9 +339,34 @@ fn prompt(id: u64, session: &str, text: &str) -> Value {
 }
 
 /// The `crates/buzz-sandbox-reaper` mention launcher's reply to a mention
-/// of an ended thread session.
-const ENDED_NOTICE: &str =
-    "This thread's agent session ended. Recover it from desktop, or mention me in a new thread.";
+/// of an ended thread session it could not restore.
+const ENDED_NOTICE: &str = "This thread's agent session ended. My owner, or a gateway they delegated, can restore its last checkpoint by mentioning me here; otherwise mention me in a new thread.";
+
+/// The sandbox manager's ended-session notices: whether each invites a
+/// mention in the thread (so `/recover` is offered) or only a new thread.
+#[test]
+fn ended_notices_offer_recover_only_when_a_mention_here_may_restore() {
+    use super::bridge::mention_may_restore;
+    for (reason, recover) in [
+        // session_ended / recovery_interrupted
+        (ENDED_NOTICE, true),
+        // session_ending
+        ("This thread's agent session ended and is still saving its checkpoint. Once that finishes, my owner or a gateway they delegated can restore it by mentioning me here; otherwise mention me in a new thread.", true),
+        // recovery_mode_conflict
+        ("This thread's agent session ended, and another recovery of it is in progress, so its last checkpoint could not be restored. Mention me here again once that recovery finishes, or mention me in a new thread.", true),
+        // no_checkpoint
+        (NO_CHECKPOINT_NOTICE, false),
+        // A manager without mention recovery (before #187).
+        ("This thread's agent session ended. Recover it from desktop, or mention me in a new thread.", false),
+        ("This thread's agent session ended", false),
+    ] {
+        assert_eq!(mention_may_restore(reason), recover, "{reason}");
+    }
+}
+
+/// The `crates/buzz-sandbox-reaper` notice for an ended thread with no
+/// saved checkpoint.
+const NO_CHECKPOINT_NOTICE: &str = "This thread's agent session ended without a saved checkpoint, so it cannot be restored. Mention me in a new thread.";
 
 /// Names of the slash commands in the latest `available_commands_update`.
 fn advertised(notes: &[Value]) -> Option<Vec<String>> {
@@ -747,6 +776,9 @@ async fn acp_session_drives_a_remote_agent_through_the_relay() {
     assert!(
         shown.contains("/fresh")
             && shown.contains("/recover")
+            && shown.contains("its manager can try to restore the session")
+            && !shown.contains("restores the thread's last checkpoint")
+            && shown.contains(&format!("> {ENDED_NOTICE}"))
             && shown.contains(&format!("buzz://message?channel={channel}&id={root_id}")),
         "{shown}"
     );
@@ -803,7 +835,7 @@ async fn acp_session_drives_a_remote_agent_through_the_relay() {
             break;
         }
     }
-    // Not recovered in the Buzz app yet: the manager refuses the retry too.
+    // The manager could not restore the checkpoint: it refuses the retry too.
     h.inject(thread_reply(
         &ids.agent,
         channel,

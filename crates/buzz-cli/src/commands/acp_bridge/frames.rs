@@ -69,6 +69,9 @@ pub(crate) struct Scope {
     pub agent: PublicKey,
     /// The channel the bridge posts in.
     pub channel: Uuid,
+    /// The daemon's home directory, which holds the Paseo projects
+    /// (see [`super::projects`]).
+    pub home: std::path::PathBuf,
 }
 
 /// The fields of buzz-acp's `ObserverEvent` the bridge reads.

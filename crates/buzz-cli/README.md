@@ -249,15 +249,17 @@ bridge keeps retrying. A process keeps at most 64 sessions; at the cap,
 `session/new` drops the least recently used session that has no running
 prompt.
 
-**Ended sessions.** When the sandbox manager reports that the thread's agent
-session ended, the prompt ends with that notice and two commands:
+**Ended sessions.** When a mention reaches a thread whose agent session
+ended and the sandbox manager does not restore it, the manager posts a notice
+that starts with `This thread's agent session ended`. The prompt then ends
+with that notice, quoted, and the commands it allows:
 
-- `/fresh` resends the unanswered message as a new thread root, linked to the
-  ended thread. The agent starts a new session with an empty workspace.
-- `/recover` resends it in the same thread. To keep the workspace, first
-  choose Recover on the thread in the Buzz app. The manager accepts a
-  checkpoint recovery only when the agent's own key signs it, and that key
-  stays in the Buzz app.
+- `/recover` resends the unanswered message in the same thread. The new
+  mention lets the manager try to restore the session; it does not guarantee
+  a restore. It is offered only when the notice invites a mention in this
+  thread and does not say the checkpoint cannot be restored.
+- `/fresh` resends it as a new thread root, linked to the ended thread. The
+  agent starts a new session with an empty workspace. It is always offered.
 
 Text after either command is sent instead of the unanswered message.
 
@@ -271,6 +273,22 @@ A gateway should pass
 `--owner <owner pubkey>` for own-author attribution and opaque-handle lookup.
 This grants no additional authority.
 The relay and harness enforce gateway authorization independently.
+
+**Working directories.** When `session/new` gets a `cwd` of
+`$HOME/code/<owner>/<repo>`, a branch view `$HOME/code/<owner>/<repo>@<branch>`,
+or a subdirectory of either, the thread root records
+`["paseo-project","<owner>/<repo>"]`. Owner and repository must use GitHub's
+name characters; any other `cwd` records nothing. The bridge trusts the tag
+only on roots that the owner or the bridge's signer authored; it ignores the
+tag on roots by other channel members. `session/load` of a root without a
+trusted, valid tag takes the project of the client's `cwd` in the same way,
+so a later `/fresh` records it. `session/list` reports
+`$HOME/code/<owner>/<repo>` for a root with a trusted, valid tag when that
+directory exists, and `$HOME/buzz` otherwise (created with mode 0700; `$HOME`
+if it cannot be created). A `cwd` list filter keeps only sessions with that
+directory, after the same mapping: a branch view or subdirectory selects its
+project, and a subdirectory of `$HOME/buzz` selects `$HOME/buzz`. Filtered-out
+sessions still advance the cursor, so a page can be short or empty.
 
 Loading replays signed kind 9 messages, attributing owner prompts, agent answers,
 and teammates. The process keeps its live channel subscription during replay and
