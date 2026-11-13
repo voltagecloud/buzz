@@ -217,7 +217,10 @@ const config = {
     appendSystemPrompt: instructions,
   },
   pluginsEnabled: true,
-  plugins: { "buzz-recorder": { source: "directory", path: "/opt/paseo-buzz/recorder", enabled: true } },
+  plugins: {
+    "buzz-recorder": { source: "directory", path: "/opt/paseo-buzz/recorder", enabled: true },
+    "buzz-profile": { source: "directory", path: "/opt/paseo-buzz/profile", enabled: true },
+  },
   agents: { providers },
   features: {
     dictation: { enabled: false },
