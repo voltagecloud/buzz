@@ -310,7 +310,11 @@ pub enum Work {
         developer: Developer,
     },
     /// An owner-authorized start using a registered launch identity.
-    Start { start: Start, target: Target },
+    Start {
+        start: Start,
+        target: Target,
+        developer: Developer,
+    },
     /// Steps 5 and 6 of enrollment: the merge, the GitHub login check and
     /// the write.
     Enroll {
@@ -365,7 +369,11 @@ impl Work {
                 }
                 response
             }
-            Work::Start { start, target } => {
+            Work::Start {
+                start,
+                target,
+                developer,
+            } => {
                 let Target::Managed {
                     client, namespace, ..
                 } = &target
@@ -375,10 +383,27 @@ impl Work {
                         "mobile starts require a managed target",
                     );
                 };
-                match start.request(client.clone(), namespace).await {
-                    Ok(request) => response_value(&provider::run(request, &target).await),
-                    Err(error) => error,
+                let request = match start.request(client.clone(), namespace).await {
+                    Ok(request) => request,
+                    Err(error) => return error,
+                };
+                let mut response = response_value(&provider::run(request, &target).await);
+                if response["ok"] == true {
+                    // The Sandbox started; a failed channel record only leaves
+                    // the daemon's agent list stale, so report it beside the
+                    // authoritative result, as a registering deploy does.
+                    // Refresh after every channel start, not only a changed
+                    // channel: that also retries an earlier failed refresh.
+                    // An unchanged list is not rewritten.
+                    let synced = match start.remember_channel(client.clone(), namespace).await {
+                        Ok(_) => manager.enrollment.agents_changed(&developer).await,
+                        Err(error) => Err(error),
+                    };
+                    if let Err(error) = synced {
+                        response["paseo_sync"] = error;
+                    }
                 }
+                response
             }
             Work::Enroll {
                 developer,
@@ -550,6 +575,7 @@ impl Manager {
         };
         Work::Start {
             start,
+            developer: developer.clone(),
             target: Target::Managed {
                 client: self.client.clone(),
                 namespace: developer.namespace.clone(),
@@ -690,7 +716,11 @@ impl Manager {
                 defaults: self.defaults.clone(),
                 env: self.shared_env(developer),
             };
-            Work::Start { start, target }
+            Work::Start {
+                start,
+                target,
+                developer: developer.clone(),
+            }
         } else {
             let registration = if op == Op::Deploy {
                 match Registration::new(

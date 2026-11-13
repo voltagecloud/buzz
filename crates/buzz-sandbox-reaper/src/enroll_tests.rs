@@ -498,13 +498,13 @@ async fn describe_names_what_is_stored_and_no_credential() {
     let (enrollment, _) = enrollment(&[("ghp_fixtureGitHubTokenDoNotLeak", "ada-l")]).await;
     assert_eq!(
         enrollment.describe(&developer()).await,
-        json!({"ok": true, "profile": null, "paseo_enabled": false})
+        json!({"ok": true, "developer": "dev", "profile": null, "paseo_enabled": false})
     );
     enrollment.run(&developer(), profile()).await;
     let described = enrollment.describe(&developer()).await;
     assert_eq!(
         described,
-        json!({"ok": true, "paseo_enabled": false, "profile": {
+        json!({"ok": true, "developer": "dev", "paseo_enabled": false, "profile": {
             "version_id": "version-1",
             "updated_at": "2026-10-23T12:00:00Z",
             "git": {"name": "Ada Lovelace", "email": "ada@example.com", "signing_key": true},

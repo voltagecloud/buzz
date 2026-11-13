@@ -78,6 +78,12 @@ buzz gateway list
 buzz gateway grant "$GATEWAY_PUBKEY" --expires 90d
 ```
 
+Owners of a managed Paseo daemon can run `buzz paseo setup` instead of steps 1,
+4, and 5: it enrolls from the CLI, creates the daemon, adds the gateway to the
+owner's stream and forum channels, and grants it for 90 days. A relay operator
+still admits the gateway (step 3); setup prints that command. See
+[`voltage/remote-agents.md`](../voltage/remote-agents.md#pair-one-developer).
+
 The CLI refuses NIP-OA agent credentials for grant management. It reads the
 current head before writing and advances its timestamp when two actions occur
 within the same second. Conflicting writes fail visibly and can be retried.

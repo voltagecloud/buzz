@@ -19,12 +19,21 @@ pub(crate) const LABEL: &str = "buzz.voltage.cloud/mobile-launch";
 /// Paseo daemon (`paseo.rs`). An annotation, not a payload field, so a
 /// manager without it still reads the registration.
 pub(crate) const CHANNEL_ANNOTATION: &str = "buzz.voltage.cloud/paseo-channel";
+/// Unix seconds of the launch that set [`CHANNEL_ANNOTATION`], so an older
+/// launch that finishes later never replaces a newer launch's channel.
+pub(crate) const CHANNEL_AT_ANNOTATION: &str = "buzz.voltage.cloud/paseo-channel-at";
 
 fn store_failed() -> Value {
     refusal(
         wire::ErrorCode::LaunchStoreFailed,
         "the saved mobile launch could not be read or updated; retry",
     )
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
 }
 
 pub(crate) fn relay_endpoint(text: &str) -> Result<String, Value> {
@@ -134,15 +143,23 @@ impl Registration {
             secret.metadata.name = Some(name.clone());
             secret.metadata.namespace = Some(namespace.into());
             secret.metadata.labels = Some(BTreeMap::from([(LABEL.into(), "v1".into())]));
-            let channel = self.channel.clone().or_else(|| {
-                prior
-                    .as_ref()
-                    .and_then(|s| s.metadata.annotations.as_ref())
-                    .and_then(|a| a.get(CHANNEL_ANNOTATION))
-                    .cloned()
-            });
-            secret.metadata.annotations =
-                channel.map(|channel| BTreeMap::from([(CHANNEL_ANNOTATION.into(), channel)]));
+            // A deploy's channel is current as of now; otherwise keep the
+            // saved channel and its time.
+            let saved = prior.as_ref().and_then(|s| s.metadata.annotations.as_ref());
+            secret.metadata.annotations = match &self.channel {
+                Some(channel) => Some(BTreeMap::from([
+                    (CHANNEL_ANNOTATION.into(), channel.clone()),
+                    (CHANNEL_AT_ANNOTATION.into(), unix_now().to_string()),
+                ])),
+                None => saved.and_then(|saved| {
+                    let channel = saved.get(CHANNEL_ANNOTATION)?;
+                    let mut kept = BTreeMap::from([(CHANNEL_ANNOTATION.into(), channel.clone())]);
+                    if let Some(at) = saved.get(CHANNEL_AT_ANNOTATION) {
+                        kept.insert(CHANNEL_AT_ANNOTATION.into(), at.clone());
+                    }
+                    Some(kept)
+                }),
+            };
             secret.metadata.resource_version = prior
                 .as_ref()
                 .and_then(|s| s.metadata.resource_version.clone());
@@ -345,7 +362,7 @@ impl Start {
     /// Read only the verified owner's namespace. Recheck all saved identity
     /// bindings and attestation before invoking the ordinary confined provider.
     pub async fn request(
-        self,
+        &self,
         client: kube::Client,
         namespace: &str,
     ) -> Result<wire::Request, Value> {
@@ -388,7 +405,7 @@ impl Start {
             return Err(store_failed());
         }
         let mut payload = json!({"op": "deploy", "agent": saved.payload,
-            "provider_config": {"sandbox": self.scope,
+            "provider_config": {"sandbox": self.scope.clone(),
                 "identity_policy": {"agent_pubkey": self.agent, "owner_pubkey": self.owner}}});
         // Replay is invocation state. Never retain an earlier thread's floor.
         for tier in ["env", "policy_env"] {
@@ -409,6 +426,72 @@ impl Start {
         };
         provider::check_sandbox_request(deploy).map_err(|_| store_failed())?;
         Ok(request)
+    }
+}
+
+impl Start {
+    /// Record this start's channel as the registration's Paseo channel, as a
+    /// channel-thread deploy does, so a mention-launched agent appears in its
+    /// owner's Paseo daemon. Returns whether the saved channel changed.
+    ///
+    /// Only the annotation changes: the Secret read is written back at its
+    /// resourceVersion, so a deploy saved in between is never overwritten
+    /// with the older payload. A conflict rereads, a bounded number of times.
+    pub(crate) async fn remember_channel(
+        &self,
+        client: kube::Client,
+        namespace: &str,
+    ) -> Result<bool, Value> {
+        let Some(channel) = self.scope["channel_id"]
+            .as_str()
+            .filter(|id| is_channel_id(id))
+        else {
+            return Ok(false);
+        };
+        let api: Api<Secret> = Api::namespaced(client, namespace);
+        let name = Registration::name(self.owner, self.agent, &self.relay);
+        for _ in 0..3 {
+            let mut secret = api
+                .get_opt(&name)
+                .await
+                .map_err(|_| store_failed())?
+                .ok_or_else(store_failed)?;
+            let annotations = secret
+                .metadata
+                .annotations
+                .get_or_insert_with(BTreeMap::new);
+            let newer_saved = annotations
+                .get(CHANNEL_AT_ANNOTATION)
+                .and_then(|at| at.parse::<u64>().ok())
+                .is_some_and(|at| at > self.replay_floor);
+            if newer_saved
+                || annotations.get(CHANNEL_ANNOTATION).map(String::as_str) == Some(channel)
+            {
+                return Ok(false);
+            }
+            let data = secret
+                .data
+                .as_ref()
+                .and_then(|data| data.get(DATA_KEY))
+                .ok_or_else(store_failed)?;
+            let saved: Registration =
+                serde_json::from_slice(&data.0).map_err(|_| store_failed())?;
+            if saved.owner != self.owner || saved.agent != self.agent || saved.relay != self.relay {
+                return Err(store_failed());
+            }
+            let annotations = secret
+                .metadata
+                .annotations
+                .get_or_insert_with(BTreeMap::new);
+            annotations.insert(CHANNEL_ANNOTATION.into(), channel.to_owned());
+            annotations.insert(CHANNEL_AT_ANNOTATION.into(), self.replay_floor.to_string());
+            match api.replace(&name, &PostParams::default(), &secret).await {
+                Ok(_) => return Ok(true),
+                Err(kube::Error::Api(error)) if error.code == 409 => continue,
+                Err(_) => return Err(store_failed()),
+            }
+        }
+        Err(store_failed())
     }
 }
 

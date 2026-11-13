@@ -88,11 +88,15 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # Random number generation — full jitter for exponential backoff in with_retry
 rand = { workspace = true }
 
+# `buzz paseo setup`: hidden credential prompts, a private directory for
+# the new signing key, and the pairing QR code
+rpassword = "7"
+tempfile = "3"
+qrcode = { version = "0.14", default-features = false }
+
 [dev-dependencies]
 futures-util = { workspace = true }
 tokio-tungstenite = { workspace = true }
-# Scratch files for channel-templates.json fixtures in tests
-tempfile = "3"
 # Minimal HTTP test server for retry/policy integration tests
 axum = { workspace = true }
 # `test-util` enables paused-time control for deterministic timeout tests

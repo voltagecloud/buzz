@@ -498,6 +498,20 @@ impl DaemonSecrets {
             // A list refresh must not write through an incomplete saved identity.
             pairing(&read_env(&prior)?, &self.relay_endpoint)?;
             let agents = self.agents(developer).await?;
+            let current = prior
+                .data
+                .as_ref()
+                .and_then(|data| data.get(AGENTS_KEY))
+                .and_then(|value| std::str::from_utf8(&value.0).ok())
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok());
+            // An unchanged list needs no write, unless a retired key remains.
+            let retired = prior
+                .data
+                .as_ref()
+                .is_some_and(|data| data.contains_key("CODEX_ACCESS_TOKEN"));
+            if current.as_ref() == Some(&agents) && !retired {
+                return Ok(());
+            }
             let mut data = prior.data.clone().unwrap_or_default();
             data.remove(AGENTS_KEY);
             data.remove("CODEX_ACCESS_TOKEN");

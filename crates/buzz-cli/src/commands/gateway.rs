@@ -23,28 +23,40 @@ pub async fn dispatch(command: GatewayCmd, client: &BuzzClient) -> Result<(), Cl
             Ok(())
         }
         GatewayCmd::Grant { pubkey, expires } => {
-            let gateway = parse_key(&pubkey)?;
-            if gateway == client.keys().public_key() {
-                return Err(CliError::Usage("the gateway must be a separate key".into()));
-            }
-            let duration = duration(&expires)?;
-            let now = Timestamp::now().as_secs();
-            let created_at = next_timestamp(client, gateway, now).await?;
-            let expires_at = now
-                .checked_add(duration)
-                .ok_or_else(|| CliError::Usage("gateway expiry is out of range".into()))?;
-            let builder = Delegation::grant(gateway, expires_at, created_at)
-                .map_err(|error| CliError::Usage(error.to_string()))?;
-            publish(client, builder).await
+            let response = grant(client, parse_key(&pubkey)?, duration(&expires)?).await?;
+            println!("{response}");
+            Ok(())
         }
         GatewayCmd::Revoke { pubkey } => {
             let gateway = parse_key(&pubkey)?;
             let created_at = next_timestamp(client, gateway, Timestamp::now().as_secs()).await?;
             let builder = Delegation::revoke(gateway, created_at)
                 .map_err(|error| CliError::Usage(error.to_string()))?;
-            publish(client, builder).await
+            println!("{}", publish(client, builder).await?);
+            Ok(())
         }
     }
+}
+
+/// Publish an expiring grant for `gateway`, replacing its current head.
+/// Returns the normalized write response. The caller must already have
+/// refused NIP-OA agent credentials.
+pub(crate) async fn grant(
+    client: &BuzzClient,
+    gateway: PublicKey,
+    duration: u64,
+) -> Result<String, CliError> {
+    if gateway == client.keys().public_key() {
+        return Err(CliError::Usage("the gateway must be a separate key".into()));
+    }
+    let now = Timestamp::now().as_secs();
+    let created_at = next_timestamp(client, gateway, now).await?;
+    let expires_at = now
+        .checked_add(duration)
+        .ok_or_else(|| CliError::Usage("gateway expiry is out of range".into()))?;
+    let builder = Delegation::grant(gateway, expires_at, created_at)
+        .map_err(|error| CliError::Usage(error.to_string()))?;
+    publish(client, builder).await
 }
 
 const HEADROOM: usize = 4;
@@ -146,14 +158,10 @@ async fn next_timestamp(
     Ok(next)
 }
 
-async fn publish(client: &BuzzClient, builder: nostr::EventBuilder) -> Result<(), CliError> {
+async fn publish(client: &BuzzClient, builder: nostr::EventBuilder) -> Result<String, CliError> {
     let event = client.sign_event(builder)?;
     let response = client.submit_event(event).await?;
-    println!(
-        "{}",
-        super::parse_write_response(&response, "delegation changed concurrently; retry")?
-    );
-    Ok(())
+    super::parse_write_response(&response, "delegation changed concurrently; retry")
 }
 
 #[cfg(test)]

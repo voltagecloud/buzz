@@ -77,6 +77,11 @@ buzz users set-status --clear                 # remove your status
 buzz dms open --pubkey <hex>
 buzz dms list
 
+# Paseo daemon: onboard (profile, daemon, grant, pairing QR); rerun to renew
+buzz paseo setup --manager <manager-pubkey>
+buzz paseo setup --manager <manager-pubkey> --update   # replace stored credentials
+buzz paseo import-team asgard.team.json --manager <manager-pubkey>   # personas -> remote agents
+
 # Gateway delegation (run as the human owner)
 # Admit the gateway into the relay and channel separately before use.
 buzz gateway grant <gateway-pubkey> --expires 90d

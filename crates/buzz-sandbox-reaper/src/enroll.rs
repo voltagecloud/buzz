@@ -594,8 +594,7 @@ impl Enrollment {
                 }
                 let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
                 let summary = profile::summary(&profile, &version_id, Some(now));
-                let mut reply =
-                    serde_json::json!({"ok": true, "version_id": version_id, "profile": summary});
+                let mut reply = serde_json::json!({"ok": true, "developer": developer.id, "version_id": version_id, "profile": summary});
                 if let Some(pairing) = pairing {
                     reply["paseo"] = pairing;
                 }
@@ -608,13 +607,15 @@ impl Enrollment {
         }
     }
 
-    /// The `profile` operation: the stored profile's [`profile::summary`],
-    /// or `null` when none is stored, and its Paseo pairing details.
+    /// The `profile` operation: the developer ID, the stored profile's
+    /// [`profile::summary`] or `null` when none is stored, and its Paseo
+    /// pairing details.
     pub async fn describe(&self, developer: &Developer) -> Value {
         match self.stored(developer).await {
             Ok(Some((profile, stored))) => {
                 let mut reply = serde_json::json!({
                     "ok": true,
+                    "developer": developer.id,
                     "profile": profile::summary(&profile, &stored.version_id, stored.created),
                     "paseo_enabled": self.paseo.is_some(),
                 });
@@ -633,7 +634,7 @@ impl Enrollment {
                 reply
             }
             Ok(None) => {
-                serde_json::json!({"ok": true, "profile": null, "paseo_enabled": self.paseo.is_some()})
+                serde_json::json!({"ok": true, "developer": developer.id, "profile": null, "paseo_enabled": self.paseo.is_some()})
             }
             Err(refused) => refused,
         }

@@ -2196,8 +2196,11 @@ derived from the developer's `buzz-mobile-launch-*` registrations on the
 manager's own relay (`BUZZ_RELAY_URL`):
 
 - `agent` is the registered agent's hex public key.
-- `channel` is the channel of the agent's latest desktop deploy bound to a
-  channel thread (`provider_config.sandbox.channel_id`). The manager keeps it
+- `channel` is the channel of the agent's latest launch bound to a channel
+  thread: a desktop deploy (`provider_config.sandbox.channel_id`) or a
+  server-side `start` from a mention. A `start` that changes the channel
+  refreshes the list the same way, and reports a failed refresh as
+  `paseo_sync` beside its successful result. The manager keeps it
   in the registration's `buzz.voltage.cloud/paseo-channel` annotation, not in
   its payload, so older managers still read the registration. A
   direct-message deploy keeps the saved channel. An agent never deployed into
@@ -2230,6 +2233,8 @@ Paseo app. Neither the daemon secret key nor the gateway secret key is returned:
 ```
 
 The `profile` reply also includes `paseo_enabled`, including when no profile or daemon Secret exists.
+The `profile` and `enroll` replies include `developer`, the requester's developer ID, so a client can
+build an `enroll` profile without asking for it.
 Clients can distinguish disabled provisioning from a missing Secret and idempotently re-enroll without replacing stored credentials.
 Older clients ignore this additional field.
 
