@@ -8,7 +8,7 @@
 //! 3. Enroll when anything changed or no daemon exists yet. The manager keeps
 //!    stored values that the request leaves out, and creates the daemon.
 //! 4. Grant the daemon's gateway key for 90 days.
-//! 5. Show the pairing offer as a QR code, with the password on stderr only.
+//! 5. Show a pairing link and QR code carrying the password on stderr only.
 
 use buzz_session_control::Op;
 use nostr::PublicKey;
@@ -158,7 +158,7 @@ pub(super) async fn run(
     } else {
         described
     };
-    let (public, password) = pairing(&response).map_err(|_| {
+    let (public, secret) = pairing(&response).map_err(|_| {
         CliError::Other(
             "the Sandbox manager returned no Paseo pairing; rerun setup, or ask an operator \
              to check the daemon Secret"
@@ -191,7 +191,7 @@ pub(super) async fn run(
             "channels": channels,
         }),
         offer_url,
-        password,
+        password: secret.password,
     })
 }
 
@@ -204,15 +204,14 @@ fn has_model(summary: &Value, key: &str) -> bool {
 /// Show the pairing on the interactive terminal: QR code, link, password.
 pub(super) fn show_pairing(outcome: &Outcome) {
     eprintln!("\nYour Paseo daemon is ready. In the Paseo app, scan this code or open the link:");
-    if let Some(code) = profile::qr(&outcome.offer_url) {
-        eprintln!("{code}");
+    // Pairing was validated before setup returned this outcome.
+    if let Some(link) = super::connect_link(&outcome.offer_url, &outcome.password) {
+        if let Some(code) = super::qr(&link) {
+            eprintln!("{}", code.as_str());
+        }
+        eprintln!("Link: {}", link.as_str());
     }
-    eprintln!("{}", outcome.offer_url);
     super::print_password(&outcome.password);
-    eprintln!(
-        "Paseo saves the host without asking for the password: open the host's settings in \
-         Paseo, enter the password, and connect."
-    );
     let channels = &outcome.report["channels"];
     if channels["admitted"] == false {
         eprintln!(

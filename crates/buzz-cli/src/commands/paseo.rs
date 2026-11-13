@@ -5,6 +5,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use buzz_session_control::{build_request, open_reply, Op, Request, Status, KIND};
 use buzz_ws_client::{NostrWsConnection, RelayMessage};
 use nostr::{Keys, PublicKey, Timestamp};
+use qrcode::{render::unicode::Dense1x2, EcLevel, QrCode};
 use serde_json::{json, Value};
 use zeroize::Zeroizing;
 
@@ -12,7 +13,7 @@ use crate::{client::BuzzClient, error::CliError};
 
 #[derive(clap::Subcommand)]
 pub(crate) enum PaseoCmd {
-    /// Show public pairing details; print the password only to an interactive stderr
+    /// Show a Paseo pairing QR code and link; secrets go only to an interactive stderr
     Pairing {
         #[arg(long, env = "BUZZ_MANAGER_PUBKEY", hide_env_values = true)]
         manager: String,
@@ -78,9 +79,9 @@ pub(crate) async fn dispatch(command: PaseoCmd, client: &BuzzClient) -> Result<(
         PaseoCmd::Pairing { manager } => {
             require_terminal()?;
             let manager = Manager::new(client, &manager)?;
-            let (public, password) =
+            let (public, secret) =
                 pairing(&manager.call(Op::Profile, json!({}), PROFILE_BUDGET).await?)?;
-            print_password(&password);
+            print_pairing(&secret);
             println!("{public}");
             Ok(())
         }
@@ -366,12 +367,12 @@ async fn exchange(
     owner: &Keys,
     manager: PublicKey,
     budget: Duration,
-) -> Result<(Value, Zeroizing<String>), CliError> {
+) -> Result<(Value, Secret), CliError> {
     let request = Request::new(Op::Profile, uuid::Uuid::new_v4().to_string(), json!({}));
     pairing(&call(relay, owner, None, manager, request, budget).await?)
 }
 
-fn pairing(response: &Value) -> Result<(Value, Zeroizing<String>), CliError> {
+fn pairing(response: &Value) -> Result<(Value, Secret), CliError> {
     if response["ok"] != true {
         return Err(unavailable());
     }
@@ -391,10 +392,80 @@ fn pairing(response: &Value) -> Result<(Value, Zeroizing<String>), CliError> {
     }
     let gateway = text("gateway_pubkey")?;
     PublicKey::from_hex(gateway).map_err(|_| unavailable())?;
+    let link = connect_link(text("offer_url")?, password).ok_or_else(unavailable)?;
     Ok((
         json!({"offer_url":text("offer_url")?,"server_id":text("server_id")?,"gateway_pubkey":gateway}),
-        Zeroizing::new(password.to_owned()),
+        Secret {
+            password: Zeroizing::new(password.to_owned()),
+            link,
+        },
     ))
+}
+
+/// The pairing secrets: the daemon password, and a Paseo link that carries it.
+struct Secret {
+    password: Zeroizing<String>,
+    link: Zeroizing<String>,
+}
+
+/// The link as a QR code of Unicode half blocks. Light modules are drawn, so
+/// the code has the correct polarity on a dark terminal background.
+fn qr(link: &str) -> Option<Zeroizing<String>> {
+    let code = QrCode::with_error_correction_level(link.as_bytes(), EcLevel::L).ok()?;
+    Some(Zeroizing::new(
+        code.render::<Dense1x2>()
+            .dark_color(Dense1x2::Light)
+            .light_color(Dense1x2::Dark)
+            .build(),
+    ))
+}
+
+fn print_pairing(secret: &Secret) {
+    eprintln!("Paseo pairing (private: anyone with this QR code or link can use your daemon).\nIn the Paseo app, add a host with Scan QR, or paste the link.");
+    if let Some(code) = qr(&secret.link) {
+        eprintln!("{}", code.as_str());
+    }
+    eprintln!("Link: {}", secret.link.as_str());
+    print_password(&secret.password);
+}
+
+/// The offer as Paseo's `#connect=` link, which also carries the password, so
+/// a Paseo app pairs from one QR scan, pasted link, or opened link. The
+/// fragment is a URI-encoded `relay://<endpoint>/<server id>?key=…&ssl=true&password=…`.
+fn connect_link(offer_url: &str, password: &str) -> Option<Zeroizing<String>> {
+    let (base, payload) = offer_url.split_once("/#offer=")?;
+    let offer: Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).ok()?).ok()?;
+    let endpoint = offer["relay"]["endpoint"].as_str()?;
+    let server = offer["serverId"].as_str().filter(|id| !id.is_empty())?;
+    let key = offer["daemonPublicKeyB64"]
+        .as_str()
+        .filter(|key| !key.is_empty())?;
+    let endpoint_ok = endpoint.rsplit_once(':').is_some_and(|(host, port)| {
+        !host.is_empty()
+            && host
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+            && port.parse::<u16>().is_ok_and(|port| port != 0)
+    });
+    if !base.starts_with("https://")
+        || offer["v"] != 2
+        || offer["relay"]["useTls"] != true
+        || !endpoint_ok
+    {
+        return None;
+    }
+    let encode =
+        |text: &str| url::form_urlencoded::byte_serialize(text.as_bytes()).collect::<String>();
+    let relay = Zeroizing::new(format!(
+        "relay://{endpoint}/{}?key={}&ssl=true&password={}",
+        encode(server),
+        encode(key),
+        encode(password)
+    ));
+    Some(Zeroizing::new(format!(
+        "{base}/#connect={}",
+        encode(&relay)
+    )))
 }
 
 mod channels;

@@ -28,7 +28,10 @@ fn pairing_json(gateway: &Keys) -> Value {
     json!({
         "password": URL_SAFE_NO_PAD.encode([9u8; 32]),
         "server_id": "srv_fixture",
-        "offer_url": "https://app.paseo.sh/#offer=fixture",
+        "offer_url": format!("https://app.paseo.sh/#offer={}", URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&json!({"v":2,"serverId":"srv_fixture",
+                "daemonPublicKeyB64":base64::engine::general_purpose::STANDARD.encode([7u8;32]),
+                "relay":{"endpoint":"buzz.voltage.cloud:443","useTls":true}})).unwrap())),
         "gateway_pubkey": gateway.public_key().to_hex(),
     })
 }
