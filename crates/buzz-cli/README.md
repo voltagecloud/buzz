@@ -4,6 +4,11 @@ Agent-first command-line interface for Buzz relay. JSON in, JSON out.
 
 ## Install
 
+For the Apple Silicon macOS download and Paseo setup, see the
+[onboarding README](../../docs/paseo-onboarding/README.md).
+
+To build from source:
+
 ```bash
 cargo install --path crates/buzz-cli
 ```
