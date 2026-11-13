@@ -206,7 +206,7 @@ A Nix install updates when you update the flake input (`nix flake update buzz-gp
 On macOS, the Nix build runs from the terminal, not from an app bundle, so the app does not show system notifications. Install the `.dmg` to get them.
 
 Sign in with your Buzz identity and join the `buzz.voltage.cloud` community.
-Install the GitHub CLI (`gh`) and sign in with `gh auth login`, so the app can add your signing key to GitHub.
+Install the GitHub CLI (`gh`) and sign in with `gh auth login -s admin:ssh_signing_key`, so the app can add your signing key to GitHub. A plain `gh auth login` does not grant that scope. If `gh` is already signed in, run `gh auth refresh -h github.com -s admin:ssh_signing_key`.
 
 ### 2. Get your credentials
 
@@ -349,7 +349,7 @@ Do this once, on any of your Remote workspace agents. To change a credential lat
 Select **Enroll profile**. The app shows **Enrolled. Profile version …**, then one of these results:
 
 - **Added your agents' signing key to your GitHub account.** `gh` added the key. Your agents' commits show as **Verified**.
-- **Add your agents' signing key to GitHub.** The app tells you why `gh` could not add the key. Select **Copy key**. On GitHub, open **Settings → SSH and GPG keys → New SSH key**, set **Key type** to **Signing Key**, paste the key, and save it.
+- **Add your agents' signing key to GitHub.** The app tells you why `gh` could not add the key. Select **Copy key**. On GitHub, open **Settings → SSH and GPG keys → New SSH key**, set **Key type** to **Signing Key**, paste the key, and save it. Do it now: enrolling again keeps this key and does not add it to GitHub.
 
 The app finds your GitHub login and name from the token. The manager finds your developer ID from your Buzz identity.
 
@@ -672,8 +672,8 @@ CAUTION: An agent runs with full tool access in its Sandbox, and it reads untrus
 | *via profile requires providers and services* | Paste the complete [shared via profile](#shared-via-profile). |
 | `op service-account create` fails with *(403) Forbidden* | You are not a 1Password owner or administrator. Ask one to create the service account and share the token with you through 1Password. |
 | *Could not run ssh-keygen. Install OpenSSH.* | Install OpenSSH, then enroll again. |
-| The app says *gh needs the admin:ssh_signing_key scope* | Run `gh auth refresh -h github.com -s admin:ssh_signing_key`, then enroll again. Or add the key yourself with **Copy key**. |
-| Commits show as **Unverified** on GitHub | Add the signing key on GitHub, and make sure **Git email** is a verified email on your account. |
+| The app says *gh needs the admin:ssh_signing_key scope* | Add the key yourself with **Copy key**. Or run `gh auth refresh -h github.com -s admin:ssh_signing_key`, then enroll again with **Replace the signing key** selected. Enrolling again without it keeps the key and does not add it. |
+| Commits show as **Unverified** on GitHub | Run `gh api user/ssh_signing_keys` to list your signing keys. If no **Buzz agents** key is listed, enroll again with **Replace the signing key** selected, so the app creates a key and adds it. Also make sure **Git email** is a verified email on your account. |
 | *The Sandbox manager did not answer within 60 seconds.* | Ask an admin. The admin checks `kubectl --context voltage-staging -n buzz-sandbox-manager logs deploy/buzz-sandbox-manager`. |
 | The agent does not reply after 10 minutes | Check that you enrolled. If you did, an admin checks the Sandbox: `kubectl --context voltage-staging -n buzz-agent-staging-<developer-id> get sandboxes,pods`. |
 | The Sandbox log shows *Developer profile refused while …* | The text after *while* names the startup step that failed, and the text after the colon names the reason. Credentials are never printed. Ask an admin, and include that line. |
