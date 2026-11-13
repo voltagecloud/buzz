@@ -8,9 +8,15 @@ use nostr::PublicKey;
 mod discovery;
 use discovery::history_list;
 
+#[path = "replay.rs"]
+mod replay;
+#[path = "transcripts.rs"]
+mod transcripts;
+
 pub(super) struct Replay {
     pub events: Vec<Event>,
     pub labels: HashMap<PublicKey, String>,
+    pub turns: Vec<transcripts::ReplayTurn>,
 }
 
 const LIST_PAGE: usize = 20;
@@ -218,7 +224,15 @@ impl<R: BridgeRelay> Bridge<R> {
                             .map(|event| event.pubkey),
                     )
                     .await;
-                Ok(Replay { events, labels })
+                let turns = match events.iter().find(|event| root_for(&scope, event)) {
+                    Some(root) => transcripts::load_turns(relay.as_ref(), &scope, root.id).await,
+                    None => Vec::new(),
+                };
+                Ok(Replay {
+                    events,
+                    labels,
+                    turns,
+                })
             };
             let result = tokio::time::timeout(HISTORY_TIMEOUT, replay)
                 .await
@@ -282,7 +296,11 @@ impl<R: BridgeRelay> Bridge<R> {
                 .await;
         }
         let raw = raw.as_str();
-        let Replay { events, labels } = match result {
+        let Replay {
+            events,
+            labels,
+            turns,
+        } = match result {
             Ok(replay) => replay,
             Err(error) => {
                 return self
@@ -383,33 +401,18 @@ impl<R: BridgeRelay> Bridge<R> {
             })
             .cloned()
             .collect::<Vec<_>>();
-        // ACP clients join consecutive agent chunks into one message. Frame
-        // peer messages as the live path does, and separate agent replies
-        // that follow other agent-side text.
-        let mut agent_side = false;
-        for event in events.into_iter().chain(overlap) {
+        for event in &events {
             self.seen.insert(event.id);
-            let own =
-                event.pubkey == self.scope.owner || event.pubkey == self.scope.signer.public_key();
-            let update = if own {
-                let mut update = wire::agent_text_chunk(&event.content);
-                update["sessionUpdate"] = json!("user_message_chunk");
-                update
-            } else if event.pubkey != self.scope.agent {
-                wire::agent_text_chunk(&format!(
-                    "\n\n[{}] {}\n\n",
-                    labels
-                        .get(&event.pubkey)
-                        .cloned()
-                        .unwrap_or_else(|| names::fallback(event.pubkey)),
-                    event.content
-                ))
-            } else if agent_side {
-                wire::agent_text_chunk(&format!("\n\n{}", event.content))
-            } else {
-                wire::agent_text_chunk(&event.content)
-            };
-            agent_side = !own;
+        }
+        for event in &overlap {
+            self.seen.insert(event.id);
+        }
+        for update in replay::updates(
+            &self.scope,
+            events.into_iter().chain(overlap).collect(),
+            labels,
+            turns,
+        ) {
             self.send(wire::session_update(raw, update)).await?;
         }
         self.send(wire::ok(id, json!({}))).await

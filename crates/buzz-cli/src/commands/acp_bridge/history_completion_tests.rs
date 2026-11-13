@@ -69,6 +69,7 @@ async fn missing_root_completion_answers_error_and_keeps_session_creation_availa
             1,
             None,
             Ok(Replay {
+                turns: Vec::new(),
                 events: Vec::new(),
                 labels: HashMap::new()
             })

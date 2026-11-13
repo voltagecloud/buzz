@@ -253,6 +253,8 @@ async fn overlap_overflow_preserves_other_sessions_and_later_loads() {
         tokio::time::timeout(WAIT, harness.query_entered.notified())
             .await
             .unwrap();
+        // Release both loads, including optional transcript/history reads.
+        harness.consume_query_permits.store(false, Ordering::SeqCst);
         drop(blocked);
         let mut failed = false;
         let mut loaded = false;
