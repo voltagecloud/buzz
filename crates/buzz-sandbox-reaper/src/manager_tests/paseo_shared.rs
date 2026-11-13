@@ -3,8 +3,10 @@
 use super::*;
 use base64::Engine;
 use futures_util::StreamExt;
+use std::io::{Read, Seek};
 use std::sync::Arc;
 use std::time::Duration;
+use tracing::instrument::WithSubscriber;
 
 type MembershipHook = Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>;
 /// A `kinds` filter value the fake relay refuses with CLOSED, as an outage.
@@ -97,7 +99,11 @@ async fn serve(
                 );
                 if fail_kinds.lock().unwrap().as_ref() == Some(&filter["kinds"]) {
                     socket
-                        .send(frame(json!(["CLOSED", input[1], "error: unavailable"])))
+                        .send(frame(json!([
+                            "CLOSED",
+                            input[1],
+                            "error: unavailable secret-fixture-do-not-log"
+                        ])))
                         .await
                         .unwrap();
                     continue;
@@ -646,20 +652,38 @@ async fn a_live_managed_gateway_acts_as_its_owner_for_shared_tasks() {
         };
         *relay.events.lock().unwrap() = events;
         let journal_before = journal(&cluster);
+        let output = tempfile::tempfile().unwrap();
+        let mut reader = output.try_clone().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .without_time()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(Mutex::new(output))
+            .finish();
         let result = tokio::time::timeout(
             Duration::from_secs(10),
-            manager.admit_shared(
-                owner().public_key(),
-                agent().public_key(),
-                NAMESPACE,
-                &crate::shared_tasks::Request {
-                    relay_url: relay.url.clone(),
-                    trigger,
-                },
-            ),
+            manager
+                .admit_shared(
+                    owner().public_key(),
+                    agent().public_key(),
+                    NAMESPACE,
+                    &crate::shared_tasks::Request {
+                        relay_url: relay.url.clone(),
+                        trigger,
+                    },
+                )
+                .with_subscriber(subscriber),
         )
         .await
         .unwrap();
+        reader.rewind().unwrap();
+        let mut logs = String::new();
+        reader.read_to_string(&mut logs).unwrap();
+        assert!(!logs.contains("secret-fixture-do-not-log"));
+        if state == "relay_failure" {
+            assert!(logs.contains("subscription_closed"), "{logs}");
+            assert!(logs.contains("30181"), "{logs}");
+        }
         cluster
             .lock()
             .unwrap()
@@ -687,6 +711,16 @@ async fn a_live_managed_gateway_acts_as_its_owner_for_shared_tasks() {
             }
             Some((code, reason)) => {
                 assert_eq!(result["code"], code, "{row}");
+                assert_eq!(result["retryable"], code == "shared_task_retry", "{row}");
+                if code == "shared_task_retry" {
+                    assert!(
+                        result["error"]
+                            .as_str()
+                            .unwrap()
+                            .contains("permission has not been determined"),
+                        "{row}"
+                    );
+                }
                 assert!(result["error"].as_str().unwrap().contains(reason), "{row}");
                 assert_eq!(
                     journal_after, journal_before,

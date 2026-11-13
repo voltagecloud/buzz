@@ -1018,7 +1018,7 @@ impl Manager {
             let task=match crate::shared_tasks::verify(self.client.clone(),namespace,owner,agent,request,&daemon_keys).await {
                 Ok(task)=>task,
                 Err(crate::shared_tasks::Failure{stage,error:PolicyError::Denied(reason)})=>return Err((stage,serde_json::json!({"ok":false,"code":"shared_task_denied","error":reason}))),
-                Err(crate::shared_tasks::Failure{stage,error:PolicyError::Unavailable})=>return Err((stage,serde_json::json!({"ok":false,"code":"shared_task_retry","error":"current sharing authorization is unavailable; retry this task"}))),
+                Err(crate::shared_tasks::Failure{stage,error:PolicyError::Unavailable})=>return Err((stage,serde_json::json!({"ok":false,"code":"shared_task_retry","error":"authorization lookup failed temporarily; permission has not been determined; retry this task"}))),
             };
             Enrollment::check_shared_human(&daemon_keys, &task).map_err(|error| ("managed_gateway", error))?;
             let Some(origin)=self.config.developer(&task.origin_owner) else {
@@ -1039,7 +1039,9 @@ impl Manager {
             }
         }).await;
         let result = result.unwrap_or_else(|_| Err(("timeout",serde_json::json!({"ok":false,"code":"shared_task_retry","error":"task authorization timed out; retry this task"}))));
-        result.map_err(|(stage, response)| {
+        result.map_err(|(stage, mut response)| {
+            let retryable = response["code"] == "shared_task_retry";
+            response["retryable"] = serde_json::json!(retryable);
             // Fixed refusal strings and public identifiers only: never task text.
             tracing::warn!(stage, code = %response["code"], reason = %response["error"],
                 %owner, %agent, trigger = %request.trigger.id, "shared task admission refused");
