@@ -46,6 +46,7 @@ impl Ids {
             agent: self.agent.public_key(),
             channel: self.channel,
             home: self.home.path().to_path_buf(),
+            paseo_code: self.home.path().join("bin/paseo-code"),
         }
     }
 

@@ -96,6 +96,10 @@ rand = { workspace = true }
 rpassword = "7"
 tempfile = "3"
 
+# Process-group kill for acp-bridge's background `paseo-code view` runs
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31", default-features = false, features = ["signal"] }
+
 [dev-dependencies]
 futures-util = { workspace = true }
 tokio-tungstenite = { workspace = true }

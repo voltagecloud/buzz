@@ -23,6 +23,7 @@ fn scope() -> Scope {
         agent: Keys::generate().public_key(),
         channel: Uuid::new_v4(),
         home: std::path::PathBuf::from("/nonexistent"),
+        paseo_code: std::path::PathBuf::from("/nonexistent/paseo-code"),
     }
 }
 

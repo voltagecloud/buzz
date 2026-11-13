@@ -20,6 +20,7 @@ use super::frames::{self, Scope, Signal};
 use super::names::{self, Names};
 use super::projects;
 use super::prompt::{self, Prompt};
+use super::views::BranchViews;
 use super::wire::{self, Inbound, StdinMsg};
 use crate::error::CliError;
 
@@ -350,6 +351,7 @@ where
     let (ops_tx, mut ops_rx) = mpsc::channel(OPS_QUEUE);
 
     let mut bridge = Bridge {
+        views: BranchViews::new(scope.paseo_code.clone(), scope.home.clone()),
         scope,
         relay,
         out: out_tx,
@@ -379,6 +381,8 @@ where
 
 struct Bridge<R> {
     names: Arc<Names>,
+    /// Background `paseo-code view` runs for replayed agent file paths.
+    views: Arc<BranchViews>,
     peer_names: usize,
     prepares: Arc<Semaphore>,
     scope: Scope,

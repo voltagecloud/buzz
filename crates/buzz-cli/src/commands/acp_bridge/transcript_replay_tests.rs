@@ -118,6 +118,7 @@ async fn history_replays_transcripts_and_keeps_text_when_parts_are_unusable() {
         "conflicting",
         "wrong_author",
         "wrong_recipient",
+        "shortened",
     ] {
         let ids = Ids::new();
         let root = root(&ids);
@@ -151,6 +152,22 @@ async fn history_replays_transcripts_and_keeps_text_when_parts_are_unusable() {
             transcript.updates[0]["entries"][0]["content"] = json!("contradicting copy");
             stored.push(part(&ids, author, recipient, &transcript, 0, 2));
         }
+        #[cfg(unix)]
+        if mode == "complete" {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::create_dir(ids.home.path().join("bin")).unwrap();
+            let program = ids.home.path().join("bin/paseo-code");
+            let record = ids.home.path().join("view-args");
+            std::fs::write(
+                &program,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+                    record.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
         let mut harness = start(&ids, Timing::default());
         harness.relay_tx.send(RelayInbound::Live).await.unwrap();
         harness.history.lock().unwrap().0 = stored;
@@ -166,7 +183,7 @@ async fn history_replays_transcripts_and_keeps_text_when_parts_are_unusable() {
         let tool = updates
             .iter()
             .find(|update| update["sessionUpdate"] == "tool_call");
-        let complete = mode == "complete";
+        let complete = matches!(mode, "complete" | "shortened");
         assert_eq!(tool.is_some(), complete, "{mode}");
         assert!(
             texts(&notes)
@@ -186,13 +203,47 @@ async fn history_replays_transcripts_and_keeps_text_when_parts_are_unusable() {
             updates[0]["sessionUpdate"], "user_message_chunk",
             "prompt precedes turn"
         );
-        if tool.is_some() {
+        if let Some(tool) = tool {
+            let expected = ids
+                .home
+                .path()
+                .join("code/voltagecloud/backend@feat/replay/src/main.rs");
+            assert_eq!(tool["locations"][0]["path"], expected.to_str().unwrap());
+            assert_eq!(tool["rawInput"]["file_path"], expected.to_str().unwrap());
+            assert_eq!(
+                tool["content"][0]["type"],
+                if mode == "shortened" {
+                    "content"
+                } else {
+                    "diff"
+                }
+            );
             let usage = updates
                 .iter()
                 .find(|update| update["sessionUpdate"] == "usage_update")
                 .unwrap();
             assert_eq!(usage["used"], 20);
             assert_eq!(usage["_meta"]["usage"]["totalTokens"], 14);
+        }
+        #[cfg(unix)]
+        if mode == "complete" {
+            let record = ids.home.path().join("view-args");
+            let args = tokio::time::timeout(WAIT, async {
+                loop {
+                    if let Ok(text) = tokio::fs::read_to_string(&record).await {
+                        if text.ends_with("--inherit-process-group\n") {
+                            break text;
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                args,
+                "view\nvoltagecloud/backend\nfeat/replay\n--inherit-process-group\n"
+            );
         }
         harness.bridge.abort();
     }

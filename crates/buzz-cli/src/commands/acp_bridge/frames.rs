@@ -72,6 +72,9 @@ pub(crate) struct Scope {
     /// The daemon's home directory, which holds the Paseo projects
     /// (see [`super::projects`]).
     pub home: std::path::PathBuf,
+    /// The daemon's `paseo-code` program, which opens read-only branch views
+    /// (see [`super::views`]).
+    pub paseo_code: std::path::PathBuf,
 }
 
 /// The fields of buzz-acp's `ObserverEvent` the bridge reads.

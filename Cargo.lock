@@ -1666,6 +1666,7 @@ dependencies = [
  "futures-util",
  "hex",
  "infer",
+ "nix 0.31.3",
  "nostr 0.44.7",
  "qrcode",
  "rand 0.10.1",
