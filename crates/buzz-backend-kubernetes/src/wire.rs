@@ -162,6 +162,8 @@ pub enum ErrorCode {
     /// A desktop launch cannot register its relay endpoint for mobile starts.
     InvalidLaunchRegistration,
     /// The session is a tombstone; only an explicit recovery starts another.
+    /// Also refuses a mention's recovery of a session that ended after that
+    /// mention (`sandbox.recovery.ended_before`).
     SessionEnded,
     /// A stop is draining; the session ends once its Pod is gone.
     SessionEnding,

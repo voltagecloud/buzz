@@ -387,23 +387,8 @@ impl Work {
                     Ok(request) => request,
                     Err(error) => return error,
                 };
-                let mut response = response_value(&provider::run(request, &target).await);
-                if response["ok"] == true {
-                    // The Sandbox started; a failed channel record only leaves
-                    // the daemon's agent list stale, so report it beside the
-                    // authoritative result, as a registering deploy does.
-                    // Refresh after every channel start, not only a changed
-                    // channel: that also retries an earlier failed refresh.
-                    // An unchanged list is not rewritten.
-                    let synced = match start.remember_channel(client.clone(), namespace).await {
-                        Ok(_) => manager.enrollment.agents_changed(&developer).await,
-                        Err(error) => Err(error),
-                    };
-                    if let Err(error) = synced {
-                        response["paseo_sync"] = error;
-                    }
-                }
-                response
+                let response = response_value(&provider::run(request, &target).await);
+                manager.finish_start(&start, &developer, response).await
             }
             Work::Enroll {
                 developer,
@@ -534,10 +519,17 @@ impl Manager {
         self.config.shared_tasks
     }
 
-    /// Reuse mobile start validation without manufacturing an owner control event.
     /// Start the agent for one mention. The trigger's signer is the owner, a
     /// live owner-delegated gateway, a relay-proven gateway workflow owner
     /// (`delegation`, freshly verified for this trigger), or a shared requester.
+    ///
+    /// When the thread's session has ended, a mention signed by the owner or
+    /// a live delegated gateway is the explicit recovery request a desktop
+    /// recovery action would send: the provider restores the tombstone's
+    /// checkpoint if the session ended before the mention, and the recovered
+    /// session replays it. A relay-signed scheduled workflow prompt or a shared
+    /// requester's mention never recovers a session; it gets the ordinary
+    /// refusal.
     pub(crate) async fn start_mention(
         &self,
         owner: PublicKey,
@@ -552,41 +544,99 @@ impl Manager {
         let payload =
             serde_json::json!({"agent_pubkey": agent, "relay_url": relay, "trigger": event});
         let delegation = delegation.filter(|request| request.delegation.owner() == owner);
-        let admitted = if event.pubkey == owner {
-            Start::admit(payload, owner, Timestamp::now().as_secs())
+        let (admitted, recovers) = if event.pubkey == owner {
+            (
+                Start::admit(payload, owner, Timestamp::now().as_secs()),
+                true,
+            )
         } else if let Some(delegation) = delegation {
-            Start::gateway(payload, delegation, Timestamp::now().as_secs())
+            // A scheduled workflow prompt is signed by the relay, not the
+            // gateway. It is not a person asking to restore the thread.
+            (
+                Start::gateway(payload, delegation, Timestamp::now().as_secs()),
+                delegation.workflow_relay.is_none(),
+            )
         } else {
             let request = crate::shared_tasks::Request {
                 relay_url: relay.into(),
                 trigger: event.clone(),
             };
-            match self
+            let admitted = match self
                 .authorize_shared(owner, agent, &developer.namespace, &request)
                 .await
             {
                 Ok(task) => Start::shared(task, relay, event),
                 Err(error) => Err(error),
-            }
+            };
+            (admitted, false)
         };
         let start = match admitted {
             Ok(start) => start,
             Err(error) => return error,
         };
-        Work::Start {
-            start,
-            developer: developer.clone(),
-            target: Target::Managed {
-                client: self.client.clone(),
-                namespace: developer.namespace.clone(),
-                agent,
-                owner,
-                defaults: self.defaults.clone(),
-                env: self.shared_env(developer),
-            },
+        let target = Target::Managed {
+            client: self.client.clone(),
+            namespace: developer.namespace.clone(),
+            agent,
+            owner,
+            defaults: self.defaults.clone(),
+            env: self.shared_env(developer),
+        };
+        let launch = |request: Result<Request, serde_json::Value>| async {
+            match request {
+                Ok(request) => {
+                    let response = response_value(&provider::run(request, &target).await);
+                    self.finish_start(&start, developer, response).await
+                }
+                Err(error) => error,
+            }
+        };
+        let response = launch(
+            start
+                .request(self.client.clone(), &developer.namespace)
+                .await,
+        )
+        .await;
+        // An ordinary deploy never resumes an ended session. `recovery_interrupted`
+        // means a recovery deleted the tombstone and stopped; recovering again
+        // finishes it from the provider's recovery journal.
+        let ended = matches!(
+            response["code"].as_str(),
+            Some("session_ended" | "recovery_interrupted")
+        );
+        if !(recovers && ended) {
+            return response;
         }
-        .run(self)
+        launch(
+            start
+                .recovery(self.client.clone(), &developer.namespace)
+                .await,
+        )
         .await
+    }
+
+    /// Preserve a successful start and refresh its derived Paseo provider list.
+    async fn finish_start(
+        &self,
+        start: &Start,
+        developer: &Developer,
+        mut response: serde_json::Value,
+    ) -> serde_json::Value {
+        if response["ok"] == true {
+            // The durable registration permits a later start/enroll to retry
+            // this refresh. Never report a committed deploy as failed.
+            let synced = match start
+                .remember_channel(self.client.clone(), &developer.namespace)
+                .await
+            {
+                Ok(_) => self.enrollment.agents_changed(developer).await,
+                Err(error) => Err(error),
+            };
+            if let Err(error) = synced {
+                response["paseo_sync"] = error;
+            }
+        }
+        response
     }
 
     pub fn new(

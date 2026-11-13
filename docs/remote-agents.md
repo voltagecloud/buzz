@@ -1485,6 +1485,7 @@ The image must reject a mismatch between `BUZZ_SANDBOX_POD_UID` and `BUZZ_SANDBO
 The controller owns the Pod. Concurrent mentions reuse its workspace when the agent, owner, relay, channel, and thread match.
 The provider binds the launch Secret to the first Pod UID.
 A replaced or completed Pod requires explicit recovery; a later mention cannot silently create an empty replacement session.
+With mention launch, the owner's or a live delegated gateway's mention in that thread is an explicit checkpoint recovery request (§Sandbox lifecycle, **Recovery from a mention**).
 The workspace is an `emptyDir` on a `restartPolicy: Never` Pod. When the harness exits, the stop checkpoint is the only copy of its work.
 A session that ended is kept as a tombstone, not deleted (§Sandbox lifecycle).
 Deleting a Sandbox removes its Pod and any workspace that remains. Recover or checkpoint authorized work before deletion.
@@ -1512,10 +1513,12 @@ and the next deploy for that thread resumes the binding for the same Pod (§Depl
 The in-cluster `buzz-sandbox-reaper` (planned; it ships in a later change)
 ends Sandbox sessions that stopped, failed, or lost their Pod. It never
 starts a session, never sets `operatingMode: Running`, and never creates a
-Sandbox. Only an explicit recovery deploy from the desktop starts a new
-session for a thread. This section is the contract the reaper implements;
-the provider already refuses to reuse a session that is `ending`, `ended`,
-or in an unknown lifecycle.
+Sandbox. Only an explicit recovery deploy starts a new session for a thread
+whose session ended. A desktop sends it on a user action. The session
+manager sends it for a mention in that thread that the owner or a live
+owner-delegated gateway signed (**Recovery from a mention**, below). This
+section is the contract the reaper implements; the provider already refuses
+to reuse a session that is `ending`, `ended`, or in an unknown lifecycle.
 
 The provider and the reaper share one classifier and one set of annotation
 keys (`buzz-backend-kubernetes` library, `lifecycle.rs`):
@@ -1726,6 +1729,72 @@ launch-configuration checks still apply. The provider removes the journal
 after it binds the replacement; when that cleanup fails, the journal stays
 and a later deploy of the replacement removes it.
 
+**Recovery from a mention.** The session manager's mention launcher
+(`buzz-sandbox-reaper serve --mention-launch`) deploys each mention as an
+ordinary deploy first. When that deploy is refused with `session_ended` or
+`recovery_interrupted`, and the mention is signed by the agent's owner or by
+a gateway the owner has live-delegated (kind 30181, checked again for this
+mention), the manager treats the mention as the explicit request. It sends
+the same launch again with
+`provider_config.sandbox.recovery={"mode":"checkpoint","ended_before":<mention created_at - 60>}`.
+The recovery is the one described above: the same journal, preconditions,
+and refusals. The recovered session's replay floor is the mention, so the
+harness answers it as it would answer a mention that started a session.
+
+- Only a person's mention recovers. A shared-task mention, from a requester
+  that a sharing grant admits, and a relay-signed scheduled workflow prompt
+  never recover a session. They get the ordinary `session_ended` refusal.
+- A mention never requests `fresh` recovery. A tombstone without a
+  checkpoint is refused with `no_checkpoint`, and the agent replies that
+  the session cannot be restored.
+- A mention recovers only a session that ended before it. The provider
+  refuses, with `session_ended`, a tombstone whose `ended-at` is not earlier
+  than `ended_before`, or that has no `ended-at`. The manager admits a
+  mention only when its `created_at` (the signer's clock) is at most 60s
+  ahead of the manager's clock, and `ended_before` subtracts the same 60s.
+  So `ended_before` is never later than the mention's first admission, and
+  a session that ended after that is never recovered for this mention:
+  - The mention was delivered into a live session, the manager restarted
+    before it recorded the result, and the user then ended the session.
+    The retry gets `session_ended`; it does not undo the stop.
+  - One mention recovers its thread at most once. The session it recovers
+    ends after the mention, so a later retry is refused.
+  - A mention sent within 60s after its session ended gets the
+    `session_ended` reply. The next mention recovers.
+
+  This assumes the manager's clock and the reaper's clock (which writes
+  `ended-at`) agree; both run in the cluster.
+- A retry after a lost acknowledgement reuses the live replacement through
+  the ordinary deploy. A retry after an interrupted recovery gets
+  `recovery_interrupted` and finishes that recovery from its journal; the
+  `ended_before` check applies to the journaled tombstone.
+- A recovery can take longer than the launcher's 180s attempt deadline (a
+  draining Pod, then the 120s binding and 120s startup waits; the attempt
+  deadline is bounded by the inbox lease). The attempt ends as
+  `launch_timeout`, which the launcher retries, and the retry converges
+  through the previous item. If the three attempts run out first, the agent
+  replies, and the next mention converges the same way.
+- A concurrent desktop recovery of the same tombstone:
+  - Usually the desktop's replacement exists before the mention arrives.
+    The mention's ordinary deploy reuses it, whichever mode created it.
+  - When the desktop creates its replacement while the mention's recovery
+    runs, a checkpoint recovery converges on one replacement. A fresh one
+    refuses the mention's recovery with `recovery_mode_conflict`. The
+    launcher retries it like `session_active`, and the retry's ordinary
+    deploy reuses the replacement that won.
+  - When the desktop's recovery was interrupted (tombstone deleted, no
+    replacement yet), the mention gets `recovery_interrupted` and finishes
+    that recovery from the journal as a checkpoint recovery. The journal
+    records the tombstone, not the requested mode, so an interrupted fresh
+    recovery is completed with the checkpoint restored. The desktop's own
+    retry is then refused (`session_active` or `recovery_mode_conflict`).
+    To discard the workspace, end the session and recover it fresh again.
+
+This relaxes the earlier rule that only a desktop action resumes an ended
+session: a mention is now explicit when its signer holds the owner's
+authority for the agent. The mention launcher's refusals are replies in the
+thread (`failure_notice` in `crates/buzz-sandbox-reaper/src/mentions/worker.rs`).
+
 The wait for the old Sandbox and Pod lasts at most one drain grace (300s).
 With the 120s binding and 120s startup waits, a recovery ends inside the
 600s operation deadline that the desktop enforces, with 60s left for
@@ -1764,7 +1833,7 @@ or reused, and a new refusal gets a new code. They are defined in
 
 | `code` | Meaning | Desktop action |
 | --- | --- | --- |
-| `session_ended` | The Sandbox is a tombstone (`lifecycle=ended`). | explicit recovery |
+| `session_ended` | The Sandbox is a tombstone (`lifecycle=ended`), or a mention's recovery (`ended_before`) found a tombstone that ended after the mention. | explicit recovery |
 | `session_ending` | A stop is draining (`lifecycle=ending`); deploy and recovery are refused. | wait, then explicit recovery |
 | `lifecycle_unknown` | The lifecycle annotation has a value this provider does not know. | update Buzz |
 | `session_deleting` | The Sandbox has a `deletionTimestamp`. | retry once it is gone |

@@ -22,6 +22,13 @@ pub(crate) const CHANNEL_ANNOTATION: &str = "buzz.voltage.cloud/paseo-channel";
 /// Unix seconds of the launch that set [`CHANNEL_ANNOTATION`], so an older
 /// launch that finishes later never replaces a newer launch's channel.
 pub(crate) const CHANNEL_AT_ANNOTATION: &str = "buzz.voltage.cloud/paseo-channel-at";
+/// How far a mention's `created_at`, its signer's clock, may run ahead of this
+/// manager's clock. Admission refuses a mention further ahead. A mention's
+/// recovery subtracts the same allowance ([`Start::recovery`]), so it only
+/// restores a session that ended before the mention was first admitted. A
+/// mention sent within this allowance after its session ended gets the
+/// ordinary refusal; the next mention recovers.
+const MAX_CLOCK_LEAD_SECS: u64 = 60;
 
 fn store_failed() -> Value {
     refusal(
@@ -305,7 +312,7 @@ impl Start {
             || payload.agent_pubkey == owner
             || payload.agent_pubkey == signer
             || !matches!(event.kind.as_u16(), 9 | 40002)
-            || event.created_at.as_secs() > request_time.saturating_add(60)
+            || event.created_at.as_secs() > request_time.saturating_add(MAX_CLOCK_LEAD_SECS)
             || !addressed
             || channels.len() != 1
             || channels[0].len() != 2
@@ -366,6 +373,35 @@ impl Start {
         client: kube::Client,
         namespace: &str,
     ) -> Result<wire::Request, Value> {
+        self.deploy(client, namespace, None).await
+    }
+
+    /// The same launch as [`Start::request`], as a checkpoint recovery of the
+    /// thread's ended session. The provider restores the tombstone's
+    /// checkpoint only if the session ended before this mention, less
+    /// [`MAX_CLOCK_LEAD_SECS`]. Admission bounds `created_at` to that lead,
+    /// so the bound is never later than this mention's first admission. A
+    /// session that ended after it is never undone: neither one the user
+    /// stopped after the mention was delivered, nor one this mention already
+    /// recovered. Only the owner's or a live delegated gateway's mention may
+    /// send it.
+    pub async fn recovery(
+        &self,
+        client: kube::Client,
+        namespace: &str,
+    ) -> Result<wire::Request, Value> {
+        // The replay floor is the mention's `created_at`.
+        let ended_before = self.replay_floor.saturating_sub(MAX_CLOCK_LEAD_SECS);
+        let recovery = json!({"mode": "checkpoint", "ended_before": ended_before});
+        self.deploy(client, namespace, Some(recovery)).await
+    }
+
+    async fn deploy(
+        &self,
+        client: kube::Client,
+        namespace: &str,
+        recovery: Option<Value>,
+    ) -> Result<wire::Request, Value> {
         let api: Api<Secret> = Api::namespaced(client, namespace);
         let name = Registration::name(self.owner, self.agent, &self.relay);
         let secret = api.get_opt(&name).await.map_err(|_| store_failed())?.ok_or_else(|| {
@@ -404,8 +440,12 @@ impl Start {
         {
             return Err(store_failed());
         }
+        let mut scope = self.scope.clone();
+        if let Some(recovery) = recovery {
+            scope["recovery"] = recovery;
+        }
         let mut payload = json!({"op": "deploy", "agent": saved.payload,
-            "provider_config": {"sandbox": self.scope.clone(),
+            "provider_config": {"sandbox": scope,
                 "identity_policy": {"agent_pubkey": self.agent, "owner_pubkey": self.owner}}});
         // Replay is invocation state. Never retain an earlier thread's floor.
         for tier in ["env", "policy_env"] {

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use buzz_backend_kubernetes::provider;
 use buzz_ws_client::{NostrWsConnection, RelayMessage, WsClientError};
 use nostr::{Event, EventBuilder, Kind, Tag, Timestamp};
 use serde_json::json;
@@ -19,7 +20,19 @@ struct GatewayAuthors {
 
 const PAGE: usize = 1000;
 const MAX_PAGES: usize = 16;
+/// Deadline for one launch attempt: the ordinary deploy and, in an ended
+/// thread, the checkpoint recovery that follows it. The journal lease bounds
+/// it (asserted below), so it is shorter than a recovery can take
+/// ([`provider::RECOVERY_BUDGET_SECS`]: a Pod drain, then the binding and
+/// startup waits). A slow restore ends the attempt as `launch_timeout`, which
+/// is retried. The provider journals a recovery before it deletes the
+/// tombstone, so a later attempt converges: its ordinary deploy reuses the
+/// replacement the recovery created, or gets `recovery_interrupted` and
+/// finishes the recovery from that journal. If the attempts run out first, the
+/// reply asks for another mention, which converges the same way.
 const TURN_TIMEOUT: Duration = Duration::from_secs(180);
+// The note above holds while one attempt cannot cover a whole recovery.
+const _: () = assert!(TURN_TIMEOUT.as_secs() < provider::RECOVERY_BUDGET_SECS);
 const RECYCLE_AFTER: Duration = Duration::from_secs(60);
 const MAX_ATTEMPTS: u8 = 3;
 const MAX_EVENT_BYTES: usize = 60_000;
@@ -438,11 +451,15 @@ async fn drain(
         } else {
             let pending = journal.state.pending.as_mut().ok_or(Error::Storage)?;
             let code = result["code"].as_str().unwrap_or("launch_failed");
+            // `recovery_mode_conflict` is retried like `session_active`: a
+            // concurrent desktop recovery won, and the retry's ordinary
+            // deploy reuses its replacement.
             if matches!(
                 code,
                 "session_ended"
                     | "session_ending"
                     | "recovery_interrupted"
+                    | "no_checkpoint"
                     | "config_differs"
                     | "launch_not_registered"
                     | "unauthorized_owner"
@@ -524,7 +541,15 @@ async fn flush_notices(identity: &Identity, journal: &mut Journal) -> Result<(),
 fn failure_notice(identity: &Identity, event: &Event, code: &str) -> Result<Event, Error> {
     let (channel, root) = conversation(identity, event)?;
     let text = match code {
-        "session_ended" | "session_ending" | "recovery_interrupted" => "This thread's agent session ended. Recover it from desktop, or mention me in a new thread.",
+        // An owner or live-gateway mention gets `session_ended` only when the
+        // session ended after it; any other mention never recovers. A newer
+        // mention can. `recovery_mode_conflict` is posted only once its retries
+        // run out. Each keeps the prefix that `buzz acp-bridge` recognizes
+        // (`SESSION_ENDED_NOTICE`).
+        "session_ended" | "recovery_interrupted" => "This thread's agent session ended. My owner, or a gateway they delegated, can restore its last checkpoint by mentioning me here; otherwise mention me in a new thread.",
+        "session_ending" => "This thread's agent session ended and is still saving its checkpoint. Once that finishes, my owner or a gateway they delegated can restore it by mentioning me here; otherwise mention me in a new thread.",
+        "no_checkpoint" => "This thread's agent session ended without a saved checkpoint, so it cannot be restored. Mention me in a new thread.",
+        "recovery_mode_conflict" => "This thread's agent session ended, and another recovery of it is in progress, so its last checkpoint could not be restored. Mention me here again once that recovery finishes, or mention me in a new thread.",
         "config_differs" => "This thread has different agent settings. Continue its existing session or mention me in a new thread.",
         "launch_not_registered" => "Start this agent once from desktop to register its launch settings, then mention me again.",
         "unsupported_conversation" => "Automatic remote startup requires a channel thread. Mention me in a channel, or manage this conversation from desktop.",

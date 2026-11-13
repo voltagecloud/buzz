@@ -109,7 +109,8 @@ agent's existing identity and channel permissions. It does not join channels.
 Each registered agent can subscribe to at most 64 current channels. Membership
 is rediscovered on the bounded listener recycle; fresh admission also rechecks
 current membership and grants. Authorization failures leave a visible refusal
-or a durable retry record. Startup does not implicitly recover an ended session.
+or a durable retry record. A shared task never recovers an ended session; only
+the owner's or a live delegated gateway's mention restores its checkpoint.
 
 The rollout uses existing owner namespaces, quotas, and Spot capacity. Human
 acceptance and staging rollout must be recorded separately from local tests.
