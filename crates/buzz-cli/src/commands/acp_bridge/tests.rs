@@ -458,6 +458,7 @@ async fn acp_session_drives_a_remote_agent_through_the_relay() {
         no_telemetry_grace: Duration::from_millis(300),
         cancel_wait: WAIT,
         turn_silence: Duration::from_secs(60),
+        live_reply_delay: Duration::from_secs(60),
     };
     let mut h = start(&ids, timing);
     let channel = ids.channel;
@@ -1067,6 +1068,91 @@ async fn replies_beyond_the_turn_buffer_point_to_the_buzz_thread() {
             .contains("3 more agent replies from this turn are only in the Buzz thread"),
         "{shown:?}"
     );
+}
+
+/// During a long telemetry-bound turn, the agent's thread posts appear after
+/// a short delay rather than at the turn's end. A post whose text telemetry
+/// streams within that delay is shown once, as streamed text.
+#[tokio::test]
+async fn agent_thread_posts_appear_during_a_long_turn() {
+    let ids = Ids::new();
+    let channel = ids.channel;
+    let timing = Timing {
+        live_reply_delay: Duration::from_millis(200),
+        ..Timing::default()
+    };
+    let mut h = start(&ids, timing);
+    h.relay_tx.send(RelayInbound::Live).await.unwrap();
+    let (new, _) = h
+        .client
+        .request(1, "session/new", json!({"cwd": "/", "mcpServers": []}))
+        .await;
+    let session = new["result"]["sessionId"].as_str().unwrap().to_owned();
+    h.client.send(prompt(2, &session, "review the PRs")).await;
+    let root = recv(&mut h.submitted).await;
+    let root_id = root.id.to_hex();
+    h.inject(ids.telemetry(&observer(
+        "turn_started",
+        Some(channel),
+        Some("t1"),
+        json!({"triggeringEventIds": [root_id]}),
+    )))
+    .await;
+    // A post telemetry never streams, and one it streams within the delay.
+    h.inject(thread_message(
+        &ids.agent,
+        channel,
+        &root_id,
+        "Merged #440 and #2337.",
+    ))
+    .await;
+    h.inject(thread_message(
+        &ids.agent,
+        channel,
+        &root_id,
+        "Narrated and posted",
+    ))
+    .await;
+    h.inject(ids.telemetry(&observer(
+        "acp_read",
+        Some(channel),
+        Some("t1"),
+        chunk("Narrated and posted"),
+    )))
+    .await;
+    // Before the turn ends, the client sees the first post exactly once.
+    let mut seen = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !seen
+        .iter()
+        .any(|text: &String| text.contains("Merged #440"))
+    {
+        let line = tokio::time::timeout_at(deadline, h.client.stdout.next_line())
+            .await
+            .expect("the post appeared before the turn ended")
+            .unwrap()
+            .unwrap();
+        let frame: Value = serde_json::from_str(&line).unwrap();
+        assert!(frame.get("id").is_none(), "the turn ended first: {frame}");
+        seen.extend(texts(&[frame]));
+    }
+    // Let every held reply's release run before the turn ends, so the
+    // release-time streamed-text check, not the turn-end flush, decides the
+    // second post. Anything released meanwhile is read with the response.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    h.inject(ids.telemetry(&observer(
+        "turn_completed",
+        Some(channel),
+        Some("t1"),
+        json!({}),
+    )))
+    .await;
+    let (done, notes) = h.client.response(2).await;
+    assert_eq!(done["result"]["stopReason"], "end_turn");
+    seen.extend(texts(&notes));
+    let count = |needle: &str| seen.iter().filter(|text| text.contains(needle)).count();
+    assert_eq!(count("Merged #440"), 1, "{seen:?}");
+    assert_eq!(count("Narrated and posted"), 1, "{seen:?}");
 }
 
 /// An unreachable relay fails the running prompt and every new prompt

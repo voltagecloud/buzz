@@ -127,6 +127,11 @@ pub(crate) struct Timing {
     /// After a turn has sent liveness frames, how long a silent turn may last
     /// before the prompt fails (for example, frames lost in a reconnect).
     pub turn_silence: Duration,
+    /// How long an agent reply that arrives during a telemetry-bound turn is
+    /// held before it is shown: long enough for trailing telemetry of the
+    /// same text to arrive, so the reply is not shown twice, and short enough
+    /// that a long turn still shows the agent's thread posts as they happen.
+    pub live_reply_delay: Duration,
 }
 
 impl Default for Timing {
@@ -135,6 +140,7 @@ impl Default for Timing {
             no_telemetry_grace: Duration::from_secs(15),
             cancel_wait: Duration::from_secs(15),
             turn_silence: Duration::from_secs(120),
+            live_reply_delay: Duration::from_secs(3),
         }
     }
 }
@@ -238,9 +244,10 @@ struct Session {
     /// `buzz messages send`, so a reply usually differs from the streamed
     /// narration and is shown.
     streamed: String,
-    /// The agent's kind 9 replies that arrived during a telemetry-bound turn.
-    /// Emitted when the turn ends, except those the turn streamed.
-    deferred: Vec<String>,
+    /// The agent's kind 9 replies that arrived during a telemetry-bound turn,
+    /// each with the time it may be shown. Each is emitted once that time
+    /// passes or the turn ends, except those the turn streamed.
+    deferred: Vec<(String, Instant)>,
     /// Agent replies not held because [`DEFERRED_REPLY_CAP`] was reached.
     deferred_dropped: usize,
     /// The user's text of the latest posted prompt, resent by `/recover` and
@@ -1225,9 +1232,14 @@ impl<R: BridgeRelay> Bridge<R> {
                 .is_some_and(|prompted| event.created_at >= prompted);
             if pending.turn_id.is_some() {
                 // Telemetry is live for this turn and may still stream this
-                // text; hold the reply until the turn ends.
+                // text; hold the reply briefly so trailing telemetry can
+                // arrive, then show it without waiting for the turn to end.
+                if streamed_contains(&session.streamed, &event.content) {
+                    return Ok(());
+                }
                 if session.deferred.len() < DEFERRED_REPLY_CAP {
-                    session.deferred.push(event.content.clone());
+                    let show_at = Instant::now() + self.timing.live_reply_delay;
+                    session.deferred.push((event.content.clone(), show_at));
                 } else {
                     // Sending it now could duplicate text telemetry streams
                     // later, so count it and point to the thread at turn end.
@@ -1288,6 +1300,10 @@ impl<R: BridgeRelay> Bridge<R> {
     // ---- deadlines and completion ----------------------------------------
 
     fn next_deadline(&self) -> Option<Instant> {
+        let replies = self
+            .sessions
+            .values()
+            .flat_map(|s| s.deferred.iter().map(|(_, show_at)| *show_at));
         self.sessions
             .values()
             .filter_map(|s| s.pending.as_ref())
@@ -1299,11 +1315,38 @@ impl<R: BridgeRelay> Bridge<R> {
                 ]
             })
             .flatten()
+            .chain(replies)
             .min()
+    }
+
+    /// Show held agent replies whose delay has passed, except those whose
+    /// text telemetry streamed meanwhile.
+    async fn release_replies(&mut self, now: Instant) -> Result<(), CliError> {
+        let mut due = Vec::new();
+        for session in self.sessions.values_mut() {
+            let (ready, held): (Vec<_>, Vec<_>) = std::mem::take(&mut session.deferred)
+                .into_iter()
+                .partition(|(_, show_at)| *show_at <= now);
+            session.deferred = held;
+            for (text, _) in ready {
+                if !streamed_contains(&session.streamed, &text) {
+                    due.push((session.id.clone(), text));
+                }
+            }
+        }
+        for (session_id, text) in due {
+            self.send(wire::session_update(
+                &session_id,
+                wire::agent_text_chunk(&format!("\n\n{text}\n\n")),
+            ))
+            .await?;
+        }
+        Ok(())
     }
 
     async fn on_deadlines(&mut self) -> Result<(), CliError> {
         let now = Instant::now();
+        self.release_replies(now).await?;
         let mut expired = Vec::new();
         for session in self.sessions.values() {
             let Some(pending) = session.pending.as_ref() else {
@@ -1345,7 +1388,10 @@ impl<R: BridgeRelay> Bridge<R> {
         let Some(session) = self.sessions.get_mut(session_id) else {
             return Ok(());
         };
-        let mut deferred = std::mem::take(&mut session.deferred);
+        let mut deferred: Vec<String> = std::mem::take(&mut session.deferred)
+            .into_iter()
+            .map(|(text, _)| text)
+            .collect();
         deferred.retain(|text| !streamed_contains(&session.streamed, text));
         let dropped = std::mem::take(&mut session.deferred_dropped);
         if dropped > 0 {
