@@ -64,6 +64,12 @@ Clone and fetch always request `--filter=blob:none` and disable tag fetching.
 Clone materializes the initial checkout; Git fetches file contents on demand.
 Checkouts live under `$HOME/code/<owner>/<repository>` and disappear with the pod.
 Open this directory in Paseo's file and diff views.
+
+At startup, `paseo-workspaces` clones each `GITHUB_READ_TOKEN_REPOSITORIES` entry once and registers it with `paseo project create`.
+Paired apps then list those repositories as projects with file trees, with no manual step.
+It runs in the background after the daemon answers `paseo project ls`, polling at most 60 times.
+It never clones an existing checkout again or registers a project twice.
+A repository the token cannot read is logged to stderr and skipped; startup never waits for it.
 Fetch with a branch updates `origin/<branch>` and detaches the checkout at that fetched branch.
 It refuses to overwrite local changes and creates no worktrees.
 The developer compares the current branch against `origin/main` in Paseo's diff view.
@@ -86,6 +92,7 @@ Native terminals and workspace script tools are disabled.
 ```
 
 Each provider runs `buzz acp-bridge --agent <key> --channel <UUID> --owner <owner key>`.
+Each provider declares one preselected model, so the model picker does not ask for a choice; the bridge offers no ACP model selection.
 The bridge receives the gateway key and relay URL, without model, pairing, or GitHub credentials.
 The bridge in #149 supplies relay-backed session list/load; #154 supplies gateway authority.
 The final image must include current #149, #154, and manager #150 through the adopted core stack.

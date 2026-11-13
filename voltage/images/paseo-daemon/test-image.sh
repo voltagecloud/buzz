@@ -295,13 +295,16 @@ docker exec "$NAME" node -e '
   const allow = config.agents.providers.claude.options.settings.permissions.allow;
   if (allow.includes("Bash(buzz:*)") || allow.some((rule) => /workflows (create|update|trigger)/.test(rule))) process.exit(1);
   for (const verb of ["list", "delete"]) if (!allow.includes(`Bash(buzz workflows ${verb}:*)`)) process.exit(1);
-' || fail "deferred terminal profile or Codex is enabled"
+  const models = config.agents.providers.brokkr.models;
+  if (models?.length !== 1 || models[0].isDefault !== true || models[0].label !== "Brokkr") process.exit(1);
+' || fail "deferred terminal profile or Codex is enabled, or a Buzz provider lacks its preselected model"
 
 # The bundled plugin compiles and starts in the unmodified daemon.
 docker exec "$NAME" paseo plugin ls --json >"$stubs/plugins.json"
 jq -e 'any(.[]; .id == "buzz-recorder" and .status == "running")' "$stubs/plugins.json" >/dev/null || fail "recorder plugin did not load"
 node "$(dirname "$0")/test-recorder.mjs"
 node "$(dirname "$0")/test-code.mjs"
+node "$(dirname "$0")/test-workspaces.mjs"
 node "$(dirname "$0")/test-code-git.mjs"
 # The fake Git executable needs an owned executable bind: /tmp stays noexec.
 docker run --rm "${HARDENED[@]}" --entrypoint node -e PASEO_CODE_HELPER=/usr/local/bin/paseo-code -e TMPDIR=/test-work \
