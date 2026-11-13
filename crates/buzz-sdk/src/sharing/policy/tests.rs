@@ -9,6 +9,9 @@ use uuid::Uuid;
 #[path = "workflow_tests.rs"]
 mod workflows;
 
+#[path = "gateway_tests.rs"]
+mod gateways;
+
 struct Fixture {
     relay: Keys,
     owner: Keys,
@@ -18,6 +21,8 @@ struct Fixture {
     channel: Uuid,
     events: Vec<Event>,
     request: Event,
+    /// The caller's gateway bindings, as a session manager passes them.
+    managed: Vec<ManagedGateway>,
 }
 fn signed(keys: &Keys, kind: u16, tags: Vec<Vec<String>>, content: &str, time: u64) -> Event {
     EventBuilder::new(Kind::Custom(kind), content)
@@ -116,6 +121,7 @@ impl Fixture {
             channel,
             events,
             request,
+            managed: Vec::new(),
         }
     }
     fn read(&self, filter: Value) -> Vec<Event> {
@@ -151,6 +157,7 @@ impl Fixture {
             owner,
             agent,
             event,
+            &self.managed,
             103,
         ))
     }
@@ -367,6 +374,7 @@ fn absent_foreign_forged_and_unavailable_authorization_never_broaden_access() {
         f.owner.public_key(),
         f.agent.public_key(),
         &f.request,
+        &[],
         103,
     ));
     assert!(matches!(unavailable, Err(Error::Unavailable)));
@@ -378,6 +386,7 @@ fn absent_foreign_forged_and_unavailable_authorization_never_broaden_access() {
             f.owner.public_key(),
             f.agent.public_key(),
             &f.request,
+            &[],
             103
         )),
         Err(Error::Unavailable)

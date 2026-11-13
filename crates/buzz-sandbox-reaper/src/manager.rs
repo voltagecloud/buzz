@@ -269,6 +269,13 @@ impl ManagerConfig {
     pub fn developers(&self) -> impl Iterator<Item = Developer> + '_ {
         self.developers.values().cloned()
     }
+
+    /// Each configured developer with the owner key it is bound to.
+    pub fn owned_developers(&self) -> impl Iterator<Item = (PublicKey, Developer)> + '_ {
+        self.developers
+            .iter()
+            .map(|(owner, developer)| (*owner, developer.clone()))
+    }
 }
 
 /// Who a reply goes to: the request's signer, `e`-tagging its event.
@@ -1006,26 +1013,38 @@ impl Manager {
             );
         }
         let result=tokio::time::timeout(std::time::Duration::from_secs(40),async {
-            let developers = self.config.developers().take(crate::paseo::MAX_DAEMON_IDENTITIES + 1).collect::<Vec<_>>();
-            let daemon_keys = self.enrollment.shared_daemon_keys(&developers).await?;
-            let task=match crate::shared_tasks::verify(self.client.clone(),namespace,owner,agent,request).await {
+            let developers = self.config.owned_developers().take(crate::paseo::MAX_DAEMON_IDENTITIES + 1).collect::<Vec<_>>();
+            let daemon_keys = self.enrollment.shared_daemon_keys(&developers).await.map_err(|error| ("identity_snapshot", error))?;
+            let task=match crate::shared_tasks::verify(self.client.clone(),namespace,owner,agent,request,&daemon_keys).await {
                 Ok(task)=>task,
-                Err(PolicyError::Denied(reason))=>return Err(serde_json::json!({"ok":false,"code":"shared_task_denied","error":reason})),
-                Err(PolicyError::Unavailable)=>return Err(serde_json::json!({"ok":false,"code":"shared_task_retry","error":"current sharing authorization is unavailable; retry this task"})),
+                Err(crate::shared_tasks::Failure{stage,error:PolicyError::Denied(reason)})=>return Err((stage,serde_json::json!({"ok":false,"code":"shared_task_denied","error":reason}))),
+                Err(crate::shared_tasks::Failure{stage,error:PolicyError::Unavailable})=>return Err((stage,serde_json::json!({"ok":false,"code":"shared_task_retry","error":"current sharing authorization is unavailable; retry this task"}))),
             };
-            Enrollment::check_shared_human(&daemon_keys, &task)?;
+            Enrollment::check_shared_human(&daemon_keys, &task).map_err(|error| ("managed_gateway", error))?;
             let Some(origin)=self.config.developer(&task.origin_owner) else {
-                return Err(serde_json::json!({"ok":false,"code":"shared_task_denied","error":"the initial agent must use this session manager"}));
+                return Err(("origin_owner",serde_json::json!({"ok":false,"code":"shared_task_denied","error":"the initial agent must use this session manager"})));
             };
             match crate::shared_budget::admit(self.client.clone(),&origin.namespace,&request.relay_url,&task,Timestamp::now().as_secs()).await {
-                Ok(())=>Ok(task),
+                Ok(())=>{
+                    if let Some(gateway)=task.gateway {
+                        tracing::info!(%gateway, human = %task.human, %agent, trigger = %request.trigger.id,
+                            "shared task admitted on behalf of a delegated gateway's owner");
+                    }
+                    Ok(task)
+                }
                 Err(error)=>{
                     let code=if matches!(error,crate::shared_budget::Error::Storage) {"shared_task_retry"} else {"shared_task_denied"};
-                    Err(serde_json::json!({"ok":false,"code":code,"error":error.to_string()}))
+                    Err(("budget",serde_json::json!({"ok":false,"code":code,"error":error.to_string()})))
                 }
             }
         }).await;
-        result.unwrap_or_else(|_|Err(serde_json::json!({"ok":false,"code":"shared_task_retry","error":"task authorization timed out; retry this task"})))
+        let result = result.unwrap_or_else(|_| Err(("timeout",serde_json::json!({"ok":false,"code":"shared_task_retry","error":"task authorization timed out; retry this task"}))));
+        result.map_err(|(stage, response)| {
+            // Fixed refusal strings and public identifiers only: never task text.
+            tracing::warn!(stage, code = %response["code"], reason = %response["error"],
+                %owner, %agent, trigger = %request.trigger.id, "shared task admission refused");
+            response
+        })
     }
 
     /// Step 3: parse the provider request and bind its agent key to the

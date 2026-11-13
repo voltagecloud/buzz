@@ -18,38 +18,59 @@ pub(crate) struct Request {
     pub trigger: Event,
 }
 
+/// Most events one admission read accepts. Above every policy read limit.
+const MAX_QUERY_EVENTS: u64 = 64;
+
+/// A failed verification and the stage that failed, for the manager's log.
+#[derive(Debug)]
+pub(crate) struct Failure {
+    pub stage: &'static str,
+    pub error: policy::Error,
+}
+
+fn at(stage: &'static str) -> impl FnOnce(policy::Error) -> Failure {
+    move |error| Failure { stage, error }
+}
+
 pub(crate) async fn verify(
     client: kube::Client,
     namespace: &str,
     owner: PublicKey,
     agent: PublicKey,
     request: &Request,
-) -> Result<Task, policy::Error> {
+    managed: &[policy::ManagedGateway],
+) -> Result<Task, Failure> {
     let relay = crate::mobile_launch::relay_endpoint(&request.relay_url)
-        .map_err(|_| policy::Error::Denied("invalid relay"))?;
+        .map_err(|_| policy::Error::Denied("invalid relay"))
+        .map_err(at("relay_url"))?;
     let api: Api<Secret> = Api::namespaced(client, namespace);
     let secret = api
         .get_opt(&Registration::name(owner, agent, &relay))
         .await
-        .map_err(|_| policy::Error::Unavailable)?
-        .ok_or(policy::Error::Denied(
-            "start this agent once from desktop before sharing",
-        ))?;
-    let identity =
-        Identity::read(secret, namespace, owner, &relay).map_err(|_| policy::Error::Unavailable)?;
-    if identity.keys.public_key() != agent {
-        return Err(policy::Error::Unavailable);
-    }
-    let relay_key = relay_key(&identity.relay).await?;
+        .map_err(|_| policy::Error::Unavailable)
+        .and_then(|secret| {
+            secret.ok_or(policy::Error::Denied(
+                "start this agent once from desktop before sharing",
+            ))
+        })
+        .map_err(at("agent_registration"))?;
+    let identity = Identity::read(secret, namespace, owner, &relay)
+        .ok()
+        .filter(|identity| identity.keys.public_key() == agent)
+        .ok_or(policy::Error::Unavailable)
+        .map_err(at("agent_identity"))?;
+    let relay_key = relay_key(&identity.relay).await.map_err(at("relay_info"))?;
     policy::authorize(
         |filter| query(&identity, filter),
         relay_key,
         owner,
         agent,
         &request.trigger,
+        managed,
         Timestamp::now().as_secs(),
     )
     .await
+    .map_err(at("policy"))
 }
 
 pub(crate) async fn relay_key(relay: &str) -> Result<PublicKey, policy::Error> {
@@ -93,6 +114,11 @@ async fn query(identity: &Identity, mut filter: Value) -> Result<Vec<Event>, ()>
     // Admission must observe committed retirement before a daemon identity
     // Secret may be removed. Replica snapshots cannot supply that authority.
     filter["consistency"] = json!("strong");
+    // More events than the filter's own limit is an ambiguous answer.
+    let limit = filter["limit"]
+        .as_u64()
+        .filter(|limit| (1..=MAX_QUERY_EVENTS).contains(limit))
+        .ok_or(())? as usize;
     tokio::time::timeout(Duration::from_secs(10), async {
         let mut connection = NostrWsConnection::connect_authenticated(
             &identity.relay,
@@ -106,7 +132,7 @@ async fn query(identity: &Identity, mut filter: Value) -> Result<Vec<Event>, ()>
             .await
             .map_err(|_| ())?;
         let mut events = Vec::new();
-        for _ in 0..8 {
+        for _ in 0..limit + 8 {
             match connection
                 .next_event(Duration::from_secs(10))
                 .await
@@ -116,7 +142,7 @@ async fn query(identity: &Identity, mut filter: Value) -> Result<Vec<Event>, ()>
                     subscription_id,
                     event,
                 } if subscription_id == "shared-admission" => {
-                    if !events.is_empty() {
+                    if events.len() >= limit {
                         return Err(());
                     }
                     events.push(*event);

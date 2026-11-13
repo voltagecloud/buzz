@@ -5,8 +5,13 @@
 //! [`KIND_AGENT_GATEWAY_DELEGATION`] head. A live delegation lets the gateway
 //! do exactly what [`Scope::RemoteAgents`] names: mention-launch the owner's
 //! remote agents, prompt them in their channel threads, cancel their turns,
-//! and read their observer telemetry. It never confers ownership, agent
-//! identity, channel or relay membership, or access to anyone else's agents.
+//! and read their observer telemetry. Shared-task admission
+//! ([`crate::sharing::policy`]) judges a live gateway as its owner only when
+//! the caller binds that gateway key to that owner (the session manager's own
+//! Paseo daemon keys). The gateway then gets exactly the owner's sharing
+//! permissions there, including teammates' agents that are shared in the
+//! channel. A delegation never confers ownership, agent identity, or channel
+//! or relay membership.
 //!
 //! Gateway authority and agent authority are disjoint by construction:
 //!
@@ -308,6 +313,46 @@ pub fn resolve(
         .into_iter()
         .filter(|live| !excluded.contains(&live.gateway) && !claims_agent(&live.gateway))
         .collect()
+}
+
+/// Read `owner`'s live gateways from the relay through `query`, then
+/// [`resolve`] them with `excluded`.
+///
+/// This is the one delegation lookup every relay-reading consumer shares: up to
+/// [`LOOKUP_LIMIT`] of the owner's heads, then the kind:0 profiles of the live
+/// candidates so agent keys are refused. `query` receives NIP-01 filters that
+/// carry a `limit`; it must read the relay's writer (`"consistency":"strong"`)
+/// so a lagging replica cannot hide a revocation. Membership is not checked.
+pub async fn lookup<F, Fut, E>(
+    mut query: F,
+    owner: PublicKey,
+    excluded: &[PublicKey],
+    now: u64,
+) -> Result<Vec<Live>, E>
+where
+    F: FnMut(serde_json::Value) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<Event>, E>>,
+{
+    let heads = query(serde_json::json!({
+        "kinds": [KIND_AGENT_GATEWAY_DELEGATION],
+        "authors": [owner.to_hex()],
+        "limit": LOOKUP_LIMIT,
+    }))
+    .await?;
+    let candidates: Vec<String> = live_heads(owner, &heads, now)
+        .iter()
+        .map(|live| live.gateway.to_hex())
+        .collect();
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+    let profiles = query(serde_json::json!({
+        "kinds": [0],
+        "authors": candidates,
+        "limit": candidates.len(),
+    }))
+    .await?;
+    Ok(resolve(owner, &heads, &profiles, excluded, now))
 }
 
 /// Build and sign an owner delegation with the current timestamp.

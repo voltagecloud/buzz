@@ -37,8 +37,14 @@ pub struct Task {
     pub owner: PublicKey,
     /// Original human request and preceding admission.
     pub origin: Origin,
-    /// Original authorizing human, including a verified workflow owner.
+    /// Original authorizing human, including a verified workflow owner. A
+    /// managed gateway that its bound owner currently delegates is replaced
+    /// here by that owner, so budget and admission attribute the work to them.
     pub human: PublicKey,
+    /// The managed gateway that signed the trigger or the original request, or
+    /// owns its literal scheduled workflow, on behalf of `human`.
+    /// `requester` and `origin_requester` keep the actual signers.
+    pub gateway: Option<PublicKey>,
     /// Initial agent's owner; chooses its existing namespace for the journal.
     pub origin_owner: PublicKey,
     /// The incoming task event.
@@ -49,14 +55,31 @@ pub struct Task {
     pub requested_at: u64,
 }
 
+/// A gateway key that the caller provisioned for `owner`, such as a session
+/// manager's Paseo daemon key. The binding is the caller's own record, never a
+/// relay claim: a delegation head alone cannot bind a key to its author.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ManagedGateway {
+    /// The owner the caller provisioned this gateway key for.
+    pub owner: PublicKey,
+    /// The gateway's public key.
+    pub key: PublicKey,
+}
+
 /// Load current grants, identities, metadata and membership, then verify task
 /// provenance. A caller must atomically admit the returned task before execution.
+///
+/// A signer or original author listed in `managed` is judged as its bound
+/// owner while that owner's own delegation of the key is live. Every other key,
+/// including a gateway that only a relay delegation head names, is judged as
+/// itself.
 pub async fn authorize<F, Fut>(
     mut query: F,
     relay: PublicKey,
     owner: PublicKey,
     agent: PublicKey,
     event: &Event,
+    managed: &[ManagedGateway],
     now: u64,
 ) -> Result<Task, Error>
 where
@@ -64,7 +87,6 @@ where
     Fut: Future<Output = Result<Vec<Event>, ()>>,
 {
     let scope = task::scope(event, agent, now).map_err(|_| Error::Denied("invalid mention"))?;
-    let requester = crate::workflow::owner(event, relay, agent).unwrap_or(event.pubkey);
     let stored = one(
         &mut query,
         json!({"kinds":[9,40002], "ids":[event.id], "#h":[scope.channel], "limit":1}),
@@ -105,10 +127,17 @@ where
     }) {
         return Err(Error::Denied("conversation cannot be shared"));
     }
+    // A managed gateway is judged as the owner it acts for, everywhere a
+    // requester or human is judged below.
+    let signer = principal(&mut query, relay, event, agent, managed, now).await?;
+    let requester = signer.key;
     for member in [owner, agent, requester] {
         member_role(&roster, member)?;
     }
-    let target = profile(&mut query, agent).await?;
+    if let Some(gateway) = signer.gateway {
+        member_gateway(&roster, relay, scope, gateway)?;
+    }
+    let target = profile(&mut query, agent, "agent has no profile").await?;
     if profile_owner(&target, now).ok() != Some(owner) {
         return Err(Error::Denied("agent ownership changed"));
     }
@@ -130,7 +159,7 @@ where
     {
         return Err(Error::Unavailable);
     }
-    let requester_profile = profile(&mut query, requester).await?;
+    let requester_profile = profile(&mut query, requester, NO_REQUESTER_PROFILE).await?;
     let automated = is_agent(&requester_profile, member_role(&roster, requester)?, now)?;
     let claimed = task::origin(event).map_err(|_| Error::Denied("invalid task ancestry"))?;
     let origin = if automated {
@@ -164,8 +193,16 @@ where
     {
         return Err(Error::Denied("request is outside this task"));
     }
-    let human_key = crate::workflow::owner(&root, relay, origin.agent).unwrap_or(root.pubkey);
-    let human = profile(&mut query, human_key).await?;
+    let author = if root.id == event.id && origin.agent == agent {
+        signer
+    } else {
+        principal(&mut query, relay, &root, origin.agent, managed, now).await?
+    };
+    if let Some(gateway) = author.gateway {
+        member_gateway(&roster, relay, scope, gateway)?;
+    }
+    let human_key = author.key;
+    let human = profile(&mut query, human_key, NO_HUMAN_PROFILE).await?;
     if is_agent(&human, member_role(&roster, human_key)?, now)? {
         return Err(Error::Denied("an agent cannot reset the human budget"));
     }
@@ -174,7 +211,7 @@ where
         ancestry(&mut query, event, &root, origin, scope, now).await?;
     }
     member_role(&roster, origin.agent)?;
-    let initial = profile(&mut query, origin.agent).await?;
+    let initial = profile(&mut query, origin.agent, "initial agent has no profile").await?;
     let origin_owner =
         profile_owner(&initial, now).map_err(|_| Error::Denied("invalid initial agent owner"))?;
     member_role(&roster, origin_owner)?;
@@ -189,6 +226,10 @@ where
         owner,
         origin,
         human: human_key,
+        // At most one gateway: a gateway signer is a human requester, so its
+        // task is its own root and `author` is `signer`. Otherwise only the
+        // root's author can be a gateway.
+        gateway: signer.gateway.or(author.gateway),
         origin_owner,
         trigger: event.id,
         handoff: automated,
@@ -255,6 +296,87 @@ where
     Err(Error::Denied("handoff ancestry exceeds the work budget"))
 }
 
+/// Refusal for a requester without a profile, including an unmanaged gateway
+/// key or a managed one whose delegation was revoked, expired or displaced.
+const NO_REQUESTER_PROFILE: &str = "requester has no profile; a managed gateway acts for its owner only while its delegation is live";
+
+/// Refusal for an original request whose author has no profile, including an
+/// unmanaged gateway key or a managed one whose delegation is not live.
+const NO_HUMAN_PROFILE: &str = "the original request's author has no profile; a managed gateway acts for its owner only while its delegation is live";
+
+// Who an event speaks for: its signer, or the verified owner of a relay-signed
+// workflow. A managed gateway speaks for its bound owner while that owner's own
+// newest heads (the `authors:[owner]` window direct gateway prompts use)
+// delegate it. Heads from other authors are never read: anyone can name any
+// key, and the named key never consents. A gateway's workflow speaks for its
+// owner only through a literal scheduled prompt, exactly as the harness accepts
+// a direct gateway prompt.
+#[derive(Clone, Copy)]
+struct Principal {
+    key: PublicKey,
+    gateway: Option<PublicKey>,
+}
+
+async fn principal<F, Fut>(
+    query: &mut F,
+    relay: PublicKey,
+    event: &Event,
+    agent: PublicKey,
+    managed: &[ManagedGateway],
+    now: u64,
+) -> Result<Principal, Error>
+where
+    F: FnMut(Value) -> Fut,
+    Fut: Future<Output = Result<Vec<Event>, ()>>,
+{
+    let (key, literal) = match crate::workflow::owner(event, relay, agent) {
+        Some(owner) => (
+            owner,
+            crate::workflow::gateway_owner(event, relay, agent).is_some(),
+        ),
+        None => (event.pubkey, true),
+    };
+    let itself = Principal { key, gateway: None };
+    let Some(owner) = managed
+        .iter()
+        .find(|binding| binding.key == key)
+        .map(|binding| binding.owner)
+    else {
+        return Ok(itself);
+    };
+    let live = crate::gateway::lookup(&mut *query, owner, &[owner], now)
+        .await
+        .map_err(|()| Error::Unavailable)?;
+    if !live.iter().any(|live| live.gateway() == key) {
+        return Ok(itself);
+    }
+    if !literal {
+        return Err(Error::Denied(
+            "a gateway's workflow acts for its owner only through a literal scheduled prompt",
+        ));
+    }
+    Ok(Principal {
+        key: owner,
+        gateway: Some(key),
+    })
+}
+
+// A gateway keeps its own posting membership, as every gateway consumer requires.
+fn member_gateway(
+    roster: &Event,
+    relay: PublicKey,
+    scope: Scope,
+    gateway: PublicKey,
+) -> Result<(), Error> {
+    if crate::gateway::channel_member(roster, relay, scope.channel, gateway) {
+        Ok(())
+    } else {
+        Err(Error::Denied(
+            "a gateway must remain a posting member of this channel",
+        ))
+    }
+}
+
 fn workspace_human(members: &Event, key: PublicKey) -> Result<(), Error> {
     let key = key.to_hex();
     if members.tags.iter().any(|t| {
@@ -303,14 +425,20 @@ fn is_agent(profile: &Event, role: &str, now: u64) -> Result<bool, Error> {
     Ok(false)
 }
 
-async fn profile<F, Fut>(query: &mut F, key: PublicKey) -> Result<Event, Error>
+// The writer's answer that a key has no profile is current, not an outage:
+// retrying cannot turn that key into a verified identity.
+async fn profile<F, Fut>(
+    query: &mut F,
+    key: PublicKey,
+    missing: &'static str,
+) -> Result<Event, Error>
 where
     F: FnMut(Value) -> Fut,
     Fut: Future<Output = Result<Vec<Event>, ()>>,
 {
     let event = one(query, json!({"kinds":[0],"authors":[key],"limit":1}))
         .await?
-        .ok_or(Error::Unavailable)?;
+        .ok_or(Error::Denied(missing))?;
     if event.pubkey != key || event.kind != Kind::Metadata || event.verify().is_err() {
         return Err(Error::Unavailable);
     }

@@ -43,6 +43,13 @@ parent event. A durable manager journal permits four handoffs total and at most
 two admissions per agent under one human-to-initial-agent task. A duplicate
 admission consumes no additional budget. The task expires after seven days.
 
+A managed Paseo daemon key is judged as the owner whose developer Secret holds
+it, while that owner's own delegation of the key is live. Its mentions and the
+handoffs in tasks it starts get exactly the owner's result, and the budget
+belongs to the owner. A revoked or expired daemon key gets a permanent refusal.
+Other gateway keys are judged as themselves. See
+[Gateway keys](agent-gateway-key.md#shared-tasks-and-handoffs).
+
 When the target finishes, it reports back to the agent that handed it the work:
 
 ```sh

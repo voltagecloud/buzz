@@ -22,6 +22,7 @@ use aws_sdk_secretsmanager::{
     Client,
 };
 use buzz_backend_kubernetes::wire::ErrorCode;
+use buzz_sdk::sharing::policy::ManagedGateway;
 use nostr::PublicKey;
 use serde_json::Value;
 use zeroize::Zeroizing;
@@ -369,8 +370,8 @@ impl Enrollment {
     /// the later writer reads observe its retired community membership.
     pub async fn shared_daemon_keys(
         &self,
-        developers: &[Developer],
-    ) -> Result<Vec<PublicKey>, Value> {
+        developers: &[(PublicKey, Developer)],
+    ) -> Result<Vec<ManagedGateway>, Value> {
         let Some(secrets) = &self.paseo else {
             return Ok(Vec::new());
         };
@@ -380,16 +381,22 @@ impl Enrollment {
     }
 
     /// Check verified task identities against this admission's fresh snapshot.
+    ///
+    /// A managed daemon key may appear only as the task's gateway, with the
+    /// task's `human` set to the owner whose developer Secret holds that key.
+    /// A managed key in any other human or requester role is no longer
+    /// delegated (revoked, expired or displaced) or is bound to another owner,
+    /// and is refused: it never falls back to sharing permissions of its own.
     pub fn check_shared_human(
-        keys: &[PublicKey],
+        bindings: &[ManagedGateway],
         task: &buzz_sdk::sharing::policy::Task,
     ) -> Result<(), Value> {
-        if [task.human, task.requester, task.origin_requester]
-            .iter()
-            .any(|key| keys.contains(key))
-        {
+        if bindings.iter().any(|binding| {
+            [task.human, task.requester, task.origin_requester].contains(&binding.key)
+                && (task.gateway != Some(binding.key) || task.human != binding.owner)
+        }) {
             Err(
-                serde_json::json!({"ok":false,"code":"shared_task_denied","error":"a managed Paseo gateway must use current gateway authority, never human sharing permissions"}),
+                serde_json::json!({"ok":false,"code":"shared_task_denied","error":"this managed Paseo gateway is not currently delegated by its owner; renew the gateway grant"}),
             )
         } else {
             Ok(())
