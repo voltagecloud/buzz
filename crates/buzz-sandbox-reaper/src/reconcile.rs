@@ -495,8 +495,11 @@ impl<S: CheckpointStore> Reconciler<S> {
     /// otherwise from what the watch captured. The session prefix comes from
     /// config and the Sandbox's (validated) generation, never the Pod.
     ///
-    /// Without a verified receipt, the newest object S3 lists in the session
-    /// prefix stands in for it ([`evidence::latest`], recorded as `listed`).
+    /// Without a verified receipt, a quarantine archive stands in for it
+    /// ([`evidence::quarantined`], recorded as `quarantine`): the harness
+    /// writes one only after its final verified save failed, so it holds the
+    /// final workspace. Otherwise the newest object S3 lists in the session
+    /// prefix does ([`evidence::latest`], recorded as `listed`).
     /// The receipt may be unknown (a reaper restart or a watch gap lost it),
     /// never written (a node lost without warning), or invalid (a failed final
     /// save exits non-zero, so only the harness's background turn saves
@@ -534,7 +537,10 @@ impl<S: CheckpointStore> Reconciler<S> {
             _ => memory.receipts.get(initial).map(String::as_str),
         };
         match evidence::from_receipt(&self.store, message, &session_prefix).await {
-            Evidence::Missing => evidence::latest(&self.store, &session_prefix).await,
+            Evidence::Missing => match evidence::quarantined(&self.store, &session_prefix).await {
+                Evidence::Missing => evidence::latest(&self.store, &session_prefix).await,
+                quarantined_or_unavailable => quarantined_or_unavailable,
+            },
             verified_or_unavailable => verified_or_unavailable,
         }
     }

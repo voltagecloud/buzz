@@ -3043,7 +3043,12 @@ async fn tokio_main() -> Result<()> {
     // removing temporary keys. Existing work still needs a checkpoint even
     // when startup failed or was cancelled before the relay became available.
     let checkpoint_result = if checkpoint_on_stop {
-        checkpoint::save(observer.as_ref()).await
+        // Startup has already been torn down; the stop budget starts here.
+        checkpoint::save(
+            observer.as_ref(),
+            tokio::time::Instant::now() + checkpoint::STOP_BUDGET,
+        )
+        .await
     } else {
         Ok(())
     };
@@ -4583,7 +4588,8 @@ async fn run_harness(
     // A running background turn checkpoint gets 60s from the start of the
     // stop path, overlapping the drains below rather than adding to the
     // shutdown budget; past that the save on stop cancels it.
-    let turn_checkpoint_deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let stop_started = tokio::time::Instant::now();
+    let turn_checkpoint_deadline = stop_started + checkpoint::TURN_SAVE_SETTLE;
 
     // Drain wake tasks gracefully rather than aborting: an in-flight
     // initialize_agent_pool observes the shutdown watch at its biased per-slot
@@ -4702,7 +4708,7 @@ async fn run_harness(
     // before starting the final save, using the deadline captured at drain.
     turn_checkpoints.settle(turn_checkpoint_deadline).await;
     let checkpoint_result = if config.checkpoint_on_stop {
-        checkpoint::save(observer.as_ref()).await
+        checkpoint::save(observer.as_ref(), stop_started + checkpoint::STOP_BUDGET).await
     } else {
         Ok(())
     };

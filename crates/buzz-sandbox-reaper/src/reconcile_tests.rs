@@ -289,8 +289,46 @@ async fn a_recovered_session_prefers_its_own_listed_checkpoint_to_the_inherited_
     assert_eq!(annotations[CHECKPOINT_SOURCE], "listed");
     assert_eq!(
         r.store.probes.lock().unwrap().as_slice(),
-        [format!("dev/{GENERATION_ID}/")],
+        [
+            format!("dev/{GENERATION_ID}/quarantine/"),
+            format!("dev/{GENERATION_ID}/"),
+        ],
         "the inherited key is not consulted"
+    );
+}
+
+/// The staging incident of 2026-11-09: the final save failed, the harness
+/// quarantined the workspace, and its spot node was reclaimed minutes later.
+/// The session ends at once on its quarantine archive, which outranks an
+/// older turn checkpoint, instead of holding a workspace that lives only on
+/// the Pod's node. Without an archive the 24-hour hold still applies (see
+/// `a_completed_session_without_a_checkpoint_is_held_for_24_hours`).
+#[tokio::test]
+async fn a_failed_final_save_ends_at_once_on_its_quarantine_archive() {
+    let quarantine =
+        format!("dev/{GENERATION_ID}/quarantine/00000000-0000-0000-0000-000000000009.tar.gz");
+    let state = fake::Shared::default();
+    {
+        let mut s = state.lock().unwrap();
+        let sb = sandbox(&s, "s", 600, "Running", json!({(INITIAL_POD): "pod-1"}));
+        let mut failed = terminated(None);
+        failed["terminated"]["exitCode"] = 1.into();
+        let p = pod(&s, "s", "pod-1", 600, failed);
+        s.sandboxes.insert("s".into(), sb);
+        s.pods.insert("s".into(), p);
+    }
+    let r = reconciler(&state, store_with(&[key(), quarantine.clone()]));
+    let summary = pass(&r, &mut Memory::default()).await.unwrap();
+    assert_eq!((summary.held, summary.tombstoned), (0, 1));
+    let annotations = &stored(&state, "s")["metadata"]["annotations"];
+    assert_eq!(annotations[ENDED_REASON], "completed");
+    assert_eq!(annotations[CHECKPOINT], quarantine);
+    assert_eq!(annotations[CHECKPOINT_SOURCE], "quarantine");
+    let sent = events(&state);
+    assert_eq!(sent.len(), 1, "no CheckpointMissing hold");
+    assert_eq!(
+        sent[0]["message"],
+        format!("session ended (completed); checkpoint: {quarantine} (source: quarantine)")
     );
 }
 
@@ -933,7 +971,9 @@ async fn failed_final_save_does_not_verify_an_earlier_turn_receipt() {
     assert_eq!(
         r.store.probes.lock().unwrap().as_slice(),
         [
+            format!("dev/{GENERATION_ID}/quarantine/"),
             format!("dev/{GENERATION_ID}/"),
+            format!("dev/{GENERATION_ID}/quarantine/"),
             format!("dev/{GENERATION_ID}/")
         ],
         "the receipt is never probed as if it were attested"
@@ -997,7 +1037,10 @@ async fn a_restarted_reaper_lists_the_checkpoint_of_a_deleted_pod() {
     assert_eq!(annotations[CHECKPOINT_SOURCE], "listed");
     assert_eq!(
         r.store.probes.lock().unwrap().as_slice(),
-        [format!("dev/{GENERATION_ID}/")]
+        [
+            format!("dev/{GENERATION_ID}/quarantine/"),
+            format!("dev/{GENERATION_ID}/")
+        ]
     );
 
     // S3 down: no tombstone this pass, rather than a false `missing`.

@@ -125,7 +125,7 @@ sequenceDiagram
 | Claude subscription token, for the Paseo daemon | Enroll form (the same token as above) | Profile; copied to the Secret `paseo-daemon-<id>` | Your Paseo daemon's own agent (Claude only) |
 | Paseo GitHub read token: fine-grained, selected repositories, Contents and Pull requests read-only | Enroll form, **Paseo GitHub read token** (optional) | Only the Secret `paseo-daemon-<id>`, never the profile | Your Paseo daemon, to read code |
 
-The app removes the dedicated ChatGPT login cache after enrollment or cancellation. Other enrollment credentials are held in memory only. The profile is encrypted in transit and at rest. Checkpoints never include credentials.
+The app removes the dedicated ChatGPT login cache after enrollment or cancellation. Other enrollment credentials are held in memory only. The profile is encrypted in transit and at rest. Checkpoints never include the credential files the Sandbox writes. If a final checkpoint fails, for example because the secret scan found a token the agent wrote into the repository, the Sandbox stores an unscanned *quarantine* copy in your checkpoint prefix so the work is not lost; **Recover from checkpoint** restores it.
 
 ## Onboard a developer
 

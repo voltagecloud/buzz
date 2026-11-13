@@ -13,6 +13,31 @@ use crate::observer::{ObserverContext, ObserverHandle};
 
 const RECEIPT_BUDGET: usize = 2048;
 
+/// Bound of one `buzz-agent-checkpoint save`.
+const SAVE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// How long a running background save may continue after the stop path
+/// starts, overlapping the drain, before the final save cancels it.
+pub(crate) const TURN_SAVE_SETTLE: Duration = Duration::from_secs(60);
+
+/// Longest quarantine that follows a failed final save.
+const QUARANTINE_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// A quarantine with less time than this left before the stop deadline is
+/// skipped (reported as `checkpoint_quarantine_failed`, reason `deadline`).
+const QUARANTINE_MINIMUM: Duration = Duration::from_secs(10);
+
+/// Time from the start of the stop path by which the quarantine must end:
+/// the Sandbox Pod's 300s termination grace period
+/// (`config::TERMINATION_GRACE_SECONDS` in buzz-backend-kubernetes), less the
+/// 5s relay close that follows the checkpoint and a 5s margin. The drains
+/// before the checkpoint have no shared bound (docs/remote-agents.md
+/// §Stop and Delete), so the quarantine takes what remains of this budget
+/// rather than adding a fixed term to it.
+pub(crate) const STOP_BUDGET: Duration = Duration::from_secs(290);
+
+const _: () = assert!(TURN_SAVE_SETTLE.as_secs() + SAVE_TIMEOUT.as_secs() < STOP_BUDGET.as_secs());
+
 /// Why a stop checkpoint failed. Helper stderr is discarded because it may
 /// carry storage credentials, so these variants are the whole diagnosis.
 #[derive(Debug, thiserror::Error)]
@@ -128,22 +153,107 @@ struct TerminationReceipt<'a> {
     checkpoint: &'a str,
 }
 
-pub(crate) async fn save(observer: Option<&ObserverHandle>) -> anyhow::Result<()> {
-    save_to(observer, Some(Path::new(TERMINATION_LOG))).await
+fn helper(action: &str) -> Command {
+    let mut command = Command::new("buzz-agent-checkpoint");
+    command.arg(action);
+    command
 }
 
-async fn save_to(
+/// The final save, after every adapter has stopped. When it fails, the
+/// workspace is quarantined: stored without the secret scan under the
+/// session's `quarantine/` prefix, so the work survives the Pod's node. The
+/// quarantine ends by `stop_deadline` ([`STOP_BUDGET`] after the stop path
+/// started). The failed save is still the result, so the harness exits
+/// non-zero.
+pub(crate) async fn save(
     observer: Option<&ObserverHandle>,
-    termination_log: Option<&Path>,
+    stop_deadline: tokio::time::Instant,
 ) -> anyhow::Result<()> {
-    let mut command = Command::new("buzz-agent-checkpoint");
-    command.arg("save");
-    save_with_command(observer, command, Duration::from_secs(120), termination_log)
+    final_save(
+        observer,
+        helper("save"),
+        helper("quarantine"),
+        Some(Path::new(TERMINATION_LOG)),
+        stop_deadline,
+    )
+    .await
+}
+
+async fn final_save(
+    observer: Option<&ObserverHandle>,
+    save: Command,
+    quarantine: Command,
+    termination_log: Option<&Path>,
+    stop_deadline: tokio::time::Instant,
+) -> anyhow::Result<()> {
+    let saved = save_with_command(observer, save, SAVE_TIMEOUT, termination_log).await;
+    if saved.is_err() {
+        let left = stop_deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left < QUARANTINE_MINIMUM {
+            tracing::error!("no time left before the stop deadline to quarantine the workspace");
+            if let Some(observer) = observer {
+                observer.emit(
+                    "checkpoint_quarantine_failed",
+                    None,
+                    &ObserverContext::default(),
+                    serde_json::json!({"reason": "deadline"}),
+                );
+            }
+        } else {
+            quarantine_with_command(observer, quarantine, QUARANTINE_TIMEOUT.min(left)).await;
+        }
+    }
+    saved.map_err(failed)
+}
+
+/// A background save after a completed turn. Its failure only logs: the
+/// final save still runs, and quarantines the workspace if it fails too.
+async fn turn_save(observer: Option<&ObserverHandle>) -> anyhow::Result<()> {
+    save_with_command(observer, helper("save"), SAVE_TIMEOUT, None)
         .await
-        .map_err(|error| {
-            anyhow::Error::new(error)
-                .context("checkpoint failed; retain the Sandbox workspace for explicit recovery")
-        })
+        .map_err(failed)
+}
+
+fn failed(error: CheckpointError) -> anyhow::Error {
+    anyhow::Error::new(error).context("workspace checkpoint failed")
+}
+
+/// Store the workspace unscanned after a failed final save. It writes no
+/// termination receipt: the reaper finds the archive by listing the
+/// session's quarantine prefix. Reports `checkpoint_quarantined` with the
+/// receipt, or `checkpoint_quarantine_failed` with the reason.
+async fn quarantine_with_command(
+    observer: Option<&ObserverHandle>,
+    mut command: Command,
+    timeout: Duration,
+) {
+    let emit = |kind, details| {
+        if let Some(observer) = observer {
+            observer.emit(kind, None, &ObserverContext::default(), details);
+        }
+    };
+    command
+        .kill_on_drop(true)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    command.process_group(0);
+    match run_checkpoint(command, timeout).await {
+        Ok(details) => {
+            tracing::warn!(
+                "final checkpoint failed; quarantined the workspace without the secret scan"
+            );
+            emit("checkpoint_quarantined", details);
+        }
+        Err(error) => {
+            tracing::error!(
+                reason = error.reason(),
+                step = error.step(),
+                "workspace quarantine failed: {error}"
+            );
+            emit("checkpoint_quarantine_failed", error.details());
+        }
+    }
 }
 
 type SaveFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
@@ -187,7 +297,7 @@ impl TurnCheckpoints {
             Box::new(move || {
                 let observer = observer.clone();
                 Box::pin(async move {
-                    if let Err(error) = save_to(observer.as_ref(), None).await {
+                    if let Err(error) = turn_save(observer.as_ref()).await {
                         tracing::warn!(%error, "turn checkpoint failed");
                     }
                 })
@@ -668,6 +778,111 @@ mod tests {
                 .is_err()
         );
         assert!(std::fs::read_to_string(&log).unwrap().is_empty());
+    }
+
+    /// A failed final save quarantines the workspace and still fails the
+    /// stop; a successful one never runs the quarantine. The quarantine
+    /// writes no termination receipt (the reaper lists its prefix instead).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_final_save_quarantines_the_workspace() {
+        let quarantined = serde_json::json!({"version":1,
+            "key":"dev/g/quarantine/6f9619ff-8b86-d011-b42d-00cf4fc964ff.tar.gz",
+            "sha256":"b".repeat(64),"repositories":1,"bytes":100});
+        let receipt = valid_receipt().to_string();
+        let quarantine_receipt = quarantined.to_string();
+        let cases = [
+            (
+                format!("printf '%s' '{receipt}'"),
+                "touch \"$1\"; exit 0".to_string(),
+                true,
+                vec!["checkpoint_started", "checkpoint_saved"],
+                serde_json::Value::Null,
+            ),
+            (
+                "exit 11".to_string(),
+                format!("touch \"$1\"; printf '%s' '{quarantine_receipt}'"),
+                false,
+                vec![
+                    "checkpoint_started",
+                    "checkpoint_failed",
+                    "checkpoint_quarantined",
+                ],
+                // Only the validated receipt fields reach activity.
+                serde_json::json!({
+                    "key":"dev/g/quarantine/6f9619ff-8b86-d011-b42d-00cf4fc964ff.tar.gz",
+                    "sha256":"b".repeat(64),"repositories":1,"bytes":100}),
+            ),
+            (
+                "exit 11".to_string(),
+                "touch \"$1\"; exit 13".to_string(),
+                false,
+                vec![
+                    "checkpoint_started",
+                    "checkpoint_failed",
+                    "checkpoint_quarantine_failed",
+                ],
+                serde_json::json!({"reason":"exit_status","exit_code":13,
+                    "step":"uploading the checkpoint"}),
+            ),
+        ];
+        for (save_script, quarantine_script, saved, kinds, last) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let log = dir.path().join("termination-log");
+            std::fs::write(&log, "").unwrap();
+            let ran = dir.path().join("quarantine-ran");
+            let observer = ObserverHandle::in_process();
+            let mut save = Command::new("sh");
+            save.args(["-c", &save_script]);
+            let mut quarantine = Command::new("sh");
+            quarantine.args([
+                "-c",
+                &quarantine_script,
+                "checkpoint-test",
+                ran.to_str().unwrap(),
+            ]);
+            let deadline = tokio::time::Instant::now() + STOP_BUDGET;
+            let result = final_save(Some(&observer), save, quarantine, Some(&log), deadline).await;
+            assert_eq!(result.is_ok(), saved, "{save_script}");
+            assert_eq!(
+                ran.exists(),
+                !saved,
+                "quarantine runs only after a failed save"
+            );
+            let events = observer.snapshot();
+            assert_eq!(
+                events.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(),
+                kinds
+            );
+            if !saved {
+                assert_eq!(events.last().unwrap().payload, last);
+                assert!(std::fs::read_to_string(&log).unwrap().is_empty());
+            }
+        }
+        // With the stop deadline (nearly) spent, the quarantine is skipped
+        // and reported rather than cut off by the kubelet's SIGKILL.
+        let dir = tempfile::tempdir().unwrap();
+        let ran = dir.path().join("quarantine-ran");
+        let observer = ObserverHandle::in_process();
+        let mut save = Command::new("sh");
+        save.args(["-c", "exit 11"]);
+        let mut quarantine = Command::new("sh");
+        quarantine.args([
+            "-c",
+            "touch \"$1\"",
+            "checkpoint-test",
+            ran.to_str().unwrap(),
+        ]);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        assert!(
+            final_save(Some(&observer), save, quarantine, None, deadline)
+                .await
+                .is_err()
+        );
+        assert!(!ran.exists());
+        let last = observer.snapshot().last().unwrap().clone();
+        assert_eq!(last.kind, "checkpoint_quarantine_failed");
+        assert_eq!(last.payload, serde_json::json!({"reason":"deadline"}));
     }
 
     #[cfg(unix)]
