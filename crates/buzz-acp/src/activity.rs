@@ -98,6 +98,10 @@ impl ActivityRecorder {
                     })
                     .unwrap_or("unknown");
                 details["status"] = status.into();
+                if status == "failed" {
+                    details["failure_code"] = "tool_failed".into();
+                    details["failure_category"] = "tool".into();
+                }
                 details["arguments"] = command_summary(&update["rawInput"]);
                 details["output"] = json!({
                     "redacted": true,

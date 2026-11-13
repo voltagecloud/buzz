@@ -2407,6 +2407,17 @@ fn send_prompt_result(
     batch: Option<FlushBatch>,
 ) {
     agent.acp.clear_steer_rx();
+    if let Some(state) = agent.acp.handoff_completion.take() {
+        if let Some(batch) = &batch {
+            state.defer(
+                batch
+                    .events
+                    .iter()
+                    .chain(&batch.cancelled_events)
+                    .map(|item| item.event.id),
+            );
+        }
+    }
     // The turn's transcript recorder stays with its guard in the finished
     // task; traffic after this point belongs to no turn.
     agent.acp.set_transcript(None);
@@ -2566,6 +2577,15 @@ pub async fn run_prompt_task(
             return;
         }
     }
+
+    // This guard journals a terminal failure on every exit unless the handoff
+    // already returned or is explicitly requeued by send_prompt_result.
+    let _handoff_completion = crate::sharing::completion::Guard::begin(
+        &mut agent.acp,
+        ctx.sharing.clone(),
+        batch.as_ref(),
+        ctx.transcript_tasks.clone(),
+    );
 
     // Resolve project authority exactly once, before any ACP session creation or
     // initial-message delivery. An indeterminate result is a local relay-state

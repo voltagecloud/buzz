@@ -926,7 +926,14 @@ impl QueuedNormalListenerEvent {
             &self.steer_event.reply_route(),
             self.channel_is_dm,
         );
+        // Handoffs need their own tracked batch so terminal completion cannot
+        // disappear into another running turn. Use the existing cancel+merge path.
+        let shared_handoff = buzz_sdk::sharing::task::origin(&self.steer_event.event)
+            .ok()
+            .flatten()
+            .is_some();
         let native_attempted = matches!(signal, ControlSignal::Steer)
+            && !shared_handoff
             && same_reply_route
             && try_native_steer(
                 pool,

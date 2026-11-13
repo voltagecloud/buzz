@@ -192,6 +192,7 @@ pub struct AcpClient {
     /// The current turn's NIP-AT transcript recorder, fed from the same raw
     /// ACP reads and writes as the observer feed.
     transcript: Option<crate::transcript::SharedRecorder>,
+    pub(crate) handoff_completion: Option<std::sync::Arc<crate::sharing::completion::State>>,
     /// Most recently observed `_meta.goose.activeRunId` from a
     /// `session/update` notification of kind `session_info_update`.
     ///
@@ -639,6 +640,7 @@ impl AcpClient {
             observer_agent_index: None,
             observer_context: ObserverContext::default(),
             transcript: None,
+            handoff_completion: None,
             active_run_id: None,
             steering_supported: false,
             steer_rx: None,
@@ -679,6 +681,11 @@ impl AcpClient {
     /// Emit a semantic event to the local observer feed, if enabled.
     pub fn observe(&self, kind: impl Into<String>, payload: serde_json::Value) {
         let kind = kind.into();
+        if kind == "acp_read" {
+            if let Some(state) = &self.handoff_completion {
+                state.record(&payload);
+            }
+        }
         if let Some(recorder) = &self.transcript {
             let mut recorder = recorder
                 .lock()

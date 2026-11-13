@@ -17,6 +17,8 @@ const MAX_BYTES: u64 = 4096;
 #[serde(deny_unknown_fields)]
 pub(super) struct Notice {
     pub trigger: EventId,
+    #[serde(default)]
+    pub completion: bool,
     pub event: Event,
     pub attempts: u8,
     pub next_try: u64,
@@ -54,6 +56,14 @@ impl Outbox {
     }
 
     pub fn reserve(&self, trigger: EventId, event: Event) -> Result<(), Error> {
+        self.reserve_kind(trigger, event, false)
+    }
+
+    pub fn reserve_completion(&self, trigger: EventId, event: Event) -> Result<(), Error> {
+        self.reserve_kind(trigger, event, true)
+    }
+
+    fn reserve_kind(&self, trigger: EventId, event: Event, completion: bool) -> Result<(), Error> {
         fs::create_dir_all(&self.directory).map_err(|_| Error)?;
         let path = self.directory.join(format!("{trigger}.json"));
         if let Ok(metadata) = fs::symlink_metadata(&path) {
@@ -68,6 +78,7 @@ impl Outbox {
         }
         let notice = Notice {
             trigger,
+            completion,
             event,
             attempts: 0,
             next_try: 0,
