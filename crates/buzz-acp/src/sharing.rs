@@ -8,6 +8,7 @@ use nostr::{Event, EventBuilder, Keys, Kind, PublicKey, Tag, Timestamp};
 use serde_json::json;
 use std::time::Duration;
 
+pub(crate) mod completion;
 mod notices;
 
 #[cfg(test)]
@@ -34,6 +35,7 @@ pub struct Client {
     relay: String,
     manager: PublicKey,
     scope: buzz_sdk::sharing::task::Scope,
+    rest: crate::relay::RestClient,
     outbox: std::sync::Arc<tokio::sync::Mutex<notices::Outbox>>,
 }
 
@@ -68,6 +70,7 @@ impl Client {
             relay: config.relay_url.clone(),
             manager,
             scope,
+            rest: rest.clone(),
             outbox: std::sync::Arc::new(tokio::sync::Mutex::new(notices::Outbox::new(directory))),
         }))
     }
@@ -225,13 +228,32 @@ impl Client {
                 .tags
                 .iter()
                 .any(|t| t.as_slice() == ["e", &self.scope.root.to_hex(), "", "root"])
-            || notice
-                .event
-                .tags
-                .iter()
-                .any(|t| t.as_slice().first().map(String::as_str) == Some("p"))
+            || (!notice.completion
+                && notice
+                    .event
+                    .tags
+                    .iter()
+                    .any(|t| t.as_slice().first().map(String::as_str) == Some("p")))
+            || (notice.completion && !self.valid_completion(&notice.event))
         {
             return Err(Error);
+        }
+        if notice.completion {
+            match self.completion_needed(&notice.event).await {
+                Ok(false) => return outbox.complete(&path),
+                Ok(true) => {}
+                Err(_) => {
+                    tracing::warn!(
+                        code = "handoff_completion_lookup_retry",
+                        category = "transport",
+                        "handoff completion retained until return status can be established"
+                    );
+                    return outbox.lookup_retry(&path, &mut notice, now);
+                }
+            }
+            if notice.attempts >= 8 {
+                return outbox.lookup_retry(&path, &mut notice, now);
+            }
         }
         outbox.attempt(&path, &mut notice, now)?;
         let delivered = tokio::time::timeout(Duration::from_secs(10), async {
@@ -270,7 +292,6 @@ impl Client {
                     tracing::error!(
                         "shared refusal journal needs repair; persisted notices retained"
                     );
-                    return;
                 }
             }
         }))

@@ -926,7 +926,14 @@ impl QueuedNormalListenerEvent {
             &self.steer_event.reply_route(),
             self.channel_is_dm,
         );
+        // Handoffs need their own tracked batch so terminal completion cannot
+        // disappear into another running turn. Use the existing cancel+merge path.
+        let shared_handoff = buzz_sdk::sharing::task::origin(&self.steer_event.event)
+            .ok()
+            .flatten()
+            .is_some();
         let native_attempted = matches!(signal, ControlSignal::Steer)
+            && !shared_handoff
             && same_reply_route
             && try_native_steer(
                 pool,
@@ -3479,6 +3486,9 @@ async fn run_harness(
     }
 
     loop {
+        if let Some(client) = &ctx.sharing {
+            client.recover_abandoned(&queue, &pool);
+        }
         // Whether buffered work is waiting on a lazy pool. Also gates the
         // retry-deadline sleep arm below: a `Failed` lifecycle keeps its
         // (possibly past) `retry_at` until the next wake, so sleeping on it
@@ -5153,6 +5163,7 @@ mod try_native_steer_fallback_log_tests {
                 scope: Some(busy_scope),
                 turn_id: "t".into(),
                 recoverable_batch: None,
+                handoff_completion: Default::default(),
                 control_tx: None,
                 steer_tx,
                 successful_steer_deliveries: HashSet::new(),
@@ -5464,6 +5475,7 @@ fn dispatch_pending(
         // The prompt task records how it routed replies, for the
         // native-steer guard (`EventQueue::in_flight_accepts_steer`).
         let prompt_routing = queue.in_flight_prompt_routing(&scope).unwrap_or_default();
+        let handoff_completion = agent.acp.handoff_completion.clone();
         let abort_handle = pool.join_set.spawn(async move {
             pool::run_prompt_task(
                 agent,
@@ -5486,6 +5498,7 @@ fn dispatch_pending(
                 scope: Some(scope.clone()),
                 turn_id,
                 recoverable_batch,
+                handoff_completion,
                 control_tx: Some(control_tx),
                 steer_tx,
                 successful_steer_deliveries: HashSet::new(),
@@ -5659,7 +5672,15 @@ fn handle_prompt_result(
     // retry_counts. If mark_complete runs first, retry_counts is cleared and
     // every retry starts at attempt 1 — defeating exponential backoff and
     // dead-letter protection.
+    let completion = result.agent.acp.handoff_completion.take();
+    let mut completion_requeued = Vec::new();
     if let Some(batch) = result.batch.take() {
+        let completion_ids: Vec<_> = batch
+            .events
+            .iter()
+            .chain(&batch.cancelled_events)
+            .map(|item| item.event.id)
+            .collect();
         // Don't requeue batches for channels the agent was removed from —
         // those events are stale and should be silently dropped.
         if !removed_channels.contains(&batch.channel_id) {
@@ -5683,6 +5704,7 @@ fn handle_prompt_result(
                 // accounting, same as a clean cancel.
                 let reason = batch.cancel_reason.unwrap_or(CancelReason::Steer);
                 queue.requeue_as_cancelled(batch, reason);
+                completion_requeued = completion_ids;
             } else if matches!(
                 result.outcome,
                 PromptOutcome::Timeout(TimeoutKind::Hard {
@@ -5720,6 +5742,7 @@ fn handle_prompt_result(
                     spawn_failure_notice(rest_client, &dead, content);
                     hard_timeout_fate_suffix = Some(" — dead-lettered (retry budget exhausted)");
                 } else {
+                    completion_requeued = completion_ids;
                     hard_timeout_fate_suffix = Some(" — requeued for retry (recently active)");
                 }
             } else if matches!(
@@ -5785,6 +5808,8 @@ fn handle_prompt_result(
                     "⚠️ I couldn't process the last request after multiple retries ({reason}). Please re-send if it's still needed."
                 );
                 spawn_failure_notice(rest_client, &dead, content);
+            } else {
+                completion_requeued = completion_ids;
             }
         } else {
             tracing::debug!(
@@ -5794,6 +5819,10 @@ fn handle_prompt_result(
             );
             hard_timeout_fate_suffix = Some(" — batch dropped (channel removed)");
         }
+    }
+
+    if let Some(completion) = completion {
+        completion.finish(&completion_requeued);
     }
 
     match &result.source {
@@ -6056,13 +6085,21 @@ fn recover_panicked_agent(
     };
     let i = meta.agent_index;
 
+    let completion = meta.handoff_completion.take();
+    let mut completion_requeued = Vec::new();
     // Requeue BEFORE mark_complete (same rationale as handle_prompt_result).
     if let Some(batch) = meta.recoverable_batch {
         if let Some(ch) = meta.channel_id {
             if !removed_channels.contains(&ch) {
-                // Dead-letter on exhaustion is logged inside requeue(); a
-                // panic path has no outcome to report, so no notice here.
-                let _ = queue.requeue(batch);
+                let ids: Vec<_> = batch
+                    .events
+                    .iter()
+                    .chain(&batch.cancelled_events)
+                    .map(|item| item.event.id)
+                    .collect();
+                if queue.requeue(batch).is_none() {
+                    completion_requeued = ids;
+                }
                 tracing::warn!("requeued batch for panicked agent {i}");
             } else {
                 tracing::debug!(
@@ -6071,6 +6108,10 @@ fn recover_panicked_agent(
                 );
             }
         }
+    }
+
+    if let Some(completion) = completion {
+        completion.finish(&completion_requeued);
     }
 
     if let Some(ch) = meta.channel_id {
@@ -6231,6 +6272,7 @@ fn dispatch_heartbeat(
             scope: None,
             turn_id,
             recoverable_batch: None,
+            handoff_completion: Default::default(),
             control_tx: None,
             steer_tx: None,
             successful_steer_deliveries: HashSet::new(),
@@ -7089,6 +7131,7 @@ mod owner_control_command_tests {
                 scope: Some(scope::SessionScope::Conversation { channel_id }),
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
+                handoff_completion: Default::default(),
                 control_tx: Some(control_tx),
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
@@ -7135,6 +7178,7 @@ mod owner_control_command_tests {
                 scope: Some(scope),
                 turn_id: "t".to_string(),
                 recoverable_batch: None,
+                handoff_completion: Default::default(),
                 control_tx: Some(control_tx),
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
@@ -11497,6 +11541,7 @@ mod edit_native_steer_tests {
                 scope: Some(scope.clone()),
                 turn_id: "t".into(),
                 recoverable_batch: None,
+                handoff_completion: Default::default(),
                 control_tx: Some(control_tx),
                 steer_tx: Some(steer_tx),
                 successful_steer_deliveries: HashSet::new(),
@@ -11968,6 +12013,10 @@ mod edit_native_steer_tests {
 }
 
 #[cfg(test)]
+#[path = "sharing/completion/fate_tests.rs"]
+mod handoff_fate_tests;
+
+#[cfg(test)]
 mod error_outcome_emission_tests {
     //! Pins the policy that error-class outcomes surface to the activity feed
     //! and never to the channel:
@@ -11992,7 +12041,7 @@ mod error_outcome_emission_tests {
     use nostr::{EventBuilder, Keys, Kind};
     use std::collections::HashSet;
 
-    fn test_config() -> Config {
+    pub(super) fn test_config() -> Config {
         Config {
             keys: nostr::Keys::generate(),
             relay_url: "ws://localhost:3000".into(),
@@ -12069,7 +12118,7 @@ mod error_outcome_emission_tests {
     /// Spawn a real but inert agent subprocess (`cat`) so the error paths have
     /// an `OwnedAgent` to move into respawn or return to the pool. The error
     /// branches never talk to the subprocess.
-    async fn dummy_agent(index: usize) -> OwnedAgent {
+    pub(super) async fn dummy_agent(index: usize) -> OwnedAgent {
         OwnedAgent {
             index,
             acp: AcpClient::spawn("cat", &[], &[], false)
@@ -12118,6 +12167,7 @@ mod error_outcome_emission_tests {
                 scope: channel_turn.then_some(scope.clone()),
                 turn_id: "idle-window".into(),
                 recoverable_batch: None,
+                handoff_completion: Default::default(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
@@ -12236,6 +12286,7 @@ mod error_outcome_emission_tests {
                 scope: Some(scope::SessionScope::Conversation { channel_id }),
                 turn_id: "test-turn-id".into(),
                 recoverable_batch: None,
+                handoff_completion: Default::default(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::from([
@@ -12317,6 +12368,7 @@ mod error_outcome_emission_tests {
                 scope: Some(scope::SessionScope::Conversation { channel_id }),
                 turn_id: "test-turn-id".into(),
                 recoverable_batch: None,
+                handoff_completion: Default::default(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::from([
@@ -12440,6 +12492,7 @@ mod error_outcome_emission_tests {
                 scope: Some(scope::SessionScope::Conversation { channel_id }),
                 turn_id: "test-turn-id".into(),
                 recoverable_batch: None,
+                handoff_completion: Default::default(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::from([
@@ -12510,6 +12563,7 @@ mod error_outcome_emission_tests {
                 scope: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
+                handoff_completion: Default::default(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
@@ -12591,6 +12645,7 @@ mod error_outcome_emission_tests {
                 scope: Some(scope::SessionScope::Conversation { channel_id }),
                 turn_id: "panic-turn-id".to_string(),
                 recoverable_batch: None,
+                handoff_completion: Default::default(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
@@ -12684,6 +12739,7 @@ mod error_outcome_emission_tests {
                 scope: Some(scope.clone()),
                 turn_id: "panic-turn-id".to_string(),
                 recoverable_batch: Some(batch),
+                handoff_completion: Default::default(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
@@ -12783,6 +12839,7 @@ mod error_outcome_emission_tests {
                     scope: None,
                     turn_id: "test-turn-id".to_string(),
                     recoverable_batch: None,
+                    handoff_completion: Default::default(),
                     control_tx: None,
                     steer_tx: None,
                     successful_steer_deliveries: HashSet::new(),
@@ -12845,118 +12902,6 @@ mod error_outcome_emission_tests {
         .await;
     }
 
-    /// hard-cap timeout dead-letters immediately (no requeue); idle timeout is requeued.
-    #[tokio::test]
-    async fn hard_timeout_not_requeued_idle_timeout_is_requeued() {
-        let make_batch = || {
-            let keys = Keys::generate();
-            let event = EventBuilder::new(Kind::Custom(9), "test")
-                .sign_with_keys(&keys)
-                .unwrap();
-            let __cid = Uuid::new_v4();
-            FlushBatch {
-                channel_id: __cid,
-                scope: scope::SessionScope::Conversation { channel_id: __cid },
-                events: vec![BatchEvent {
-                    edit: None,
-                    event,
-                    prompt_tag: "test".into(),
-                    received_at: std::time::Instant::now(),
-                }],
-                cancelled_events: vec![],
-                cancel_reason: None,
-            }
-        };
-
-        // Returns (pending_channels, queued_event_count_for_channel).
-        let run = |outcome: PromptOutcome, batch: FlushBatch| async move {
-            let channel_id = batch.channel_id;
-            let agent = dummy_agent(0).await;
-            let mut pool = AgentPool::from_slots(vec![None]);
-            let task_id = pool.join_set.spawn(async {}).id();
-            pool.task_map_mut().insert(
-                task_id,
-                crate::pool::TaskMeta {
-                    agent_index: 0,
-                    channel_id: None,
-                    scope: None,
-                    turn_id: "test-turn-id".to_string(),
-                    recoverable_batch: None,
-                    control_tx: None,
-                    steer_tx: None,
-                    successful_steer_deliveries: HashSet::new(),
-                },
-            );
-            let mut queue = EventQueue::new(config::DedupMode::Queue);
-            let config = test_config();
-            let mut heartbeat_in_flight = false;
-            let removed_channels = HashSet::new();
-            let mut crash_history = vec![SlotCircuit {
-                crash_times: Vec::new(),
-                open_until: None,
-                respawn_in_flight: false,
-            }];
-            let (respawn_tx, _respawn_rx) = mpsc::channel(8);
-            let mut respawn_tasks = tokio::task::JoinSet::new();
-            let result = PromptResult {
-                agent,
-                source: PromptSource::Channel(scope::SessionScope::Conversation { channel_id }),
-                turn_id: "test-turn-id".to_string(),
-                outcome,
-                batch: Some(batch),
-            };
-            handle_prompt_result(
-                &mut pool,
-                &mut queue,
-                &config,
-                result,
-                &mut heartbeat_in_flight,
-                &removed_channels,
-                &mut crash_history,
-                &respawn_tx,
-                &mut respawn_tasks,
-                None,
-                None,
-                &mut tokio::time::Instant::now(),
-            );
-            (
-                queue.pending_channels(),
-                queue.queued_event_count(channel_id),
-            )
-        };
-
-        // Hard timeout (not recently active): dead-lettered immediately.
-        let hard_batch = make_batch();
-        let (hard_channels, hard_events) = run(
-            PromptOutcome::Timeout(TimeoutKind::Hard {
-                recently_active: false,
-            }),
-            hard_batch,
-        )
-        .await;
-        assert_eq!(
-            hard_channels, 0,
-            "hard-cap timeout (not recently active) must not requeue the batch"
-        );
-        assert_eq!(
-            hard_events, 0,
-            "hard-cap timeout (not recently active) must drop all events"
-        );
-
-        // Idle timeout: batch IS requeued (first attempt, not yet dead-lettered).
-        let idle_batch = make_batch();
-        let (idle_channels, idle_events) =
-            run(PromptOutcome::Timeout(TimeoutKind::Idle), idle_batch).await;
-        assert_eq!(
-            idle_channels, 1,
-            "idle timeout must requeue the batch for retry"
-        );
-        assert_eq!(
-            idle_events, 1,
-            "idle timeout must preserve the event for retry"
-        );
-    }
-
     #[tokio::test]
     async fn hard_timeout_recently_active_requeues_batch() {
         let channel_id = Uuid::new_v4();
@@ -12992,6 +12937,7 @@ mod error_outcome_emission_tests {
                     scope: None,
                     turn_id: "test-turn-id".to_string(),
                     recoverable_batch: None,
+                    handoff_completion: Default::default(),
                     control_tx: None,
                     steer_tx: None,
                     successful_steer_deliveries: HashSet::new(),
@@ -13071,6 +13017,7 @@ mod error_outcome_emission_tests {
                 scope: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
+                handoff_completion: Default::default(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
@@ -13170,6 +13117,7 @@ mod error_outcome_emission_tests {
                 scope: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
+                handoff_completion: Default::default(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
@@ -13293,6 +13241,7 @@ mod error_outcome_emission_tests {
                 scope: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
+                handoff_completion: Default::default(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
@@ -13437,6 +13386,7 @@ mod error_outcome_emission_tests {
                 scope: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
+                handoff_completion: Default::default(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
@@ -13573,6 +13523,7 @@ mod error_outcome_emission_tests {
                 scope: Some(session_scope.clone()),
                 turn_id: "indeterminate-project".into(),
                 recoverable_batch: None,
+                handoff_completion: Default::default(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
@@ -13730,6 +13681,7 @@ mod error_outcome_emission_tests {
                 scope: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
+                handoff_completion: Default::default(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
@@ -13813,6 +13765,7 @@ mod error_outcome_emission_tests {
                 scope: Some(scope.clone()),
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
+                handoff_completion: Default::default(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
@@ -13923,6 +13876,7 @@ mod error_outcome_emission_tests {
                 scope: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
+                handoff_completion: Default::default(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
@@ -14195,6 +14149,7 @@ mod error_outcome_emission_tests {
                 scope: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
+                handoff_completion: Default::default(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),

@@ -21,8 +21,14 @@ fn fixture(relay: String, manager: PublicKey, directory: std::path::PathBuf) -> 
     let auth = buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "").unwrap();
     (
         Client {
-            keys: agent,
-            auth,
+            keys: agent.clone(),
+            auth: auth.clone(),
+            rest: crate::relay::RestClient {
+                http: reqwest::Client::new(),
+                base_url: relay.replacen("ws", "http", 1),
+                keys: agent.clone(),
+                auth_tag_json: Some(auth.clone()),
+            },
             relay,
             manager,
             scope,

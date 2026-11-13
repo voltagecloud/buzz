@@ -80,6 +80,7 @@ pub struct TaskMeta {
     pub turn_id: String,
     /// Clone of batch for Queue mode panic recovery.
     pub recoverable_batch: Option<FlushBatch>,
+    pub(crate) handoff_completion: crate::sharing::completion::Slot,
     /// Control signal for the in-flight prompt task.
     /// `None` for heartbeat tasks (not controllable) and after signal is consumed.
     pub control_tx: Option<tokio::sync::oneshot::Sender<ControlSignal>>,
@@ -2384,40 +2385,8 @@ fn with_canvas(prompt: Option<String>, canvas: Option<&str>) -> Option<String> {
         (None, None) => None,
     }
 }
-
-/// Return `agent` to the pool via `result_tx`, clearing any steer receiver first.
-///
-/// Every path that returns an `OwnedAgent` to the pool via `PromptResult` goes
-/// through this function. Panic/abort paths do not — and don't need to, since a
-/// panicked task's agent is never sent back via `PromptResult`.
-///
-/// Clearing `steer_rx` here — rather than per-arm — makes the `install_steer_rx`
-/// invariant (`steer_rx.is_none()` at dispatch) structurally unviolatable: a receiver
-/// installed for a turn that ends before the read loop's `take()` (e.g. session-create
-/// error) is always dropped before the agent re-enters the pool, so the next dispatch
-/// can never trigger the assert.
-///
-/// On the happy path the read loop has already called `take()`, so this is a no-op.
-fn send_prompt_result(
-    result_tx: &mpsc::UnboundedSender<PromptResult>,
-    turn_id: &str,
-    mut agent: OwnedAgent,
-    source: PromptSource,
-    outcome: PromptOutcome,
-    batch: Option<FlushBatch>,
-) {
-    agent.acp.clear_steer_rx();
-    // The turn's transcript recorder stays with its guard in the finished
-    // task; traffic after this point belongs to no turn.
-    agent.acp.set_transcript(None);
-    let _ = result_tx.send(PromptResult {
-        agent,
-        source,
-        turn_id: turn_id.to_owned(),
-        outcome,
-        batch,
-    });
-}
+mod result;
+use result::send_prompt_result;
 
 /// Core async function spawned for each prompt.
 ///
@@ -2543,6 +2512,15 @@ pub async fn run_prompt_task(
         .unwrap_or_default();
     let _reaction_guard = ReactionGuard::new(ctx.rest_client.clone(), reaction_ids.clone());
 
+    // Capture all handoff owners before authorization can remove revoked events.
+    // Result handling and panic recovery decide which records become terminal.
+    let _handoff_completion = crate::sharing::completion::Guard::begin(
+        &mut agent.acp,
+        ctx.sharing.clone(),
+        batch.as_ref(),
+        ctx.transcript_tasks.clone(),
+    );
+
     // Queueing may outlive a grant. Recheck before session creation, memory
     // fetches, or any ACP prompt; the listener separately guards native steering.
     // A gateway turn is rechecked the same way: a revocation or expiry blocks
@@ -2562,6 +2540,22 @@ pub async fn run_prompt_task(
                         !pending.events.is_empty() || !pending.cancelled_events.is_empty()
                     }),
                 ),
+            );
+            return;
+        }
+    }
+
+    if let Some(guard) = &_handoff_completion {
+        if let Err(reason) = guard.reserve().await {
+            tracing::warn!(code = "shared_task_retry", reason = %reason,
+                "handoff refused before execution; durable capacity unavailable");
+            send_prompt_result(
+                &result_tx,
+                &turn_id,
+                agent,
+                source,
+                PromptOutcome::Error(AcpError::HandoffAdmissionRetry(reason.to_string())),
+                requeue_batch_if_queue(&ctx, batch),
             );
             return;
         }
@@ -8807,6 +8801,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
                 scope: Some(busy_scope),
                 turn_id: "t".into(),
                 recoverable_batch: None,
+                handoff_completion: Default::default(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
@@ -10015,6 +10010,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
                 scope: Some(scope),
                 turn_id: "t".into(),
                 recoverable_batch: None,
+                handoff_completion: Default::default(),
                 control_tx: None,
                 steer_tx,
                 successful_steer_deliveries: HashSet::new(),
