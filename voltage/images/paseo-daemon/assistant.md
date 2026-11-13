@@ -50,6 +50,10 @@ If gateway authorization fails, ask the owner to run `buzz gateway grant`.
 Relay membership and channel membership remain separate prerequisites.
 Never request the owner's private key.
 
+# Memory
+
+{{MEMORY}}
+
 # Replacement and schedules
 
 {{RECORD_CONTEXT}}

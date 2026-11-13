@@ -45,6 +45,7 @@ TOKEN="sk-ant-oat01-test-$RANDOM$RANDOM"
 GIT_TOKEN="github_pat_test_$RANDOM$RANDOM"
 AGENT=$(printf 'a%.0s' {1..64})
 MANAGER=$(printf 'b%.0s' {1..64})
+OWNER=$(printf 'c%.0s' {1..64})
 CHANNEL=6f1c1b2e-3d4a-4b5c-8d9e-0f1a2b3c4d5e
 SECRETS=(-e "$PASSWORD" -e "$SECRET_KEY" -e "$PRIVATE_KEY" -e "$TOKEN" -e "$GIT_TOKEN")
 BASE_ENV=(
@@ -54,7 +55,7 @@ BASE_ENV=(
   -e PASEO_RELAY_ENDPOINT=relay.invalid:443
   -e BUZZ_RELAY_URL=wss://buzz.invalid
   -e BUZZ_PRIVATE_KEY="$PRIVATE_KEY"
-  -e BUZZ_PASEO_OWNER="$MANAGER"
+  -e BUZZ_PASEO_OWNER="$OWNER"
   -e BUZZ_PASEO_AGENTS='[{"id":"brokkr","label":"Brokkr","agent":"'"$AGENT"'","channel":"'"$CHANNEL"'"}]'
 )
 ENV=("${BASE_ENV[@]}" -e BUZZ_PASEO_RECORD_CHANNEL="$CHANNEL" -e GITHUB_READ_TOKEN="$GIT_TOKEN" -e GITHUB_READ_TOKEN_REPOSITORIES='["fixture/private"]' -e CLAUDE_CODE_OAUTH_TOKEN="$TOKEN" -e BUZZ_MANAGER_PUBKEY="$MANAGER" -e BUZZ_MANAGER_CHANNEL="$CHANNEL")
@@ -204,7 +205,7 @@ docker exec "$NAME" node -e '
 # The bridge gets the Buzz relay and key, and no Paseo password or model token.
 docker exec -w /home/paseo/assistant "$NAME" paseo run --no-wait --provider brokkr "hello" >/dev/null 2>&1 || true
 for _ in $(seq 30); do docker exec "$NAME" test -s /tmp/buzz.env && break; sleep 1; done
-[ "$(docker exec "$NAME" cat /tmp/buzz.args | paste -sd' ')" = "acp-bridge --agent $AGENT --channel $CHANNEL --owner $MANAGER" ] ||
+[ "$(docker exec "$NAME" cat /tmp/buzz.args | paste -sd' ')" = "acp-bridge --agent $AGENT --channel $CHANNEL --owner $OWNER" ] ||
   fail "bridge command: $(docker exec "$NAME" cat /tmp/buzz.args 2>&1)"
 bridge_env=$(docker exec "$NAME" cat /tmp/buzz.env)
 grep -qx "BUZZ_PRIVATE_KEY=$PRIVATE_KEY" <<<"$bridge_env" || fail "the bridge has no BUZZ_PRIVATE_KEY"
@@ -231,6 +232,7 @@ done
 init=$(docker exec "$NAME" cat /tmp/claude.stdin)
 grep -qF "personal assistant of one developer" <<<"$init" || fail "the PA instructions are missing: ${init:0:300}"
 grep -qF "$MANAGER" <<<"$init" && grep -qF "$CHANNEL" <<<"$init" || fail "the manager is missing from the PA instructions"
+grep -qF "buzz mem get core --owner $OWNER" <<<"$init" || fail "the PA does not load its relay memory"
 mcp_config=$(grep -A1 -x -- --mcp-config <<<"$claude_args" | tail -1)
 tools=$(docker exec "$NAME" node -e '
   const server = JSON.parse(process.argv[1]).mcpServers.paseo;
@@ -303,7 +305,10 @@ docker exec "$NAME" node -e '
   for (const verb of ["list", "delete"]) if (!allow.includes(`Bash(buzz workflows ${verb}:*)`)) process.exit(1);
   const models = config.agents.providers.brokkr.models;
   if (models?.length !== 1 || models[0].isDefault !== true || models[0].label !== "Brokkr") process.exit(1);
-' || fail "deferred terminal profile or Codex is enabled, or a Buzz provider lacks its preselected model"
+  // Memory reads run unprompted; every memory write needs approval.
+  for (const verb of ["ls", "get", "hash"]) if (!allow.includes(`Bash(buzz mem ${verb}:*)`)) process.exit(1);
+  if (allow.some((rule) => /mem (set|patch|rm)/.test(rule))) process.exit(1);
+' || fail "deferred terminal profile or Codex is enabled, a Buzz provider lacks its preselected model, or the memory allowlist is wrong"
 
 # The bundled plugin compiles and starts in the unmodified daemon.
 docker exec "$NAME" paseo plugin ls --json >"$stubs/plugins.json"

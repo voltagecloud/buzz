@@ -125,7 +125,7 @@ Visual client interaction remains part of the human acceptance test.
 | `PASEO_SERVER_ID` | Required stable `srv_` identifier. |
 | `PASEO_DAEMON_KEYPAIR` | Required matching Curve25519 `{v:2,publicKeyB64,secretKeyB64}`. Written mode 0600, then removed from the environment. |
 | `BUZZ_PRIVATE_KEY` | Required gateway signing key. Never the owner or sandbox key. |
-| `BUZZ_PASEO_OWNER` | Owner public key; required with remote providers. |
+| `BUZZ_PASEO_OWNER` | Owner public key; required with remote providers. Missing disables relay memory. |
 | `BUZZ_PASEO_AGENTS` | Optional JSON array above. Missing or `[]` enables no remote providers. |
 | `CLAUDE_CODE_OAUTH_TOKEN` | Optional Claude credential. Missing starts without a native assistant. |
 | `GITHUB_READ_TOKEN` | Optional fine-grained `github_pat_...` credential. Missing still permits anonymous public clone/fetch. |
@@ -155,6 +155,7 @@ Desktop, mobile, and web clients use the relay endpoint embedded in the offer.
 | Pairing key, server ID, password, gateway key, narrow GitHub token | Per-developer Kubernetes Secret | Regenerate files from the same identity. |
 | Remote-agent conversations | Buzz relay | List and load through the ACP bridge. |
 | Accepted assistant transcript messages | Buzz recording channel | New assistant session reads the latest 20 records for context. |
+| Assistant memory (rules, preferences, lessons) | NIP-AE engrams on the Buzz relay, written by the gateway key for the owner | New assistant session reads `core` and follows its `[[mem/…]]` links. |
 | Unsent transcript intents and dead letters | Pod-local `$PASEO_HOME/buzz-recording` | Lost on pod replacement. |
 | Native Claude sessions and Paseo's local agent list | Pod-local home | Start a new native assistant session. No v1 restore. |
 | Git checkout | Pod-local `$HOME/code` | Partial clone again on demand. |
@@ -163,6 +164,10 @@ Desktop, mobile, and web clients use the relay endpoint embedded in the offer.
 | Approved scheduled Buzz workflows | Buzz relay | Continue without the daemon, under the narrowed #161 authority contract. |
 
 The assistant reads recorded context as historical data, not fresh instructions.
+Memory reads (`buzz mem ls`, `get`, `hash`) run without approval. Every write (`set`, `patch`, `rm`) needs the developer's approval, and the assistant is told to pass memory text inline so the approval shows the exact bytes. Tool permissions are not a security boundary for a provider with shell access, so this reduces mistakes rather than guaranteeing that a prompt-injected assistant cannot persist text: read what you approve.
+Memory is tied to the gateway key: its addresses and encryption derive from it, so a new gateway key starts with empty memory. The owner can still read the old entries with `buzz mem ls --agent <old gateway pubkey>`.
+Rules you paste into the assistant chat to seed memory are developer messages, which the recorder posts to the recording channel; do not paste anything you would not post there.
+The developer can audit the memory with their own key: `buzz mem ls --agent <gateway pubkey>`, then `buzz mem get <slug> --agent <gateway pubkey>`.
 It does not reconstruct provider session files or claim complete native-session recovery.
 A Kubernetes Secret survives pod deletion; neither an `emptyDir` nor container disk does.
 
