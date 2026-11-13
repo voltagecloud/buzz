@@ -939,6 +939,12 @@ pub struct PromptContext {
     /// Live owner-delegated gateways, set only in strict owner mode. A queued
     /// gateway turn is rechecked against it at dispatch.
     pub(crate) gateways: Option<Arc<crate::gateway::GatewayAccess>>,
+    /// Exact secret values (agent key, credential variables) redacted from
+    /// NIP-AT transcripts before they are recorded.
+    pub(crate) transcript_secrets: Arc<crate::transcript::Secrets>,
+    /// NIP-AT transcript publishes in flight. Shutdown waits on them within
+    /// the same grace period as in-flight prompts.
+    pub(crate) transcript_tasks: tokio_util::task::TaskTracker,
     /// Harness identity string for NIP-AM `harness` field. Derived from the
     /// configured `agent_command` at startup (e.g. `"goose"`, `"buzz-agent"`).
     pub harness_name: String,
@@ -2401,6 +2407,9 @@ fn send_prompt_result(
     batch: Option<FlushBatch>,
 ) {
     agent.acp.clear_steer_rx();
+    // The turn's transcript recorder stays with its guard in the finished
+    // task; traffic after this point belongs to no turn.
+    agent.acp.set_transcript(None);
     let _ = result_tx.send(PromptResult {
         agent,
         source,
@@ -2464,6 +2473,25 @@ pub async fn run_prompt_task(
         turn_started_payload["threadRootEventId"] = serde_json::json!(root);
     }
     agent.acp.observe("turn_started", turn_started_payload);
+
+    // NIP-AT: record this thread turn's ACP traffic and publish it, encrypted
+    // to the owner and each live gateway, when the task ends on any path.
+    let _transcript = crate::transcript::TurnTranscript::begin(
+        &mut agent.acp,
+        ctx.agent_owner_pubkey.map(|owner| crate::transcript::Sink {
+            keys: ctx.agent_keys.clone(),
+            owner,
+            gateways: ctx.gateways.clone(),
+            rest: ctx.rest_client.clone(),
+            cwd: std::path::PathBuf::from(&ctx.cwd),
+            secrets: Arc::clone(&ctx.transcript_secrets),
+            tasks: ctx.transcript_tasks.clone(),
+        }),
+        observer_channel_id,
+        observer_thread_root,
+        &turn_id,
+        &turn_started_at,
+    );
 
     // Emits `turn_completed` on any exit path. Captures observer handle and
     // metadata now, before the agent is moved into PromptResult. It must be
@@ -10599,6 +10627,8 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             memory_enabled: false,
             sharing: None,
             gateways: None,
+            transcript_secrets: Default::default(),
+            transcript_tasks: Default::default(),
             harness_name: "goose".to_string(),
             relay_url: "ws://127.0.0.1:3000".to_string(),
         }
@@ -12566,3 +12596,6 @@ mod pi_prompt_tests;
 
 #[cfg(all(test, unix))]
 mod gateway_dispatch_tests;
+
+#[cfg(all(test, unix))]
+mod transcript_tests;

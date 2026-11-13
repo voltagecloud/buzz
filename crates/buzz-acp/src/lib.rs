@@ -28,6 +28,7 @@ pub mod sharing;
 use runtime::{AgentRuntime, PoolStartup, SessionMode};
 mod scope;
 mod setup_mode;
+mod transcript;
 mod usage;
 
 pub use usage::TurnUsage;
@@ -4625,6 +4626,7 @@ async fn run_harness(
     // period expires, remaining tasks are aborted and fall back to
     // AcpClient::Drop (start_kill + try_wait — best-effort, not guaranteed).
     let (rx_ref, js_ref) = pool.rx_and_join_set();
+    let transcript_tasks = ctx.transcript_tasks.clone();
     let shutdown_result = tokio::time::timeout(grace, async {
         loop {
             tokio::select! {
@@ -4645,10 +4647,17 @@ async fn run_harness(
                 }
             }
         }
+        // Every finished turn has handed its NIP-AT transcript publish to the
+        // tracker; let those finish (each has its own 30 s bound) too.
+        transcript_tasks.close();
+        transcript_tasks.wait().await;
     })
     .await;
     if shutdown_result.is_err() {
-        tracing::warn!("grace period expired, aborting remaining tasks");
+        tracing::warn!(
+            unpublished_transcripts = ctx.transcript_tasks.len(),
+            "grace period expired, aborting remaining tasks"
+        );
         pool.join_set.shutdown().await;
     }
     // Drain any remaining results that arrived after join_set drained but

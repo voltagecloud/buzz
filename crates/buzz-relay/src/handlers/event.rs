@@ -43,7 +43,7 @@ pub(crate) fn bounded_kind_label(kind: u32) -> String {
         41001 | 41010..=41012 => kind.to_string(),
         43001..=43006 => kind.to_string(),
         44100..=44101 => kind.to_string(),
-        44200 => kind.to_string(),
+        44200..=44201 => kind.to_string(),
         45001..=45003 => kind.to_string(),
         46001..=46012 | 46020 | 46030..=46031 => kind.to_string(),
         48001 | 48100..=48104 | 48106 => kind.to_string(),
@@ -1494,12 +1494,13 @@ async fn handle_agent_observer_event(
 /// a revoked delegation keeps routing frames on another replica.
 pub(crate) const GATEWAY_VERDICT_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Whether `gateway` may exchange observer frames with `agent`: the agent's
+/// Whether `gateway` may exchange observer frames with `agent`, or receive its
+/// NIP-AT session transcripts: the agent's
 /// recorded owner has a live kind 30181 delegation naming `gateway`, and
 /// `gateway` is not itself an agent the relay has recorded. An owned agent
 /// therefore never passes as a gateway, and an agent without a recorded owner
 /// has none. Any lookup failure propagates and the caller refuses the frame.
-async fn gateway_observer_authorized(
+pub(crate) async fn gateway_observer_authorized(
     state: &AppState,
     community: CommunityId,
     agent: PublicKey,
@@ -2554,6 +2555,7 @@ mod tests {
             for kind in [
                 buzz_core::kind::KIND_DM_VISIBILITY,
                 buzz_core::kind::KIND_AGENT_TURN_METRIC,
+                buzz_core::kind::KIND_AGENT_SESSION_TRANSCRIPT,
                 buzz_core::kind::KIND_SANDBOX_SESSION_CONTROL,
             ] {
                 let state = test_state().await;
@@ -2612,6 +2614,7 @@ mod tests {
             for kind in [
                 buzz_core::kind::KIND_DM_VISIBILITY,
                 buzz_core::kind::KIND_AGENT_TURN_METRIC,
+                buzz_core::kind::KIND_AGENT_SESSION_TRANSCRIPT,
             ] {
                 let state = test_state().await;
                 let tenant = buzz_core::tenant::TenantContext::resolved(
@@ -3345,6 +3348,7 @@ mod tests {
             for kind in [
                 buzz_core::kind::KIND_DM_VISIBILITY,
                 buzz_core::kind::KIND_AGENT_TURN_METRIC,
+                buzz_core::kind::KIND_AGENT_SESSION_TRANSCRIPT,
                 buzz_core::kind::KIND_SANDBOX_SESSION_CONTROL,
             ] {
                 let event = EventBuilder::new(Kind::Custom(kind as u16), "{}")

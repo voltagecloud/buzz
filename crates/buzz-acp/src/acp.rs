@@ -189,6 +189,9 @@ pub struct AcpClient {
     observer_agent_index: Option<usize>,
     /// Best-effort context attached to raw ACP wire events.
     observer_context: ObserverContext,
+    /// The current turn's NIP-AT transcript recorder, fed from the same raw
+    /// ACP reads and writes as the observer feed.
+    transcript: Option<crate::transcript::SharedRecorder>,
     /// Most recently observed `_meta.goose.activeRunId` from a
     /// `session/update` notification of kind `session_info_update`.
     ///
@@ -635,6 +638,7 @@ impl AcpClient {
             observer: None,
             observer_agent_index: None,
             observer_context: ObserverContext::default(),
+            transcript: None,
             active_run_id: None,
             steering_supported: false,
             steer_rx: None,
@@ -656,6 +660,12 @@ impl AcpClient {
         self.observer_context = context;
     }
 
+    /// Record subsequent raw ACP traffic into `recorder` (one turn's NIP-AT
+    /// transcript), or stop recording with `None`.
+    pub(crate) fn set_transcript(&mut self, recorder: Option<crate::transcript::SharedRecorder>) {
+        self.transcript = recorder;
+    }
+
     /// Return a clone of the observer handle, if attached.
     pub(crate) fn observer_handle(&self) -> Option<ObserverHandle> {
         self.observer.clone()
@@ -668,6 +678,17 @@ impl AcpClient {
 
     /// Emit a semantic event to the local observer feed, if enabled.
     pub fn observe(&self, kind: impl Into<String>, payload: serde_json::Value) {
+        let kind = kind.into();
+        if let Some(recorder) = &self.transcript {
+            let mut recorder = recorder
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match kind.as_str() {
+                "acp_read" => recorder.record_read(&payload),
+                "acp_write" => recorder.record_write(&payload),
+                _ => {}
+            }
+        }
         if let Some(observer) = &self.observer {
             observer.emit(
                 kind,

@@ -34,6 +34,7 @@ sequenceDiagram
 | Turn cancellation | Live grant; signed, fresh NIP-44 observer control; command exactly `cancel_turn` |
 | Observer telemetry | Agent ownership verified by relay; separate NIP-44 copy for each live gateway |
 | Shared tasks and handoffs | Managed Paseo daemon key: judged as its bound owner while delegated. Other keys: judged as themselves. See [Shared tasks](#shared-tasks-and-handoffs) |
+| Turn transcripts ([NIP-AT](nips/NIP-AT.md)) | Owner or live delegation verified by relay; separate NIP-44 copy for each live gateway |
 | Owner DMs, profile and channel administration | No delegated authority |
 | Model changes and owner announcements | Owner key required |
 | Checkpoint recovery of an ended thread | Mention launch only: the gateway's own mention in that thread restores the last checkpoint of a session that ended before it; its scheduled workflow prompts do not ([server mention launch](server-mention-launch.md)) |

@@ -7,8 +7,8 @@
 
 use buzz_core::{
     kind::{
-        AUTHOR_ONLY_KINDS, KIND_AGENT_TURN_METRIC, KIND_MEMBER_ADDED_NOTIFICATION,
-        KIND_MEMBER_REMOVED_NOTIFICATION, P_GATED_KINDS,
+        AUTHOR_ONLY_KINDS, CIPHERTEXT_ONLY_P_GATED_KINDS, KIND_AGENT_TURN_METRIC,
+        KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, P_GATED_KINDS,
     },
     CommunityId,
 };
@@ -1751,6 +1751,13 @@ async fn author_only_kinds_are_storage_level_unsearchable() {
 /// storage-layer defense does not apply to them regardless of the schema
 /// CASE. `p_gated_filters_authorized` remains their sole defense by design.
 ///
+/// `CIPHERTEXT_ONLY_P_GATED_KINDS` (`buzz_core::kind`) are also skipped: relay
+/// ingest admits them only with NIP-44 v2 ciphertext content
+/// (`validate_ciphertext_only_content` in `buzz-relay`, which rejects
+/// plaintext — see `ciphertext_only_kinds_reject_plaintext_content` there), so
+/// their search vector holds only base64 ciphertext tokens. Exempting a kind
+/// here without that ingest rule would admit searchable plaintext.
+///
 /// Companion to `author_only_kinds_are_storage_level_unsearchable`: that test
 /// covers `AUTHOR_ONLY_KINDS` drift; this one covers `P_GATED_KINDS`
 /// persistent-subset drift. Together they tripwire both Rust-side privacy
@@ -1779,6 +1786,7 @@ async fn p_gated_persistent_kinds_have_storage_null_tsvector() {
         .iter()
         .copied()
         .filter(|&k| !buzz_core::kind::is_ephemeral(k))
+        .filter(|k| !CIPHERTEXT_ONLY_P_GATED_KINDS.contains(k))
         .collect();
     assert!(
         !persistent.is_empty(),

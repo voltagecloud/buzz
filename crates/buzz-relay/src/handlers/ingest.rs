@@ -563,6 +563,9 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         }
         // NIP-AM: agent turn metrics are agent-authored global events (encrypted to owner).
         KIND_AGENT_TURN_METRIC => Ok(Scope::MessagesWrite),
+        // NIP-AT: agent session transcripts are agent-authored channel events
+        // encrypted to one recipient each.
+        buzz_core::kind::KIND_AGENT_SESSION_TRANSCRIPT => Ok(Scope::MessagesWrite),
         // NIP-56 reports are ordinary member writes into the mod-only queue.
         // Ingest persists them to `moderation_reports` and suppresses public
         // storage/fanout; reports are signals, never enforcement triggers.
@@ -2131,6 +2134,24 @@ fn validate_engram_nip44_content(content: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Content rule for [`buzz_core::kind::CIPHERTEXT_ONLY_P_GATED_KINDS`]: the
+/// content must be NIP-44 v2 ciphertext (base64, version byte `0x02`, NIP-44
+/// length bounds). These kinds keep a searchable `search_tsv` only because
+/// this rule holds, so it applies to every kind in that list and to no other.
+pub(crate) fn validate_ciphertext_only_content(kind: u32, content: &str) -> Result<(), String> {
+    if !buzz_core::kind::CIPHERTEXT_ONLY_P_GATED_KINDS.contains(&kind) {
+        return Ok(());
+    }
+    if !buzz_core::observer::content_looks_like_nip44(content) {
+        return Err(format!(
+            "kind {kind} content must be NIP-44 v2 ciphertext (length {} is outside the NIP-44 bounds)",
+            content.len()
+        ));
+    }
+    validate_engram_nip44_content(content)
+        .map_err(|e| e.replace("agent-engram", &format!("kind {kind}")))
+}
+
 /// Validate the public envelope of a NIP-AM `kind:44200` event.
 ///
 /// Enforces (without touching the encrypted payload):
@@ -2643,6 +2664,11 @@ async fn ingest_event_inner(
             event.content.len()
         )));
     }
+
+    // Stored p-gated kinds exempt from the NULL search vector admit only
+    // NIP-44 ciphertext, so their content can never be searchable plaintext.
+    validate_ciphertext_only_content(kind_u32, &event.content)
+        .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
 
     let is_gift_wrap = kind_u32 == KIND_GIFT_WRAP;
     if event.pubkey != *auth.pubkey() && !is_gift_wrap {
@@ -3217,6 +3243,43 @@ async fn ingest_event_inner(
         if !is_owner {
             return Err(IngestError::AuthFailed(
                 "restricted: agent-turn-metric `p` tag must be the registered owner of this agent"
+                    .into(),
+            ));
+        }
+    }
+
+    if kind_u32 == buzz_core::kind::KIND_AGENT_SESSION_TRANSCRIPT {
+        let envelope = buzz_sdk::transcript::parse_envelope(&event)
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+        // The `p` recipient must be the agent's registered owner or a gateway
+        // the owner currently delegates to. Lookup failures fail closed.
+        let agent_bytes = event.pubkey.to_bytes().to_vec();
+        let recipient_bytes = envelope.recipient.to_bytes().to_vec();
+        let is_owner = state
+            .db
+            .is_agent_owner(tenant.community(), &agent_bytes, &recipient_bytes)
+            .await
+            .map_err(|e| {
+                IngestError::Internal(format!(
+                    "error: db error checking agent-session-transcript ownership: {e}"
+                ))
+            })?;
+        let authorized = is_owner
+            || super::event::gateway_observer_authorized(
+                state,
+                tenant.community(),
+                event.pubkey,
+                envelope.recipient,
+            )
+            .await
+            .map_err(|e| {
+                IngestError::Internal(format!(
+                    "error: db error checking agent-session-transcript gateway: {e}"
+                ))
+            })?;
+        if !authorized {
+            return Err(IngestError::AuthFailed(
+                "restricted: agent-session-transcript `p` tag must be this agent's owner or a live gateway"
                     .into(),
             ));
         }
@@ -6116,6 +6179,64 @@ mod postgres_tests {
         let err = validate_agent_turn_metric_envelope(&ev).unwrap_err();
         // error comes from validate_engram_nip44_content with label replaced
         assert!(err.contains("agent-turn-metric"), "got: {err}");
+    }
+
+    // ─── NIP-AT agent session transcript ───────────────────────────────────
+
+    /// Transcripts are channel events (`h` is kept and membership applies) but
+    /// are not thread replies: `requires_h_channel_scope` would resolve NIP-10
+    /// thread metadata and bump the root's reply counters.
+    #[test]
+    fn agent_session_transcript_is_channel_scoped_without_thread_counters() {
+        let dummy = make_dummy_event();
+        let kind = buzz_core::kind::KIND_AGENT_SESSION_TRANSCRIPT;
+        assert!(!is_global_only_kind(kind));
+        assert!(!requires_h_channel_scope(kind));
+        assert_eq!(
+            required_scope_for_kind(kind, &dummy).unwrap(),
+            Scope::MessagesWrite
+        );
+    }
+
+    /// Every kind exempt from the NULL search vector rejects plaintext at
+    /// ingest, so the exemption in `p_gated_persistent_kinds_have_storage_null_tsvector`
+    /// can never admit searchable plaintext. Mutation: drop the ingest call or
+    /// the length bound and this or the bounds row fails.
+    #[test]
+    fn ciphertext_only_kinds_reject_plaintext_content() {
+        assert!(buzz_core::kind::CIPHERTEXT_ONLY_P_GATED_KINDS
+            .contains(&buzz_core::kind::KIND_AGENT_SESSION_TRANSCRIPT));
+        let (agent, owner) = (nostr::Keys::generate(), nostr::Keys::generate());
+        let real = nostr::nips::nip44::encrypt(
+            agent.secret_key(),
+            &owner.public_key(),
+            r#"{"v":1}"#,
+            nostr::nips::nip44::Version::V2,
+        )
+        .unwrap();
+        let too_long = format!("Ag{}", "A".repeat(87_474));
+        let version_one = format!("AQ{}", "A".repeat(130));
+        for &kind in buzz_core::kind::CIPHERTEXT_ONLY_P_GATED_KINDS {
+            assert!(validate_ciphertext_only_content(kind, &real).is_ok());
+            assert!(validate_ciphertext_only_content(kind, &fake_nip44_v2()).is_ok());
+            for (name, content) in [
+                ("empty", ""),
+                ("plaintext", r#"{"v":1,"updates":[{"text":"secret plan"}]}"#),
+                (
+                    "plain words padded to ciphertext length",
+                    &"secret ".repeat(30),
+                ),
+                ("version byte 0x01", &version_one),
+                ("over the NIP-44 length bound", &too_long),
+            ] {
+                assert!(
+                    validate_ciphertext_only_content(kind, content).is_err(),
+                    "kind {kind}: {name} content must be rejected"
+                );
+            }
+        }
+        // The rule applies only to the listed kinds.
+        assert!(validate_ciphertext_only_content(KIND_STREAM_MESSAGE, "hello").is_ok());
     }
 
     /// The HTTP bridge's `submit_event` 400 arm and the WS `EVENT` handler's

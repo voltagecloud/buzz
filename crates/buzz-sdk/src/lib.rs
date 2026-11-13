@@ -18,6 +18,7 @@ pub mod gateway;
 pub mod mentions;
 pub mod nip_oa;
 pub mod sharing;
+pub mod transcript;
 pub mod workflow;
 
 pub use builders::*;
