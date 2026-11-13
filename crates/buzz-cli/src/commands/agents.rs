@@ -13,6 +13,9 @@ use crate::{AgentsCmd, RespondToArg};
 #[path = "agents_sharing_tests.rs"]
 mod sharing_tests;
 
+#[path = "agents_sharing_read.rs"]
+mod sharing_read;
+
 /// The incoming task `from` names, as this agent's relay connection sees it.
 async fn incoming_task(client: &BuzzClient, from: &str) -> Result<nostr::Event, CliError> {
     if client.auth_tag_owner_hex().is_none() {
@@ -95,18 +98,11 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
             channel,
             owner,
         } => {
-            validate_hex64(&agent)?;
-            let agent = PublicKey::from_hex(&agent).map_err(|e| CliError::Usage(e.to_string()))?;
-            let owner = owner.unwrap_or_else(|| client.keys().public_key().to_hex());
-            validate_hex64(&owner)?;
-            let output = client
-                .query(&json!({"kinds":[buzz_core::kind::KIND_AGENT_CHANNEL_GRANT],
-                "authors":[owner], "#h":[channel],
-                "#d":[buzz_sdk::sharing::Grant::coordinate(agent, channel)], "limit":1}))
-                .await?;
+            let output = sharing_read::read(client, &agent, channel, owner.as_deref()).await?;
             println!("{output}");
             Ok(())
         }
+
         AgentsCmd::DraftCreate {
             channel,
             display_name,

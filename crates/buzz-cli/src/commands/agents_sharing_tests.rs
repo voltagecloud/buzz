@@ -219,3 +219,124 @@ async fn return_answers_the_delegating_agent_and_refuses_a_human_mention() {
     assert_eq!(origin.parent, handoff.id);
     server.abort();
 }
+
+#[tokio::test]
+async fn sharing_resolves_owner_and_live_gateway_without_hiding_explicit_mismatches() {
+    let (owner, agent, gateway, stranger) = (
+        Keys::generate(),
+        Keys::generate(),
+        Keys::generate(),
+        Keys::generate(),
+    );
+    let channel = uuid::Uuid::new_v4();
+    let now = nostr::Timestamp::now().as_secs();
+    let auth = buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "").unwrap();
+    let profile = EventBuilder::new(Kind::Metadata, "{}")
+        .tag(buzz_sdk::nip_oa::parse_auth_tag(&auth).unwrap())
+        .sign_with_keys(&agent)
+        .unwrap();
+    let delegation = buzz_sdk::gateway::Delegation::grant(gateway.public_key(), now + 3600, now)
+        .unwrap()
+        .sign_with_keys(&owner)
+        .unwrap();
+    let grant = buzz_sdk::sharing::Grant::builder(agent.public_key(), channel, true)
+        .unwrap()
+        .sign_with_keys(&owner)
+        .unwrap();
+    let fixtures = Arc::new(Mutex::new(vec![
+        profile,
+        delegation,
+        EventBuilder::new(Kind::Metadata, "{}")
+            .sign_with_keys(&gateway)
+            .unwrap(),
+        grant,
+    ]));
+    let captured = fixtures.clone();
+    let app = Router::new().route(
+        "/query",
+        post(move |Json(filters): Json<Vec<serde_json::Value>>| {
+            let events = captured.clone();
+            async move {
+                assert_eq!(filters[0]["consistency"], "strong");
+                let filter: nostr::Filter = serde_json::from_value(filters[0].clone()).unwrap();
+                let matches: Vec<Event> = events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|event| {
+                        filter.match_event(event, nostr::filter::MatchEventOptions::default())
+                    })
+                    .cloned()
+                    .collect();
+                Json(matches)
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = BuzzClient::new(url, gateway.clone(), None, None).unwrap();
+    for (requested, expected, resolution, count) in [
+        (None, owner.public_key(), "agent_profile", 1),
+        (
+            Some(owner.public_key().to_hex()),
+            owner.public_key(),
+            "explicit_owner",
+            1,
+        ),
+        (
+            Some(gateway.public_key().to_hex()),
+            owner.public_key(),
+            "delegated_gateway",
+            1,
+        ),
+        (
+            Some(stranger.public_key().to_hex()),
+            stranger.public_key(),
+            "explicit_owner_mismatch",
+            0,
+        ),
+    ] {
+        let output = sharing_read::read(
+            &client,
+            &agent.public_key().to_hex(),
+            channel,
+            requested.as_deref(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(output["query_owner"], json!(expected));
+        assert_eq!(output["resolved_owner"], json!(owner.public_key()));
+        assert_eq!(output["signing_key"], json!(gateway.public_key()));
+        assert_eq!(output["requested_owner"], json!(requested));
+        assert_eq!(output["owner_resolution"], resolution);
+        assert_eq!(output["grants"].as_array().unwrap().len(), count);
+        assert_eq!(output["warning"].is_string(), count == 0);
+    }
+    // A revoked gateway remains an explicit mismatched query, never a live delegation.
+    fixtures.lock().unwrap().push(
+        buzz_sdk::gateway::Delegation::revoke(gateway.public_key(), now + 1)
+            .unwrap()
+            .sign_with_keys(&owner)
+            .unwrap(),
+    );
+    let output = sharing_read::read(
+        &client,
+        &agent.public_key().to_hex(),
+        channel,
+        Some(&gateway.public_key().to_hex()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(output["owner_resolution"], "explicit_owner_mismatch");
+    fixtures
+        .lock()
+        .unwrap()
+        .retain(|event| event.pubkey != agent.public_key());
+    assert!(
+        sharing_read::read(&client, &agent.public_key().to_hex(), channel, None)
+            .await
+            .is_err()
+    );
+    server.abort();
+}
