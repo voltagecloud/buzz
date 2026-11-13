@@ -506,3 +506,52 @@ fn gateway_workflow_start_revalidates_the_owner_proof() {
     tampered["trigger"]["content"] = json!("forged");
     assert!(Start::gateway(tampered, &request, at).is_err());
 }
+
+/// A registration saved before the Paseo channel annotation existed gains
+/// its channel from the next server-side start, so a mention-launched agent
+/// reaches its owner's Paseo daemon without a desktop redeploy.
+#[tokio::test]
+async fn a_start_records_its_channel_for_paseo() {
+    let state: sandbox_fake::Shared = Arc::new(Mutex::new(Default::default()));
+    Registration::new(owner().public_key(), agent().public_key(), launch())
+        .unwrap()
+        .save(sandbox_fake::client(&state), NAMESPACE)
+        .await
+        .unwrap();
+    let name = Registration::name(owner().public_key(), agent().public_key(), RELAY);
+    let annotation = || {
+        state.lock().unwrap().secrets[&name]["metadata"]["annotations"][CHANNEL_ANNOTATION].clone()
+    };
+    assert_eq!(annotation(), Value::Null);
+    let event = mention(vec![]);
+    let start = Start::admit(
+        json!({"agent_pubkey":agent().public_key(),"relay_url":RELAY,"trigger":event}),
+        owner().public_key(),
+        event.created_at.as_secs(),
+    )
+    .unwrap();
+    let client = || sandbox_fake::client(&state);
+    let data = || state.lock().unwrap().secrets[&name]["data"].clone();
+    let before = data();
+    assert!(start.remember_channel(client(), NAMESPACE).await.unwrap());
+    assert_eq!(annotation(), CHANNEL);
+    assert_eq!(data(), before, "only the annotation changes");
+    assert!(
+        !start.remember_channel(client(), NAMESPACE).await.unwrap(),
+        "unchanged"
+    );
+    // The rewritten registration still launches.
+    assert!(start.request(client(), NAMESPACE).await.is_ok());
+
+    // A newer launch's channel is never replaced by an older start that
+    // finishes later.
+    let newer = "1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f";
+    {
+        let mut state = state.lock().unwrap();
+        let annotations = &mut state.secrets.get_mut(&name).unwrap()["metadata"]["annotations"];
+        annotations[CHANNEL_ANNOTATION] = json!(newer);
+        annotations[CHANNEL_AT_ANNOTATION] = json!((start.replay_floor + 60).to_string());
+    }
+    assert!(!start.remember_channel(client(), NAMESPACE).await.unwrap());
+    assert_eq!(annotation(), newer);
+}

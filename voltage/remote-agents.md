@@ -438,39 +438,73 @@ Rebuild and promote the Sandbox agent image containing this slice's authenticate
 Start a new Sandbox from that digest; an older running Sandbox does not acquire the new instruction.
 Use your owner identity for enrollment and gateway grants; never copy its private key into the daemon.
 
-1. Enroll your profile through the existing Buzz app.
-2. Run the pairing command from an interactive terminal with your owner CLI identity:
+You need only the `buzz` CLI and a Paseo app; the Buzz app is optional.
+
+1. Set your owner identity and the community relay, then run setup from an interactive terminal:
 
    ```sh
-   buzz paseo pairing --manager "$MANAGER_PUBKEY"
+   export BUZZ_PRIVATE_KEY=...            # your own Buzz key (nsec or hex); it never leaves this machine
+   export BUZZ_RELAY_URL=https://buzz.voltage.cloud
+   # The staging Sandbox manager (also the Buzz app's MANAGER_PUBKEY, apps/buzz-gpui/
+   # crates/app/src/agent_plugins/remote_workspace/config.rs):
+   export BUZZ_MANAGER_PUBKEY=1881c0c6186c81c00e607f9dcd9b6c655c49cd9a0227054e764a78e6829d31fd
+   buzz paseo setup
    ```
 
-3. Read the returned public pairing offer and `gateway_pubkey`; keep the displayed password private.
-4. Ask a relay operator to admit the gateway public key to the community.
-5. Ask a channel administrator to add it to each required workspace channel and the recording channel.
-6. Grant the gateway with your owner CLI identity:
+   To keep the key out of shell history, run `read -rs BUZZ_PRIVATE_KEY && export BUZZ_PRIVATE_KEY`
+   and paste it.
 
-   ```sh
-   buzz gateway grant "$GATEWAY_PUBKEY" --expires 90d
-   buzz gateway list
-   ```
+2. Answer the prompts. Setup asks only for what is missing, and explains where to get each value:
+   - No stored profile: a GitHub token, Git name and email (prefilled from GitHub and `git config`),
+     a 1Password service account token, and model credentials. Setup creates your agents' signing
+     key and adds it to GitHub with `gh`, waiting at most one minute (or shows the manual steps).
+     If that key never reached GitHub, run `buzz paseo setup --replace-signing-key` for a new one. It enrolls the shared via
+     profile; pass `--via-profile <file>` to enroll another.
+   - A stored profile without a Claude credential: a Claude subscription token, which the Paseo
+     assistant needs. Press Enter to skip.
+   - The first time it creates your daemon: the optional Paseo GitHub read token.
+   - With `--team <snapshot>`: your agent team. Export a team from the Buzz app (a
+     `buzz-team-snapshot` file such as `asgard.team.json`), or run
+     `buzz paseo import-team <snapshot>` on its own later. Each persona becomes a Remote
+     workspace agent with its own key, profile, and listing, joins a private team channel,
+     and starts once there to say hello. After that, a mention launches it in any channel
+     it joins. Use `--model` to choose a model; by default each harness picks. A runtime
+     containing `codex` uses Codex, `buzz-agent` the Buzz agent, and anything else Claude
+     Code. Rerunning resumes: progress and the agent keys are kept in an owner-only file
+     under `~/.config/buzz/paseo-teams/`, and no member gets a second identity. Each agent's
+     welcome message and deploy request ID are saved before they are sent, so a retry after a
+     lost reply reuses them rather than starting a second Sandbox. One import of a team runs at
+     a time; a stale `.lock` file next to the journal names itself in the error. Setup shares
+     the new team channel with your daemon. A `warnings` entry means the agent runs but your
+     daemon's agent list was not refreshed; run `buzz paseo setup --update` and press Enter at
+     each prompt, which enrolls again and rebuilds the list.
+3. Scan the QR code with the Paseo app, or open the printed link. Paseo saves the host but does
+   not ask for the password: open the host's settings, enter the pairing password, and connect.
+   The password appears only on the terminal; `buzz paseo pairing --manager <key>` shows it again.
+4. Confirm that the connection uses `wss://buzz.voltage.cloud/ws`.
+5. From **New workspace**, open **Import session** and choose the remote provider's session.
+6. If an existing workspace filters the list, select **Show all**.
 
-7. Open the pairing offer in your Paseo client and enter the pairing password.
-8. Confirm that the connection uses `wss://buzz.voltage.cloud/ws`.
-9. From **New workspace**, open **Import session** and choose the remote provider's session.
-10. If an existing workspace filters the list, select **Show all**.
+Run `buzz paseo setup` again at least every 90 days: it renews the daemon's grant and shows the
+pairing again without asking anything. To replace credentials, run `buzz paseo setup --update`;
+Enter keeps each stored value. `--update --via-profile <file>` replaces the stored via profile. Credentials go only into the encrypted `enroll` request; setup
+never writes them to disk, JSON output, or logs. Its JSON output contains only public fields.
+`buzz paseo pairing` prints the pairing again without enrolling or granting.
 
-The manager returns pairing data through encrypted `enroll` and `profile` replies.
-The pairing command uses that existing protocol and requires direct owner signing.
-The command requires an interactive terminal and prints the password to terminal stderr.
-Its JSON output contains only public pairing fields.
-The manager never returns the gateway private key in a profile reply.
+Setup also shares your channels with the daemon: it adds the daemon's gateway key to every
+stream and forum channel you are in, open or private. Direct messages, system channels, and
+archived channels are never shared. Keep a channel out with `--exclude <name or UUID>`
+(repeatable; pass it on every run, because setup does not store it, and a value that matches
+none of your channels is an error). Rerun setup after you join channels. Setup never removes
+the daemon from a channel: an excluded channel it already belongs to is listed under
+`channels.excluded_but_present`; use `buzz channels remove-member` for that. A channel that refuses
+the daemon is listed under `channels.failed`, and setup exits nonzero.
 
-Relay and channel administrators use these existing commands:
+Before it can share channels, a relay operator admits the daemon to the community once. Until
+then, setup prints the exact command to send them, then rerun setup:
 
 ```sh
-buzz-admin add-member --pubkey "$GATEWAY_PUBKEY" --role member
-buzz channels add-member --channel "$CHANNEL_ID" --pubkey "$GATEWAY_PUBKEY"
+buzz-admin add-member --pubkey "$GATEWAY_PUBKEY" --role member   # relay operator
 ```
 
 Granting authority and joining channels are separate operations.

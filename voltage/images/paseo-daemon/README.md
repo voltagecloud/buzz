@@ -24,7 +24,7 @@ The daemon does not run the site or expose a sandbox development server.
 The manager stores pairing credentials and the distinct gateway key in `paseo-daemon-<developer>` in namespace `buzz-paseo`.
 The owner's private key never enters the pod.
 The pod has no IAM role, Kubernetes token, or sandbox credentials.
-Grant the gateway with `buzz gateway grant` from the owner's existing CLI.
+The owner runs `buzz paseo setup` to enroll, create the daemon, and grant the gateway.
 Grant and membership are separate: admit the gateway to the workspace and each required channel, including its recording channel.
 A gateway grant conveys no delegated access to the owner's DMs, profile, or administrative privileges.
 See [the enrollment runbook](../../remote-agents.md) for the existing commands and pairing password retrieval.

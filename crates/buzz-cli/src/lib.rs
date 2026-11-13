@@ -260,7 +260,7 @@ pub enum OutputFormat {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Read owner-encrypted Paseo pairing details
+    /// Pair with your Paseo daemon and share your channels with its gateway
     #[command(subcommand)]
     Paseo(commands::paseo::PaseoCmd),
     /// Draft owner-reviewed agent creation and updates
@@ -2722,7 +2722,10 @@ mod tests {
             names(&cmd, "workflows"),
             vec!["approve", "create", "delete", "get", "list", "runs", "trigger", "update"]
         );
-        assert_eq!(names(&cmd, "paseo"), vec!["pairing"]);
+        assert_eq!(
+            names(&cmd, "paseo"),
+            vec!["import-team", "pairing", "setup"]
+        );
         assert_eq!(names(&cmd, "feed"), vec!["get"]);
         assert_eq!(
             names(&cmd, "social"),
@@ -2813,7 +2816,7 @@ mod tests {
             ("media", 1),
             ("messages", 8),
             ("pack", 2),
-            ("paseo", 1),
+            ("paseo", 3),
             ("patches", 4),
             ("pr", 5),
             ("projects", 8),

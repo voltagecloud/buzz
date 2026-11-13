@@ -847,6 +847,8 @@ async fn a_registering_deploy_lists_the_agent_for_the_owners_paseo_daemon() {
     };
     immutable(true);
     sent.request_id = "r-2".into();
+    // A changed label changes the list; an unchanged list is not rewritten.
+    sent.payload["agent"]["launch"]["policy_env"] = json!({"BUZZ_ACP_DISPLAY_NAME": "Brokkr II"});
     let output = tempfile::tempfile().unwrap();
     let mut reader = output.try_clone().unwrap();
     let subscriber = tracing_subscriber::fmt()
@@ -907,7 +909,7 @@ async fn a_registering_deploy_lists_the_agent_for_the_owners_paseo_daemon() {
     let mut expected = before;
     expected.insert(
         "BUZZ_PASEO_AGENTS".into(),
-        json!([{"id": "brokkr", "label": "Brokkr", "agent": agent().public_key().to_hex(),
+        json!([{"id": "brokkr-ii", "label": "Brokkr II", "agent": agent().public_key().to_hex(),
             "channel": "0b6c1f0e-2a7d-4c1e-9f3a-5d2b8e4c7a10"}])
         .to_string(),
     );

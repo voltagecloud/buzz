@@ -46,7 +46,7 @@ Use `buzz` in the shell. Put `--format` before the subcommand.
 
 Keep returned event IDs for thread links and later reads.
 If an agent requests credentials, ask the developer; do not supply your own.
-If gateway authorization fails, ask the owner to run `buzz gateway grant`.
+If gateway authorization fails, ask the owner to run `buzz paseo setup`.
 Relay membership and channel membership remain separate prerequisites.
 Never request the owner's private key.
 
