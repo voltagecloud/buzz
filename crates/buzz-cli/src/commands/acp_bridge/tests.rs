@@ -543,6 +543,15 @@ async fn acp_session_drives_a_remote_agent_through_the_relay() {
             observer("acp_read", Some(channel), Some("t1"), acp_update(json!({
                 "sessionUpdate": "available_commands_update", "availableCommands": [],
             }))),
+            // Context usage: forwarded with only its known fields.
+            observer("acp_read", Some(channel), Some("t1"), acp_update(json!({
+                "sessionUpdate": "usage_update", "size": 200_000, "used": 1_234,
+                "cost": {"amount": 0.25, "currency": "USD", "note": "x"}, "_meta": {"leak": true},
+            }))),
+            // Without a context window size the meter cannot use it: dropped.
+            observer("acp_read", Some(channel), Some("t1"), acp_update(json!({
+                "sessionUpdate": "usage_update", "size": 0, "used": 5,
+            }))),
         ]}),
     )))
     .await;
@@ -577,7 +586,10 @@ async fn acp_session_drives_a_remote_agent_through_the_relay() {
         "acp_read",
         Some(channel),
         Some("t1"),
-        json!({"jsonrpc": "2.0", "id": 7, "result": {"stopReason": "max_tokens"}}),
+        json!({"jsonrpc": "2.0", "id": 7, "result": {"stopReason": "max_tokens", "usage": {
+            "inputTokens": 900, "outputTokens": 100, "totalTokens": 1_000,
+            "cachedReadTokens": 300, "thoughtTokens": -1, "secret": 7,
+        }}}),
     )))
     .await;
     h.inject(ids.telemetry(&observer(
@@ -590,6 +602,22 @@ async fn acp_session_drives_a_remote_agent_through_the_relay() {
 
     let (done, notes) = h.client.response(3).await;
     assert_eq!(done["result"]["stopReason"], "max_tokens");
+    assert_eq!(
+        done["result"]["usage"],
+        json!({"inputTokens": 900, "outputTokens": 100, "totalTokens": 1_000, "cachedReadTokens": 300})
+    );
+    let usage: Vec<&Value> = notes
+        .iter()
+        .map(|n| &n["params"]["update"])
+        .filter(|u| u["sessionUpdate"] == "usage_update")
+        .collect();
+    assert_eq!(
+        usage,
+        vec![&json!({
+            "sessionUpdate": "usage_update", "size": 200_000, "used": 1_234,
+            "cost": {"amount": 0.25, "currency": "USD"},
+        })]
+    );
     assert!(notes
         .iter()
         .all(|n| n["method"] == "session/update" && n["params"]["sessionId"] == session));
@@ -600,7 +628,12 @@ async fn acp_session_drives_a_remote_agent_through_the_relay() {
         .collect();
     assert_eq!(
         kinds,
-        vec!["agent_message_chunk", "tool_call", "agent_message_chunk"]
+        vec![
+            "agent_message_chunk",
+            "tool_call",
+            "usage_update",
+            "agent_message_chunk"
+        ]
     );
 
     // Turn 2: a reply in the same thread, then a cancel.
@@ -664,6 +697,8 @@ async fn acp_session_drives_a_remote_agent_through_the_relay() {
     .await;
     let (done, notes) = h.client.response(4).await;
     assert_eq!(done["result"]["stopReason"], "cancelled");
+    // Turn 1's usage belongs to turn 1; this turn reported none.
+    assert!(done["result"].get("usage").is_none());
     assert_eq!(texts(&notes), vec!["partial answer"]);
 
     // Turn 3 without telemetry: a teammate's message is attributed, and the
@@ -1509,8 +1544,162 @@ fn observer_events_map_to_bridge_signals() {
             Signal::StopReason {
                 turn_id: "t".into(),
                 reason: "refusal".into(),
+                usage: None,
             },
         ),
+        (
+            event(
+                "acp_read",
+                Some("t"),
+                json!({"id": 3, "result": {"stopReason": "end_turn", "usage": {
+                    "inputTokens": 1, "outputTokens": 2, "totalTokens": 3, "thoughtTokens": 4,
+                    "cachedReadTokens": 5, "cachedWriteTokens": 6,
+                }}}),
+            ),
+            Signal::StopReason {
+                turn_id: "t".into(),
+                reason: "end_turn".into(),
+                usage: Some(json!({
+                    "inputTokens": 1, "outputTokens": 2, "totalTokens": 3, "thoughtTokens": 4,
+                    "cachedReadTokens": 5, "cachedWriteTokens": 6,
+                })),
+            },
+        ),
+        (
+            // An optional count that is not a non-negative integer is dropped.
+            event(
+                "acp_read",
+                Some("t"),
+                json!({"id": 3, "result": {"stopReason": "end_turn", "usage": {
+                    "inputTokens": 1, "outputTokens": 2, "totalTokens": 3,
+                    "thoughtTokens": 1.5, "cachedReadTokens": "5", "cachedWriteTokens": -6,
+                }}}),
+            ),
+            Signal::StopReason {
+                turn_id: "t".into(),
+                reason: "end_turn".into(),
+                usage: Some(json!({"inputTokens": 1, "outputTokens": 2, "totalTokens": 3})),
+            },
+        ),
+        (
+            // A missing or invalid required count drops the whole usage.
+            event(
+                "acp_read",
+                Some("t"),
+                json!({"id": 3, "result": {"stopReason": "end_turn", "usage": {
+                    "inputTokens": 1, "outputTokens": -2, "totalTokens": 3,
+                }}}),
+            ),
+            Signal::StopReason {
+                turn_id: "t".into(),
+                reason: "end_turn".into(),
+                usage: None,
+            },
+        ),
+        (
+            event(
+                "acp_read",
+                Some("t"),
+                json!({"id": 3, "result": {"stopReason": "end_turn", "usage": {
+                    "inputTokens": 1, "totalTokens": 3,
+                }}}),
+            ),
+            Signal::StopReason {
+                turn_id: "t".into(),
+                reason: "end_turn".into(),
+                usage: None,
+            },
+        ),
+        (
+            event(
+                "acp_read",
+                Some("t"),
+                json!({"id": 3, "result": {"stopReason": "end_turn", "usage": "lots"}}),
+            ),
+            Signal::StopReason {
+                turn_id: "t".into(),
+                reason: "end_turn".into(),
+                usage: None,
+            },
+        ),
+        (
+            event(
+                "acp_read",
+                Some("t"),
+                acp_update(json!({"sessionUpdate": "usage_update", "size": 10, "used": 0})),
+            ),
+            Signal::Update {
+                turn_id: "t".into(),
+                update: json!({"sessionUpdate": "usage_update", "size": 10, "used": 0}),
+            },
+        ),
+        (
+            // A cost without a usable amount or currency is dropped.
+            event(
+                "acp_read",
+                Some("t"),
+                acp_update(json!({
+                    "sessionUpdate": "usage_update", "size": 10, "used": 4,
+                    "cost": {"amount": "1", "currency": "USD"},
+                })),
+            ),
+            Signal::Update {
+                turn_id: "t".into(),
+                update: json!({"sessionUpdate": "usage_update", "size": 10, "used": 4}),
+            },
+        ),
+        (
+            event(
+                "acp_read",
+                Some("t"),
+                acp_update(json!({
+                    "sessionUpdate": "usage_update", "size": 10, "used": 4,
+                    "cost": {"amount": 1, "currency": "X".repeat(17)},
+                })),
+            ),
+            Signal::Update {
+                turn_id: "t".into(),
+                update: json!({"sessionUpdate": "usage_update", "size": 10, "used": 4}),
+            },
+        ),
+        (
+            event(
+                "acp_read",
+                Some("t"),
+                acp_update(json!({
+                    "sessionUpdate": "usage_update", "size": 10, "used": 4, "cost": {"amount": -0.5},
+                })),
+            ),
+            Signal::Update {
+                turn_id: "t".into(),
+                update: json!({"sessionUpdate": "usage_update", "size": 10, "used": 4}),
+            },
+        ),
+    ];
+    for (index, (got, want)) in cases.into_iter().enumerate() {
+        assert_eq!(got, want, "case {index}");
+    }
+    // A usage_update whose size or used is not a usable token count is dropped.
+    for (size, used) in [
+        (json!(0), json!(1)),
+        (json!(-1), json!(1)),
+        (json!(1.5), json!(1)),
+        (json!("10"), json!(1)),
+        (Value::Null, json!(1)),
+        (json!(10), json!(-1)),
+        (json!(10), json!(0.5)),
+        (json!(10), json!("1")),
+        (json!(10), Value::Null),
+    ] {
+        let update =
+            acp_update(json!({"sessionUpdate": "usage_update", "size": size, "used": used}));
+        assert_eq!(
+            event("acp_read", Some("t"), update),
+            Signal::Ignored,
+            "size {size}, used {used}"
+        );
+    }
+    let cases = [
         (
             event(
                 "acp_read",

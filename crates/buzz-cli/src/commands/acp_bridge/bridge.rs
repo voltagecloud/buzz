@@ -208,6 +208,8 @@ struct PendingPrompt {
     /// The remote turn whose triggering events include this prompt.
     turn_id: Option<String>,
     stop_reason: Option<String>,
+    /// The remote prompt response's validated ACP `Usage`, if it reported one.
+    usage: Option<Value>,
     cancel: Option<CancelState>,
     fallback_deadline: Option<Instant>,
     silence_deadline: Option<Instant>,
@@ -695,6 +697,7 @@ impl<R: BridgeRelay> Bridge<R> {
             is_root: false,
             turn_id: None,
             stop_reason: None,
+            usage: None,
             cancel: None,
             fallback_deadline: None,
             silence_deadline: None,
@@ -1114,9 +1117,14 @@ impl<R: BridgeRelay> Bridge<R> {
                 self.touch_turn(&turn_id, true);
                 Ok(())
             }
-            Signal::StopReason { turn_id, reason } => {
+            Signal::StopReason {
+                turn_id,
+                reason,
+                usage,
+            } => {
                 if let Some(pending) = self.touch_turn(&turn_id, false) {
                     pending.stop_reason = Some(reason);
+                    pending.usage = usage;
                 }
                 Ok(())
             }
@@ -1409,7 +1417,8 @@ impl<R: BridgeRelay> Bridge<R> {
         Ok(())
     }
 
-    /// Answer the pending prompt with `stop_reason`.
+    /// Answer the pending prompt with `stop_reason` and, when the remote turn
+    /// reported one, its token `usage`.
     async fn finish(&mut self, session_id: &str, stop_reason: &str) -> Result<(), CliError> {
         self.stop_preparation(session_id);
         self.flush_deferred(session_id).await?;
@@ -1420,11 +1429,11 @@ impl<R: BridgeRelay> Bridge<R> {
         else {
             return Ok(());
         };
-        self.send(wire::ok(
-            pending.request_id,
-            json!({ "stopReason": stop_reason }),
-        ))
-        .await
+        let mut result = json!({ "stopReason": stop_reason });
+        if let Some(usage) = pending.usage {
+            result["usage"] = usage;
+        }
+        self.send(wire::ok(pending.request_id, result)).await
     }
 
     /// Stop the pending prompt's preparation before any output is awaited: a

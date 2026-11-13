@@ -26,6 +26,7 @@ const MAX_BATCH_EVENTS: usize = 1024;
 /// `session/update` kinds forwarded to the ACP client. The remote adapter's
 /// prompt echo (`user_message_chunk`, which includes harness framing) and its
 /// commands and modes (not usable through the bridge) are not forwarded.
+/// `usage_update` is forwarded separately, after [`usage_update`] rebuilds it.
 const FORWARDED_UPDATES: &[&str] = &[
     "agent_message_chunk",
     "agent_thought_chunk",
@@ -33,6 +34,20 @@ const FORWARDED_UPDATES: &[&str] = &[
     "tool_call_update",
     "plan",
 ];
+
+/// ACP `Usage` token counts the bridge passes through from the remote
+/// adapter's prompt response: (field, required by the ACP schema).
+const USAGE_FIELDS: &[(&str, bool)] = &[
+    ("inputTokens", true),
+    ("outputTokens", true),
+    ("totalTokens", true),
+    ("thoughtTokens", false),
+    ("cachedReadTokens", false),
+    ("cachedWriteTokens", false),
+];
+
+/// Longest `usage_update.cost.currency` passed through (ISO 4217 codes are 3).
+const MAX_CURRENCY_LEN: usize = 16;
 
 /// ACP stop reasons passed through from the remote adapter's prompt response.
 const STOP_REASONS: &[&str] = &[
@@ -159,8 +174,13 @@ pub(crate) enum Signal {
     Liveness { turn_id: String },
     /// A `session/update` to forward to the ACP client.
     Update { turn_id: String, update: Value },
-    /// The remote adapter answered its `session/prompt` with this stop reason.
-    StopReason { turn_id: String, reason: String },
+    /// The remote adapter answered its `session/prompt` with this stop reason
+    /// and, when it reported valid token counts, this ACP `Usage`.
+    StopReason {
+        turn_id: String,
+        reason: String,
+        usage: Option<Value>,
+    },
     /// The harness's answer to a `cancel_turn` control frame.
     CancelResult { request_id: String, status: String },
     /// Anything the bridge does not act on.
@@ -215,27 +235,72 @@ fn acp_read_signal(turn_id: String, mut message: Value) -> Signal {
             .and_then(|params| params.get_mut("update"))
             .map(Value::take)
             .unwrap_or_default();
-        let forwarded = update
-            .get("sessionUpdate")
-            .and_then(Value::as_str)
-            .is_some_and(|kind| FORWARDED_UPDATES.contains(&kind));
-        return if forwarded {
-            Signal::Update { turn_id, update }
-        } else {
-            Signal::Ignored
+        let update = match update.get("sessionUpdate").and_then(Value::as_str) {
+            Some("usage_update") => usage_update(&update),
+            Some(kind) if FORWARDED_UPDATES.contains(&kind) => Some(update),
+            _ => None,
+        };
+        return match update {
+            Some(update) => Signal::Update { turn_id, update },
+            None => Signal::Ignored,
         };
     }
-    match message
-        .get("result")
-        .and_then(|result| result.get("stopReason"))
-        .and_then(Value::as_str)
-    {
+    let Some(result) = message.get("result") else {
+        return Signal::Ignored;
+    };
+    match result.get("stopReason").and_then(Value::as_str) {
         Some(reason) if STOP_REASONS.contains(&reason) => Signal::StopReason {
             turn_id,
             reason: reason.to_owned(),
+            usage: result.get("usage").and_then(prompt_usage),
         },
         _ => Signal::Ignored,
     }
+}
+
+/// A token count: a JSON integer in `0..=u64::MAX`.
+fn token_count(value: Option<&Value>) -> Option<u64> {
+    value.and_then(Value::as_u64)
+}
+
+/// Rebuild a `usage_update` from its validated fields: `size` (the context
+/// window, > 0) and `used` (tokens in context), plus `cost` when it has a
+/// finite `amount` and a short `currency`. Any other field is dropped, and the
+/// update is dropped when `size` or `used` is invalid.
+fn usage_update(update: &Value) -> Option<Value> {
+    let size = token_count(update.get("size")).filter(|size| *size > 0)?;
+    let used = token_count(update.get("used"))?;
+    let mut rebuilt = json!({"sessionUpdate": "usage_update", "size": size, "used": used});
+    let cost = update.get("cost");
+    let amount = cost
+        .and_then(|cost| cost.get("amount"))
+        .and_then(Value::as_f64)
+        .filter(|amount| amount.is_finite());
+    let currency = cost
+        .and_then(|cost| cost.get("currency"))
+        .and_then(Value::as_str)
+        .filter(|currency| !currency.is_empty() && currency.len() <= MAX_CURRENCY_LEN);
+    if let (Some(amount), Some(currency)) = (amount, currency) {
+        rebuilt["cost"] = json!({"amount": amount, "currency": currency});
+    }
+    Some(rebuilt)
+}
+
+/// Rebuild a prompt response's ACP `Usage` from its known token counts.
+/// `None` when a count the ACP schema requires is missing or invalid, so the
+/// client never sees a partial or zero-filled `Usage`.
+fn prompt_usage(usage: &Value) -> Option<Value> {
+    let mut rebuilt = serde_json::Map::new();
+    for &(field, required) in USAGE_FIELDS {
+        match token_count(usage.get(field)) {
+            Some(count) => {
+                rebuilt.insert(field.to_owned(), count.into());
+            }
+            None if required => return None,
+            None => {}
+        }
+    }
+    Some(Value::Object(rebuilt))
 }
 
 /// Build a signed `cancel_turn` control frame for the agent's turn in
