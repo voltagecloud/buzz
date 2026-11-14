@@ -9,7 +9,7 @@ Codex stays disabled pending its shell and credential review.
 flowchart LR
   Client[Paseo client] <-->|WSS encrypted frames| Relay[Paseo relay /ws]
   Relay <--> Daemon[Personal daemon: Claude and code reads]
-  GitHub[Selected GitHub repositories] -->|read-only partial clone and fetch| Daemon
+  GitHub[Token-permitted GitHub repositories] -->|read-only partial clone and fetch| Daemon
   Daemon <-->|WSS signed messages| Buzz[Buzz relay]
   Buzz <--> Sandbox[Sandbox: writes, builds, tests and pushes]
 ```
@@ -37,16 +37,19 @@ Without `BUZZ_PASEO_OWNER`, the plugin is disabled.
 
 See [the enrollment runbook](../../remote-agents.md) for the existing commands and pairing password retrieval.
 
-For code reads, the developer supplies a fine-grained GitHub token with `contents: read` and `pull_requests: read` on selected repositories only.
+For code reads, supply a fine-grained GitHub token with `contents: read` and `pull_requests: read`, with no write permissions.
+It must cover the same repository set the Buzz agents can read.
+Provision a separate token; never reuse the agents' existing write-capable token.
 Secret data `github_read_token` maps explicitly to `GITHUB_READ_TOKEN` through Terraform's `secretKeyRef`.
 The manager preserves this field; it never copies the sandbox profile's broader GitHub credential.
 Configure `GITHUB_READ_TOKEN_REPOSITORIES` separately as a JSON array of repository names, such as `["your-org/private-repo"]`.
-The list is nonsecret per-developer configuration, not a token field or a hardcoded image allowlist.
+This nonsecret list is a startup prefetch manifest: these repos get cloned and registered as projects.
+Everything else the token permits is still readable on demand; the manifest is not an access gate.
 It permits at most 64 unique `owner/repository` entries and 16,384 encoded bytes.
 Names match case-insensitively; URLs, traversal, and extra path segments are refused.
-The credential helper requires HTTPS `github.com` and an exact configured repository path; Git passes paths through `credential.useHttpPath=true`.
-Missing or empty configuration sends no credentials.
-Public repositories outside the configured token scope clone and fetch anonymously, even when a token is present.
+The credential helper requires HTTPS `github.com` and a canonical `owner/repository` path; Git passes paths through `credential.useHttpPath=true`.
+A missing or empty manifest does not restrict credential delivery.
+Without a token, an empty manifest permits anonymous public clone/fetch; a non-empty manifest refuses startup.
 Private repositories still require a valid token with matching GitHub permissions.
 The wrapper refuses broad `gho_` or classic `ghp_` tokens.
 Token syntax cannot prove its permissions: the developer must verify the repository and read-only scopes in GitHub.
@@ -74,7 +77,8 @@ Clone materializes the initial checkout; Git fetches file contents on demand.
 Checkouts live under `$HOME/code/<owner>/<repository>` and disappear with the pod.
 Open this directory in Paseo's file and diff views.
 
-At startup, `paseo-workspaces` clones each `GITHUB_READ_TOKEN_REPOSITORIES` entry once and registers it with `paseo project create`.
+At startup, `paseo-workspaces` clones each `GITHUB_READ_TOKEN_REPOSITORIES` manifest entry once and registers it with `paseo project create`.
+Repositories outside this startup prefetch manifest remain readable on demand when the token permits them.
 Paired apps then list those repositories as projects with file trees, with no manual step.
 It runs in the background after the daemon answers `paseo project ls`, polling at most 60 times.
 It never clones an existing checkout again or registers a project twice.
@@ -87,14 +91,14 @@ Fetch without a branch refreshes remote refs without changing the checkout.
 View fetches one branch and puts it in a detached worktree at `$HOME/code/<owner>/<repository>@<branch>`, beside the checkout.
 It clones the repository first when needed and never moves the main checkout.
 A later view of the same branch moves the existing worktree to the fetched head and discards changes to tracked files there.
-View accepts only `GITHUB_READ_TOKEN_REPOSITORIES` entries and refuses a branch whose view would nest inside another view.
+View accepts repositories outside the startup prefetch manifest and refuses a branch whose view would nest inside another view.
 The PA runs clone, fetch, diff, and show without approval.
 `view` is not on the PA's allowlist, so the PA must get the developer's approval for each `paseo-code view`; the bridge, a provider process, is its intended caller.
 The bridge passes `--inherit-process-group` so Git stays inside its bounded process group.
 Deploy this helper before the file-view bridge; older helpers reject that flag before starting Git.
 Claude's Read, Glob, and Grep tools remain available; Write and Edit tools are disabled.
 The helper has only clone, fetch, diff, show, and view operations.
-The credential helper sends credentials only to configured HTTPS `github.com` repository paths, outside argv, URLs, and repository config.
+The credential helper sends credentials only to canonical HTTPS `github.com` repository paths, outside argv, URLs, and repository config.
 Git hooks, submodule recursion, automatic maintenance, and non-HTTPS transports are disabled by generated configuration.
 Git operations have a three-minute process-group deadline.
 
@@ -132,8 +136,8 @@ No parked feature is required.
 | `BUZZ_PASEO_OWNER` | Owner public key; required with remote providers. Missing disables relay memory. |
 | `BUZZ_PASEO_AGENTS` | Optional JSON array above. Missing or `[]` enables no remote providers. |
 | `CLAUDE_CODE_OAUTH_TOKEN` | Optional Claude credential. Missing starts without a native assistant. |
-| `GITHUB_READ_TOKEN` | Optional fine-grained `github_pat_...` credential. Missing still permits anonymous public clone/fetch. |
-| `GITHUB_READ_TOKEN_REPOSITORIES` | Nonsecret JSON list of token-scoped `owner/repository` paths; default `[]`, at most 64 entries and 16,384 bytes. |
+| `GITHUB_READ_TOKEN` | Optional fine-grained `github_pat_...` credential. Missing permits anonymous public clone/fetch with an empty manifest; a non-empty manifest fails startup. |
+| `GITHUB_READ_TOKEN_REPOSITORIES` | Nonsecret startup prefetch manifest of `owner/repository` paths cloned and registered as projects; default `[]`, at most 64 entries and 16,384 bytes. Other token-permitted repos remain readable on demand. |
 | `BUZZ_RELAY_URL` | Default `wss://buzz.voltage.cloud`; WSS only. |
 | `PASEO_RELAY_ENDPOINT` | Default `buzz.voltage.cloud:443`, without a scheme or path. |
 | `PASEO_RELAY_PUBLIC_ENDPOINT` | Defaults to the relay endpoint and appears in pairing offers. |
@@ -209,7 +213,7 @@ Visual client interaction remains part of the human acceptance test.
 | Assistant memory (rules, preferences, lessons) | NIP-AE engrams on the Buzz relay, written by the gateway key for the owner | New assistant session reads `core` and follows its `[[mem/…]]` links. |
 | Unsent transcript intents and dead letters | Pod-local `$PASEO_HOME/buzz-recording` | Lost on pod replacement. |
 | Native Claude sessions | Pod-local home | Start a new native assistant session. No v1 restore. |
-| Paseo's agent list and project registry | Pod-local `$PASEO_HOME` | Rebuilt at startup: token repositories and `~/buzz` as projects, restored remote-agent conversations as agents. |
+| Paseo's agent list and project registry | Pod-local `$PASEO_HOME` | Rebuilt at startup: prefetch manifest repositories and `~/buzz` as projects, restored remote-agent conversations as agents. |
 | Branch views | Pod-local `$HOME/code/<owner>/<repository>@<branch>` | `paseo-code view` again on demand. |
 | Git checkout | Pod-local `$HOME/code` | Partial clone again on demand. |
 | Paseo config and instructions | Generated from env and this image | Regenerate at startup. |

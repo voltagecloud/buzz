@@ -94,6 +94,7 @@ refuses "BUZZ_PASEO_RECORD_CHANNEL must be a UUID" -e BUZZ_PASEO_RECORD_CHANNEL=
 refuses "set both BUZZ_MANAGER_PUBKEY and BUZZ_MANAGER_CHANNEL" -e BUZZ_MANAGER_CHANNEL=
 refuses "invalid GITHUB_READ_TOKEN_REPOSITORIES" -e GITHUB_READ_TOKEN_REPOSITORIES='["fixture/private","Fixture/Private"]'
 refuses "invalid GITHUB_READ_TOKEN_REPOSITORIES" -e GITHUB_READ_TOKEN_REPOSITORIES='["fixture/../private"]'
+refuses "GITHUB_READ_TOKEN_REPOSITORIES lists repositories but GITHUB_READ_TOKEN is absent" -e GITHUB_READ_TOKEN=
 
 wait_running() {
   local name="$1" status=""
@@ -107,8 +108,9 @@ wait_running() {
   printf '%s' "$status"
 }
 
+# An empty prefetch manifest and no GitHub token retain anonymous startup.
 # Without the model token, the daemon offers only the Buzz remote providers.
-docker run -d --name "$NAME-pa-off" "${HARDENED[@]}" "${BASE_ENV[@]}" "$IMAGE" >/dev/null
+docker run -d --name "$NAME-pa-off" "${HARDENED[@]}" "${BASE_ENV[@]}" -e GITHUB_READ_TOKEN= -e GITHUB_READ_TOKEN_REPOSITORIES='[]' "$IMAGE" >/dev/null
 status=$(wait_running "$NAME-pa-off")
 [ "$(jq -c '[.providers[].provider]' <<<"$status")" = '["brokkr"]' ] || fail "providers without the token: $status"
 docker rm -f "$NAME-pa-off" >/dev/null

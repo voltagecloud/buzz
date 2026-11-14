@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Clone each repository the daemon's Git read token covers and register it
+// Clone each repository in the startup prefetch manifest and register it
 // as a Paseo project, so a paired app shows file trees without manual setup.
 // First it registers ~/buzz, the home of restored conversations that have no
 // project, so the restore (which waits for it) does not wait for clones.
