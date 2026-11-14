@@ -84,6 +84,7 @@ voltage/
 # runtime pins. The other files in voltage/images/paseo-daemon (tests, docs)
 # stay out of the context.
 !voltage/images/paseo-daemon/entrypoint.sh
+!voltage/images/paseo-daemon/via.sh
 !voltage/images/paseo-daemon/assistant.md
 !voltage/images/paseo-daemon/code.mjs
 !voltage/images/paseo-daemon/workspaces.mjs
