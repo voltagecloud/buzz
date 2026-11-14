@@ -1,0 +1,17 @@
+name: Engineering daily digest
+description: Owner-approved weekday prompt for the opt-in engineering digest.
+enabled: false
+trigger:
+  on: schedule
+  cron: '0 9 * * 1-5'
+steps:
+  - id: request_digest
+    action: send_message
+    channel: b25e2e33-fcbe-4db7-a726-9a6f7eb4df67
+    text: >-
+      @Engineering Digest Assemble the engineering daily digest using your
+      approved digest policy. Group by opted-in developer, with one line per
+      active thread and a source link. Use the previous weekday 09:00 UTC
+      boundary through this scheduled weekday 09:00 UTC boundary. Post the
+      digest as a top-level message in this engineering channel. Report
+      incomplete coverage honestly. Do not change workflows or consent.
