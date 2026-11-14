@@ -132,7 +132,7 @@ No parked feature is required.
 | `BUZZ_PASEO_OWNER` | Owner public key; required with remote providers. Missing disables relay memory. |
 | `BUZZ_PASEO_AGENTS` | Optional JSON array above. Missing or `[]` enables no remote providers. |
 | `CLAUDE_CODE_OAUTH_TOKEN` | Optional Claude credential. Missing starts without a native assistant. |
-| `GITHUB_READ_TOKEN` | Optional fine-grained `github_pat_...` credential. Missing still permits anonymous public clone/fetch. |
+| `GITHUB_READ_TOKEN` | Fine-grained `github_pat_...` credential. Missing with a non-empty `GITHUB_READ_TOKEN_REPOSITORIES` list fails startup. Missing with empty scope permits anonymous public clone/fetch. |
 | `GITHUB_READ_TOKEN_REPOSITORIES` | Nonsecret JSON list of token-scoped `owner/repository` paths; default `[]`, at most 64 entries and 16,384 bytes. |
 | `BUZZ_RELAY_URL` | Default `wss://buzz.voltage.cloud`; WSS only. |
 | `PASEO_RELAY_ENDPOINT` | Default `buzz.voltage.cloud:443`, without a scheme or path. |
