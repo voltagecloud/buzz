@@ -139,6 +139,8 @@ RUN ln -s /usr/local/bin/buzz-heavy /usr/local/bin/buzz-agent-gate \
     done
 # /opt/buzz-heavy/bin gates compiling cargo and go commands through buzz-heavy.
 ENV HOME=/home/agent PATH=/opt/buzz-heavy/bin:/opt/buzz-runtimes/node_modules/.bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
+# Use the pinned CLI rather than the Claude adapter SDK bundled executable.
+ENV CLAUDE_CODE_EXECUTABLE=/opt/buzz-runtimes/node_modules/@anthropic-ai/claude-code/bin/claude.exe
 WORKDIR /home/agent
 USER 10001:10001
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/sprig-entrypoint"]

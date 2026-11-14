@@ -12,8 +12,9 @@ docker run --rm --entrypoint /bin/bash "$IMAGE" -ceu '
     command -v "$binary" >/dev/null
   done
   buzz-subagent review --help >/dev/null
-  codex --version
-  claude --version
+  test "$(codex --version)" = "codex-cli 0.169.0"
+  test "$(claude --version)" = "2.1.325 (Claude Code)"
+  test "$("$CLAUDE_CODE_EXECUTABLE" --version)" = "$(claude --version)"
   kubectl version --client
   gh stack --help >/dev/null
   codex login --help | grep -q -- --device-auth

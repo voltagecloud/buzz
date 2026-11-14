@@ -93,3 +93,7 @@ voltage/
 
 !voltage/images/paseo-daemon/recorder/**
 !voltage/images/paseo-daemon/profile/**
+
+# Shared, integrity-locked Claude Code runtime.
+!voltage/images/buzz-agent/package.json
+!voltage/images/buzz-agent/package-lock.json

@@ -24,20 +24,22 @@ RUN cargo build --locked --release -p buzz-cli --bin buzz \
     && install -D -m 0755 -s target/release/buzz /out/buzz \
     && rm -rf target
 
+# Use the same integrity-locked Claude Code release as the developer image.
+# Copy only the native executable into the manager; no package tools or adapters.
+FROM node:22-trixie-slim@sha256:154ba2f4d6fec323d28e4f4bb86bba4677f1223391a1979cf521304e03a98dfa AS claude-runtime
+WORKDIR /opt/buzz-runtimes
+COPY voltage/images/buzz-agent/package.json voltage/images/buzz-agent/package-lock.json ./
+RUN npm ci --omit=dev --no-audit --no-fund \
+    && install -D -m 0755 node_modules/@anthropic-ai/claude-code/bin/claude.exe /out/claude
+
 # ghcr.io/getpaseo/paseo:0.15.3 (linux/amd64 and linux/arm64)
 FROM ghcr.io/getpaseo/paseo@sha256:57048c43a2c2988434273c7f8a4b25aa585bca6c1720493ae52e2fa91497b99a
 LABEL maintainer="Voltage <hello@voltage.cloud>"
 USER root
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-# The Claude Code CLI is the binary that the daemon's Claude Agent SDK bundles
-# for this platform (Claude Code 2.1.246 with SDK 0.3.246 in Paseo 0.15.3), so
-# the base digest pins it and it matches the SDK. Paseo's claude provider
-# runs `claude` from PATH.
-RUN shopt -s nullglob \
-    && binaries=(/usr/local/lib/node_modules/@getpaseo/server/node_modules/@anthropic-ai/claude-agent-sdk-linux-*/claude) \
-    && if [ "${#binaries[@]}" -ne 1 ]; then echo "expected one bundled Claude Code binary, found: ${binaries[*]}" >&2; exit 1; fi \
-    && ln -s "${binaries[0]}" /usr/local/bin/claude \
-    && HOME=/tmp claude --version | grep -qx '2.1.246 (Claude Code)'
+# Paseo's Claude provider resolves the executable from PATH.
+COPY --from=claude-runtime /out/claude /usr/local/bin/claude
+RUN HOME=/tmp claude --version | grep -qx '2.1.325 (Claude Code)'
 # The runtime carries no package managers, compilers, build/test tools, or
 # scanners. Node is the upstream daemon runtime, not an installation surface.
 RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
