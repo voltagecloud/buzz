@@ -34,6 +34,8 @@ try {
     assert.equal(viewed.status, 0, viewed.stderr);
     return (await readFile(env.GIT_ARGS_TEST, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
   };
+  // This repository is absent from the startup prefetch manifest.
+  await viewArgs(["voltagecloud/buzz", "main"]);
   const backend = path.join(directory, "code", "voltagecloud", "backend");
   const branchRef = "refs/remotes/origin/review/branch";
   let viewed = await viewArgs(["VoltageCloud/Backend", "review/branch"]);
@@ -57,21 +59,24 @@ try {
     delete env.GIT_GROUP_TEST;
   }
   await mkdir(`${backend}@plain`);
-  for (const args of [["voltagecloud/buzz", "main"], ["voltagecloud/backend"], ["voltagecloud/backend", "a", "b"], ["voltagecloud/backend", "-x"],
+  for (const args of [["voltagecloud/backend"], ["voltagecloud/backend", "a", "b"], ["voltagecloud/backend", "-x"],
     ["voltagecloud/backend", "a@{1}"], ["voltagecloud/backend", "review/branch/deeper"], ["voltagecloud/backend", "plain"]]) {
     assert.equal(run(["view", ...args]).status, 1, `view ${args.join(" ")} must be refused`);
   }
   assert.equal(run(["scope"]).stdout, '["voltagecloud/backend","fixture/private.git"]');
   result = run(["credential", "get"], "protocol=https\nhost=github.com\npath=VOLTAGECLOUD/backend.git\n\n");
   assert.equal(result.stdout, `username=x-access-token\npassword=${token}\n\n`);
-  for (const scoped of ["voltagecloud/backend", "VOLTAGECLOUD/BACKEND.GIT", "fixture/private.git.git"]) assert.match(run(["credential", "get"], `protocol=https\nhost=github.com\npath=${scoped}\n\n`).stdout, /password=/);
+  for (const scoped of ["voltagecloud/backend", "VOLTAGECLOUD/BACKEND.GIT", "fixture/private.git.git", "lightningnetwork/lnd.git", "voltagecloud/backend-other.git"]) assert.match(run(["credential", "get"], `protocol=https\nhost=github.com\npath=${scoped}\n\n`).stdout, /password=/);
   for (const [protocol, host, requested] of [["https", "evil.test", "voltagecloud/backend.git"], ["http", "github.com", "voltagecloud/backend.git"],
-    ["https", "github.com:443", "voltagecloud/backend.git"], ["https", "github.com", "lightningnetwork/lnd.git"], ["https", "github.com", "voltagecloud/backend-other.git"],
+    ["https", "github.com:443", "voltagecloud/backend.git"],
     ["https", "github.com", "voltagecloud/backend.git/extra"], ["https", "github.com", "voltagecloud/../backend.git"], ["https", "github.com", "voltagecloud%2fbackend.git"],
     ["https", "github.com", "voltagecloud/backend.git "], ["https", "github.com", "/voltagecloud/backend.git"], ["https", "github.com", ""]]) {
     assert.equal(run(["credential", "get"], `protocol=${protocol}\nhost=${host}\npath=${requested}\n\n`).stdout, "");
   }
   assert.equal(run(["credential", "get"], "protocol=https\nhost=evil.test\nhost=github.com\npath=voltagecloud/backend.git\n\n").stdout, "");
+  result = run(["credential", "get"], "x=" + "a".repeat(4096));
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, "");
   for (const invalid of ['{}', '["voltagecloud/backend","VoltageCloud/Backend"]', '["../backend"]', '["fixture/private..repo"]',
     '["https://github.com/voltagecloud/backend"]', JSON.stringify(Array.from({ length: 65 }, (_, index) => `fixture/private${index}`)), " ".repeat(16385) + "[]"]) {
     env.GITHUB_READ_TOKEN_REPOSITORIES = invalid;
@@ -79,7 +84,7 @@ try {
     assert.equal(run(["credential", "get"], "protocol=https\nhost=github.com\npath=voltagecloud/backend.git\n\n").stdout, "");
   }
   delete env.GITHUB_READ_TOKEN_REPOSITORIES;
-  assert.equal(run(["credential", "get"], "protocol=https\nhost=github.com\npath=voltagecloud/backend.git\n\n").stdout, "");
+  assert.equal(run(["credential", "get"], "protocol=https\nhost=github.com\npath=voltagecloud/backend.git\n\n").stdout, `username=x-access-token\npassword=${token}\n\n`, "a missing prefetch manifest must not gate credentials");
   delete env.GITHUB_READ_TOKEN;
   env.GITHUB_READ_TOKEN_REPOSITORIES = '["voltagecloud/backend"]';
   assert.equal(run(["credential", "get"], "protocol=https\nhost=github.com\npath=voltagecloud/backend.git\n\n").stdout, "");
@@ -88,5 +93,5 @@ try {
   const configuredPath = env.PATH; env.PATH = "/nonexistent";
   assert.equal(run(["clone", "fixture/missing-git"]).status, 1, "spawn failure must clear its deadline and exit promptly");
   env.PATH = configuredPath;
-  console.log("PASS: partial clone/fetch, anonymous public reads, bounded configured credential paths, canonicalization, and no token in argv");
+  console.log("PASS: partial clone/fetch, anonymous public reads, bounded canonical GitHub credential paths, canonicalization, and no token in argv");
 } finally { await rm(directory, { recursive: true, force: true }); }

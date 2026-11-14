@@ -35,8 +35,8 @@ export HOME PASEO_HOME
 umask 077
 mkdir -p "$PASEO_HOME" "$HOME/assistant" "$HOME/.claude" "$HOME/code" "$HOME/buzz"
 
-# The same parser gates startup and each credential lookup. Empty scope permits
-# anonymous public reads but never sends the token to an unconfigured path.
+# Validate and normalize the startup prefetch manifest with the helper parser.
+# GitHub token permissions determine which repositories can be read on demand.
 GITHUB_READ_TOKEN_REPOSITORIES=$(/usr/local/bin/paseo-code scope) || fail "invalid GITHUB_READ_TOKEN_REPOSITORIES"
 export GITHUB_READ_TOKEN_REPOSITORIES
 
@@ -115,6 +115,9 @@ if (
 const claudeToken = credential("CLAUDE_CODE_OAUTH_TOKEN");
 const gitToken = credential("GITHUB_READ_TOKEN");
 if (gitToken && !/^github_pat_[A-Za-z0-9_]+$/.test(gitToken)) fail("GITHUB_READ_TOKEN must be a fine-grained GitHub token (github_pat_...)");
+if (!gitToken && parse("GITHUB_READ_TOKEN_REPOSITORIES").length > 0) {
+  fail("GITHUB_READ_TOKEN_REPOSITORIES lists repositories but GITHUB_READ_TOKEN is absent; private reads would silently fall back to anonymous access");
+}
 const assistant = claudeToken ? "claude" : "";
 
 // Built-in providers and the providers of bundled plugins start disabled.

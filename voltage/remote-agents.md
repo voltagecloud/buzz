@@ -528,15 +528,17 @@ Generic gateway keys outside the managed daemon registry retain their separate o
 
 ### Give the daemon read-only Git access
 
-Create a fine-grained GitHub token for selected repositories only.
+Create a separate fine-grained GitHub token over the same repository set the Buzz agents can read.
 Grant `contents: read` and `pull_requests: read`; grant no write permissions.
 Never reuse the sandbox profile's GitHub token or a broad `gh` OAuth token.
 In the existing enrollment form, enter it in **Paseo GitHub read token**, then select **Enroll profile**.
-Configure the token's repository paths separately in `developers.<id>.paseo_git_token_repositories` in Terraform.
+Configure startup prefetch repositories separately in `developers.<id>.paseo_git_token_repositories` in Terraform.
 The Deployment maps that nonsecret list to `GITHUB_READ_TOKEN_REPOSITORIES`; it does not contain the token value.
-The helper sends the token only to configured GitHub repository paths.
-Public repositories outside that list clone anonymously, even when the token is present.
-The empty default list sends no credentials; private repository reads need both the configured path and matching token permissions.
+This startup prefetch manifest selects repositories to clone and register as Paseo projects.
+Other repositories remain readable on demand when the token permits them.
+The helper sends credentials only for canonical repository paths on HTTPS `github.com`; the manifest does not restrict credential delivery.
+A non-empty manifest without a token refuses startup.
+An empty manifest without a token permits anonymous public reads.
 A blank field keeps the existing daemon token.
 The manager receives the token in the encrypted enrollment request and writes only the narrow daemon Secret.
 The Secret key is `github_read_token`; Terraform references it as `GITHUB_READ_TOKEN` without reading its value.

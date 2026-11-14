@@ -81,6 +81,7 @@ try {
   assert.equal(await readFile(path.join(view, "code.txt"), "utf8"), "agent branch v2\n");
   assert.equal(git(["rev-parse", "HEAD"], view), git(["rev-parse", "agent/view"], source));
   assert.equal(git(["rev-parse", "HEAD"], checkout), before);
-  await assert.rejects(run(["view", "fixture/repo", "agent/view"]), "a repository outside the token scope has no view");
+  await run(["view", "fixture/repo", "agent/view"], { GITHUB_READ_TOKEN_REPOSITORIES: '["fixture/other"]' });
+  assert.equal(await readFile(path.join(view, "code.txt"), "utf8"), "agent branch v2\n", "a repository absent from the prefetch manifest still has a view");
   console.log("PASS: real Git partial clone, lazy file checkout, sandbox branch fetch, detached file view and diff, branch view");
 } finally { await new Promise((resolve) => server.close(resolve)); await rm(directory, { recursive: true, force: true }); }
