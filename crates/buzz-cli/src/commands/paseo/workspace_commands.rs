@@ -11,9 +11,11 @@ use crate::{client::BuzzClient, commands::parse_write_response, error::CliError}
 pub(crate) enum WorkspaceCmd {
     /// Create a workspace; metadata is readable by the whole community.
     Create {
-        /// Visible Paseo directory name: lowercase letters, digits, dots, underscores, hyphens.
-        #[arg(long)]
-        slug: String,
+        /// Paseo project-list name; derived from --name when omitted.
+        /// Explicit values use lowercase letters, digits, dots, underscores, hyphens.
+        #[arg(long, required_unless_present = "name")]
+        slug: Option<String>,
+        /// Original display metadata, stored verbatim; also supplies the default slug.
         #[arg(long)]
         name: Option<String>,
         #[arg(long)]
@@ -91,6 +93,11 @@ async fn execute(command: WorkspaceCmd, client: &BuzzClient) -> Result<Value, Cl
             listed,
             agent,
         } => {
+            let derived = slug.is_none();
+            let slug = match slug {
+                Some(slug) => slug,
+                None => derive_slug(name.as_deref().unwrap_or_default())?,
+            };
             if workspaces::directory_name(&slug) != slug {
                 return Err(CliError::Usage(
                     "workspace slug must match ^[a-z0-9][a-z0-9._-]{0,63}$ (for example payments-review); it is displayed unchanged in Paseo".into(),
@@ -110,6 +117,11 @@ async fn execute(command: WorkspaceCmd, client: &BuzzClient) -> Result<Value, Cl
             validate_candidate(client, &candidate).await?;
             let head = fetch_head(client, &slug).await?;
             if let Some(head) = &head {
+                if derived {
+                    return Err(CliError::Conflict(format!(
+                        "derived workspace slug {slug:?} already exists for this owner; choose an explicit --slug"
+                    )));
+                }
                 require_marker(head)?;
                 if head.tags != candidate.tags || head.content != candidate.content {
                     return Err(CliError::Conflict(format!("workspace {slug:?} already exists with different metadata; use workspace update")));
@@ -124,6 +136,10 @@ async fn execute(command: WorkspaceCmd, client: &BuzzClient) -> Result<Value, Cl
                 publish(client, candidate.clone()).await?
             };
             verify_head(client, &slug, expected_id).await?;
+            response["slug"] = json!(slug);
+            response["message"] = json!(format!(
+                "{slug} is the name shown in the Paseo project list"
+            ));
             response["warnings"] = json!(warnings);
             if crate::links::is_linkable_dtag(&slug) {
                 response["link"] = json!(crate::links::project_link(
@@ -196,6 +212,34 @@ async fn execute(command: WorkspaceCmd, client: &BuzzClient) -> Result<Value, Cl
         }
         WorkspaceCmd::List { .. } => Err(CliError::Other("list already dispatched".into())),
     }
+}
+
+// Only ASCII letters are case-folded: Unicode names must not transliterate into ASCII.
+fn derive_slug(name: &str) -> Result<String, CliError> {
+    let mut slug = String::new();
+    let mut separator = false;
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            if separator && !slug.is_empty() {
+                slug.push('-');
+            }
+            slug.push(c.to_ascii_lowercase());
+            separator = false;
+            if slug.len() >= 64 {
+                slug.truncate(64);
+                break;
+            }
+        } else {
+            separator = true;
+        }
+    }
+    let slug = slug.trim_end_matches('-').to_owned();
+    if slug.is_empty() || workspaces::directory_name(&slug) != slug {
+        return Err(CliError::Usage(
+            "name cannot produce a readable workspace slug; provide an explicit --slug (for example payments-review)".into(),
+        ));
+    }
+    Ok(slug)
 }
 
 fn tag(parts: &[&str]) -> Result<Tag, CliError> {

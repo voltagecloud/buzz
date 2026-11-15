@@ -135,7 +135,7 @@ async fn fixture() -> (BuzzClient, Arc<Mutex<Relay>>, tokio::task::JoinHandle<()
 }
 fn create(agents: Vec<PublicKey>) -> WorkspaceCmd {
     WorkspaceCmd::Create {
-        slug: "scratch".into(),
+        slug: Some("scratch".into()),
         name: Some("Scratch".into()),
         channel: Uuid::nil(),
         source: vec![],
@@ -170,7 +170,7 @@ async fn create_rejects_hashed_slugs_before_membership_or_publication() {
     ] {
         let mut command = create(vec![]);
         if let WorkspaceCmd::Create { slug, .. } = &mut command {
-            *slug = invalid.into();
+            *slug = Some(invalid.into());
         }
         let error = execute(command, &client).await.unwrap_err();
         assert!(matches!(error, CliError::Usage(_)), "{error}");
@@ -180,7 +180,7 @@ async fn create_rejects_hashed_slugs_before_membership_or_publication() {
     }
     let mut command = create(vec![]);
     if let WorkspaceCmd::Create { slug, .. } = &mut command {
-        *slug = "payments-review".into();
+        *slug = Some("payments-review".into());
     }
     execute(command, &client).await.unwrap();
     assert_eq!(state.lock().unwrap().writes.len(), 1);
@@ -467,4 +467,94 @@ async fn create_promotes_guest_gateway_to_posting_member() {
         1
     );
     server.abort();
+}
+
+#[test]
+fn name_slug_derivation_is_stable_and_readable() {
+    for (name, expected) in [
+        (
+            "Payments Review".to_owned(),
+            Some("payments-review".to_owned()),
+        ),
+        (
+            "  PAYMENTS...!!!review  ".into(),
+            Some("payments-review".into()),
+        ),
+        (
+            "__--.Payments_review._-".into(),
+            Some("payments-review".into()),
+        ),
+        ("a".repeat(65), Some("a".repeat(64))),
+        (format!("{} review", "a".repeat(63)), Some("a".repeat(63))),
+        ("日本語".into(), None),
+        ("K".into(), None),
+        ("___...---".into(), None),
+        ("".into(), None),
+    ] {
+        let actual = derive_slug(&name).ok();
+        assert_eq!(actual, expected, "{name}");
+        assert_eq!(actual, derive_slug(&name).ok());
+        if let Some(slug) = actual {
+            assert_eq!(workspaces::directory_name(&slug), slug);
+            assert!(!slug.starts_with('_'));
+        }
+    }
+}
+
+#[tokio::test]
+async fn name_only_create_preserves_name_reports_slug_and_refuses_collision() {
+    let (client, state, server) = fixture().await;
+    let named = || {
+        let mut command = create(vec![]);
+        if let WorkspaceCmd::Create { slug, name, .. } = &mut command {
+            *slug = None;
+            *name = Some("Payments Review".into());
+        }
+        command
+    };
+    let response = execute(named(), &client).await.unwrap();
+    assert_eq!(response["slug"], "payments-review");
+    assert!(response["message"]
+        .as_str()
+        .unwrap()
+        .contains("Paseo project list"));
+    {
+        let state = state.lock().unwrap();
+        let head = state.heads.last().unwrap();
+        assert_eq!(value(head, "name"), Some("Payments Review"));
+        assert_eq!(value(head, "d"), Some("payments-review"));
+        assert!(value(head, "buzz-source").is_none());
+    }
+    let error = execute(named(), &client).await.unwrap_err();
+    assert!(matches!(error, CliError::Conflict(_)));
+    assert!(error.to_string().contains("payments-review"));
+    assert_eq!(state.lock().unwrap().writes.len(), 1);
+    let response = execute(create(vec![]), &client).await.unwrap();
+    assert_eq!(response["slug"], "scratch");
+    assert_eq!(
+        value(state.lock().unwrap().heads.last().unwrap(), "name"),
+        Some("Scratch")
+    );
+    server.abort();
+}
+
+#[test]
+fn create_arguments_require_name_or_slug() {
+    use clap::Parser;
+    #[derive(Parser)]
+    struct Args {
+        #[command(subcommand)]
+        command: WorkspaceCmd,
+    }
+    let channel = Uuid::nil().to_string();
+    for flags in [
+        vec!["--name", "Payments Review"],
+        vec!["--slug", "payments"],
+        vec!["--slug", "payments", "--name", "Payments Review"],
+    ] {
+        let mut args = vec!["workspace", "create", "--channel", &channel];
+        args.extend(flags);
+        assert!(Args::try_parse_from(args).is_ok());
+    }
+    assert!(Args::try_parse_from(["workspace", "create", "--channel", &channel]).is_err());
 }
