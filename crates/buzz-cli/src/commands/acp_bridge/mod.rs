@@ -2,9 +2,12 @@
 //! agent through the relay.
 //!
 //! An ACP client (for example Paseo) starts the bridge as an agent process.
-//! Each ACP session is one Buzz thread in `--channel`: the first prompt posts
-//! a kind 9 thread root that mentions `--agent` (the mention starts the
-//! agent's sandbox), and later prompts post kind 9 replies in that thread.
+//! Each ACP session is one Buzz thread: the first prompt posts a kind 9
+//! thread root that mentions `--agent` (the mention starts the agent's
+//! sandbox), and later prompts post kind 9 replies in that thread. A session
+//! whose working directory lies in a Paseo workspace posts in the
+//! workspace's channel; other sessions post in the legacy `--channel`
+//! (see [`workspaces`]).
 //! The agent's encrypted observer telemetry (kind 24200) streams back as
 //! `session/update` notifications, and `turn_completed` ends the prompt. The
 //! Buzz thread stays the durable record.
@@ -17,6 +20,7 @@ mod prompt;
 mod views;
 mod wire;
 mod workspace_paths;
+mod workspaces;
 
 #[cfg(test)]
 mod tests;
@@ -102,12 +106,12 @@ pub(crate) fn require_wss(raw: &str) -> Result<(), CliError> {
 pub(crate) async fn run(
     client: BuzzClient,
     agent: &str,
-    channel: &str,
+    channel: Option<&str>,
     owner: Option<&str>,
 ) -> Result<(), CliError> {
     let agent = PublicKey::parse(agent.trim())
         .map_err(|e| CliError::Usage(format!("invalid --agent pubkey (hex or npub): {e}")))?;
-    let channel = parse_uuid(channel)?;
+    let channel = channel.map(parse_uuid).transpose()?;
     let scope = Scope {
         signer: client.keys().clone(),
         owner: owner
@@ -421,7 +425,13 @@ async fn stream_once(
     tx: &mpsc::Sender<RelayInbound>,
     deadlines: Deadlines,
 ) -> Stream {
-    let (_hold, channels) = tokio::sync::watch::channel(BTreeMap::from([(scope.channel, since)]));
+    let (_hold, channels) = tokio::sync::watch::channel(
+        scope
+            .channel
+            .into_iter()
+            .map(|channel| (channel, since))
+            .collect(),
+    );
     stream_channels(url, scope, auth_tag, since, tx, deadlines, channels).await
 }
 

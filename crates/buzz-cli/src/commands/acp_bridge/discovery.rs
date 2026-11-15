@@ -152,6 +152,7 @@ fn budget_response(sessions: Vec<Value>, next: Option<String>) -> Result<Value, 
 pub(super) async fn history_list<R: BridgeRelay>(
     relay: &R,
     scope: &Scope,
+    cache: &workspaces::Cache,
     params: &Value,
     memberships: &Memberships,
 ) -> Result<Value, CliError> {
@@ -161,6 +162,7 @@ pub(super) async fn history_list<R: BridgeRelay>(
         .and_then(Value::as_str)
         .map(|cwd| projects::filter_cwd(&scope.home, cwd));
     let mut fallback = None;
+    let mut live = workspaces::Live::new(relay, scope.owner, cache);
     let trusted = authors(scope);
     let raw = params
         .get("cursor")
@@ -265,8 +267,14 @@ pub(super) async fn history_list<R: BridgeRelay>(
                                     continue;
                                 }
                             }
-                            let cwd =
-                                projects::session_cwd(&scope.home, root, &trusted, &mut fallback);
+                            let cwd = projects::session_cwd(
+                                &scope.home,
+                                root,
+                                &trusted,
+                                &mut live,
+                                &mut fallback,
+                            )
+                            .await?;
                             if only
                                 .as_ref()
                                 .is_some_and(|only| only.as_ref() != Some(&cwd))

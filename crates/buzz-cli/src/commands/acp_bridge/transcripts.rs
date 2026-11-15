@@ -58,16 +58,18 @@ impl ReplayTurn {
     }
 }
 
-/// The complete transcript turns of the thread at `root`, oldest first. A
-/// failed, slow, or oversized read is logged and gives the turns read so far
-/// (or none), so the load falls back to thread text for the rest.
+/// The complete transcript turns of the thread at `root` in `channel`,
+/// oldest first. A failed, slow, or oversized read is logged and gives the
+/// turns read so far (or none), so the load falls back to thread text for
+/// the rest.
 pub(super) async fn load_turns<R: BridgeRelay>(
     relay: &R,
     scope: &Scope,
+    channel: uuid::Uuid,
     root: EventId,
 ) -> Vec<ReplayTurn> {
-    match tokio::time::timeout(TRANSCRIPT_TIMEOUT, fetch_parts(relay, scope, root)).await {
-        Ok(Ok(parts)) => assemble(scope, root, parts),
+    match tokio::time::timeout(TRANSCRIPT_TIMEOUT, fetch_parts(relay, scope, channel, root)).await {
+        Ok(Ok(parts)) => assemble(scope, channel, root, parts),
         Ok(Err(error)) => {
             eprintln!(
                 "acp-bridge: could not read turn transcripts ({error}); replaying thread text"
@@ -90,6 +92,7 @@ pub(super) async fn load_turns<R: BridgeRelay>(
 async fn fetch_parts<R: BridgeRelay>(
     relay: &R,
     scope: &Scope,
+    channel: uuid::Uuid,
     root: EventId,
 ) -> Result<Vec<Event>, CliError> {
     let mut filter = json!({
@@ -97,7 +100,7 @@ async fn fetch_parts<R: BridgeRelay>(
         "authors": [scope.agent.to_hex()],
         "#p": [scope.signer.public_key().to_hex()],
         "#e": [root.to_hex()],
-        "#h": [scope.channel.to_string()],
+        "#h": [channel.to_string()],
         "limit": QUERY_PAGE,
         "consistency": "strong",
     });
@@ -144,7 +147,12 @@ struct Parts {
 
 /// Open each part, group the parts by (author, turn id), and keep the turns
 /// whose parts are all present and agree.
-fn assemble(scope: &Scope, root: EventId, events: Vec<Event>) -> Vec<ReplayTurn> {
+fn assemble(
+    scope: &Scope,
+    channel: uuid::Uuid,
+    root: EventId,
+    events: Vec<Event>,
+) -> Vec<ReplayTurn> {
     let mut turns: HashMap<(PublicKey, String), Parts> = HashMap::new();
     for event in events {
         let (envelope, payload) =
@@ -155,7 +163,7 @@ fn assemble(scope: &Scope, root: EventId, events: Vec<Event>) -> Vec<ReplayTurn>
                     continue;
                 }
             };
-        if envelope.thread_root != root || envelope.channel != scope.channel {
+        if envelope.thread_root != root || envelope.channel != channel {
             eprintln!(
                 "acp-bridge: ignored transcript part {} for another thread",
                 event.id

@@ -21,7 +21,7 @@ fn scope() -> Scope {
         owner: signer.public_key(),
         signer,
         agent: Keys::generate().public_key(),
-        channel: Uuid::new_v4(),
+        channel: Some(Uuid::new_v4()),
         home: std::path::PathBuf::from("/nonexistent"),
         paseo_code: std::path::PathBuf::from("/nonexistent/paseo-code"),
     }
@@ -130,9 +130,10 @@ async fn each_connection_stage_has_a_deadline() {
 async fn only_verified_relay_events_reach_the_bridge() {
     let scope = scope();
     let agent = Keys::generate();
-    let mut forged = agent_message(&agent, scope.channel, "genuine text");
+    let channel = scope.channel.unwrap();
+    let mut forged = agent_message(&agent, channel, "genuine text");
     forged.content = "the session has ended".into();
-    let genuine = agent_message(&agent, scope.channel, "genuine reply");
+    let genuine = agent_message(&agent, channel, "genuine reply");
     let url = serve(Relay::Forged, vec![forged, genuine.clone()]).await;
     let (tx, mut rx) = mpsc::channel(8);
     let stream = tokio::spawn(async move { stream_once(&url, &scope, None, 0, &tx, SHORT).await });
@@ -156,7 +157,7 @@ async fn only_verified_relay_events_reach_the_bridge() {
 #[tokio::test]
 async fn replacing_channels_before_catch_up_keeps_the_reconnect_watermark() {
     let scope = scope();
-    let initial_channel = scope.channel;
+    let initial_channel = scope.channel.unwrap();
     let (channels_tx, channels_rx) =
         tokio::sync::watch::channel(BTreeMap::from([(initial_channel, now_secs() - 120)]));
     let (requests_tx, mut requests_rx) = mpsc::unbounded_channel();
@@ -216,7 +217,7 @@ async fn replacing_channels_before_catch_up_keeps_the_reconnect_watermark() {
 #[tokio::test]
 async fn retired_subscription_eose_cannot_finish_a_new_generation() {
     let scope = scope();
-    let a = scope.channel;
+    let a = scope.channel.unwrap();
     let b = Uuid::new_v4();
     let since = now_secs() - 600;
     let (channels_tx, channels_rx) = tokio::sync::watch::channel(BTreeMap::from([(a, since)]));

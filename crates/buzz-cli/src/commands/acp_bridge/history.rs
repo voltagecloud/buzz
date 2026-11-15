@@ -135,16 +135,17 @@ impl<R: BridgeRelay> Bridge<R> {
         }
         self.history_ops += 1;
         let memberships = Arc::clone(&self.memberships);
-        let (relay, scope, params, ops) = (
+        let (relay, scope, workspaces, params, ops) = (
             Arc::clone(&self.relay),
             self.scope.clone(),
+            Arc::clone(&self.workspaces),
             params.clone(),
             self.ops.clone(),
         );
         tokio::spawn(async move {
             let result = tokio::time::timeout(
                 HISTORY_TIMEOUT,
-                history_list(relay.as_ref(), &scope, &params, &memberships),
+                history_list(relay.as_ref(), &scope, &workspaces, &params, &memberships),
             )
             .await
             .unwrap_or_else(|_| Err(problem("session listing timed out; retry")));
@@ -215,6 +216,7 @@ impl<R: BridgeRelay> Bridge<R> {
                     .get("cwd")
                     .and_then(Value::as_str)
                     .and_then(|cwd| projects::project_of_cwd(&self.scope.home, cwd)),
+                cwd: params.get("cwd").and_then(Value::as_str).map(str::to_owned),
             },
         );
         self.history_ops += 1;
@@ -226,8 +228,7 @@ impl<R: BridgeRelay> Bridge<R> {
         );
         tokio::spawn(async move {
             let replay = async {
-                let mut scope = scope.clone();
-                let events = load_events(relay.as_ref(), &mut scope, &raw).await?;
+                let (events, channel) = load_events(relay.as_ref(), &scope, &raw).await?;
                 let labels = names
                     .resolve(
                         relay.as_ref(),
@@ -242,7 +243,9 @@ impl<R: BridgeRelay> Bridge<R> {
                     )
                     .await;
                 let turns = match events.iter().find(|event| root_for(&scope, event)) {
-                    Some(root) => transcripts::load_turns(relay.as_ref(), &scope, root.id).await,
+                    Some(root) => {
+                        transcripts::load_turns(relay.as_ref(), &scope, channel, root.id).await
+                    }
                     None => Vec::new(),
                 };
                 Ok(Replay {
@@ -281,6 +284,7 @@ impl<R: BridgeRelay> Bridge<R> {
                 .await;
         }
         let cwd_project = self.loading.get(&raw).and_then(|load| load.project.clone());
+        let cwd = self.loading.get(&raw).and_then(|load| load.cwd.clone());
         if self
             .loading
             .remove(&raw)
@@ -391,6 +395,8 @@ impl<R: BridgeRelay> Bridge<R> {
                 id: raw.to_owned(),
                 replay_epoch: last_used,
                 root: Some(root_id.clone()),
+                cwd: cwd.clone(),
+                workspace: None,
                 project,
                 ended: None,
                 generation: 0,
@@ -407,6 +413,7 @@ impl<R: BridgeRelay> Bridge<R> {
             session.replay_epoch = last_used;
             session.root = Some(root_id);
             session.channel = channel;
+            session.cwd = cwd;
         }
         // Install coverage before replay output can block this loop.
         self.sync_channels();
@@ -447,17 +454,15 @@ impl<R: BridgeRelay> Bridge<R> {
     }
 }
 
+/// The thread at `session_id` and the channel of its root.
 async fn load_events<R: BridgeRelay>(
     relay: &R,
-    scope: &mut Scope,
+    scope: &Scope,
     session_id: &str,
-) -> Result<Vec<Event>, CliError> {
+) -> Result<(Vec<Event>, uuid::Uuid), CliError> {
     let root_event = resolve_root(relay, scope, session_id).await?;
-    scope.channel = event_channel(&root_event).ok_or_else(|| problem("thread has no channel"))?;
-    if !Memberships::default()
-        .read(relay, scope, scope.channel)
-        .await?
-    {
+    let channel = event_channel(&root_event).ok_or_else(|| problem("thread has no channel"))?;
+    if !Memberships::default().read(relay, scope, channel).await? {
         return Err(problem(
             "owner is not a posting member of the thread channel",
         ));
@@ -465,7 +470,7 @@ async fn load_events<R: BridgeRelay>(
     let root = root_event.id;
     let mut replay_bytes = root_event.content.len();
     let mut events = vec![root_event];
-    let mut filter = json!({"kinds": [9], "#h": [scope.channel.to_string()], "#e": [root.to_hex()], "limit": QUERY_PAGE, "consistency":"strong"});
+    let mut filter = json!({"kinds": [9], "#h": [channel.to_string()], "#e": [root.to_hex()], "limit": QUERY_PAGE, "consistency":"strong"});
     let mut previous = None;
     for _ in 0..=MAX_SCAN / QUERY_PAGE {
         let mut page = relay.query(filter.clone()).await?;
@@ -484,7 +489,7 @@ async fn load_events<R: BridgeRelay>(
         }
         for event in page {
             if scoped(scope, &event)
-                && event_channel(&event) == Some(scope.channel)
+                && event_channel(&event) == Some(channel)
                 && buzz_core::nip10::parse_thread_markers(&event.tags)
                     .resolve()
                     .is_some_and(|(id, _)| id == root.to_hex())
@@ -507,7 +512,7 @@ async fn load_events<R: BridgeRelay>(
                     "session does not involve this channel's configured agent",
                 ));
             }
-            return Ok(events);
+            return Ok((events, channel));
         }
     }
     Err(problem("thread history exceeded scan bound"))
