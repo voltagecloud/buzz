@@ -772,7 +772,7 @@ fn manager_config_refuses_each_invalid_field_and_names_it() {
     ));
 }
 
-/// A registering deploy lists the agent, with its deploy's channel, in the
+/// A registering deploy lists the agent without a channel in the
 /// owner's Paseo daemon Secret, keeping the Secret's other keys. A failed
 /// update preserves the successful deploy response and reports a separate
 /// sync failure. Enrollment recovers the list without another deploy. Before
@@ -797,7 +797,7 @@ async fn a_registering_deploy_lists_the_agent_for_the_owners_paseo_daemon() {
         enrollment,
     )
     .with_sandbox_defaults(
-        json!({"pod_options": {"active_deadline_seconds": 3600}})
+        json!({"image": format!("example.invalid/sprig@sha256:{}", "a".repeat(64)), "pod_options": {"active_deadline_seconds": 3600}})
             .as_object()
             .unwrap()
             .clone(),
@@ -836,6 +836,49 @@ async fn a_registering_deploy_lists_the_agent_for_the_owners_paseo_daemon() {
             .collect()
     };
     let before = env();
+    let providers: Value = serde_json::from_str(&before["BUZZ_PASEO_AGENTS"]).unwrap();
+    assert_eq!(providers[0]["agent"], agent().public_key().to_hex());
+    assert!(providers[0].get("channel").is_none());
+    // A second launch into another channel must not change its provider.
+    sent.request_id = "r-other-channel".into();
+    sent.payload["provider_config"]["sandbox"]["channel_id"] =
+        json!("1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f");
+    let response = deploy(&sent).await;
+    assert_eq!(response["ok"], true, "{response}");
+    assert_eq!(env(), before);
+    // Exercise the real owner-start path in a different channel.
+    let trigger = EventBuilder::new(Kind::Custom(9), "@agent investigate")
+        .tags([
+            Tag::parse(["h", "0b6c1f0e-2a7d-4c1e-9f3a-5d2b8e4c7a10"]).unwrap(),
+            Tag::public_key(agent().public_key()),
+        ])
+        .custom_created_at(now())
+        .sign_with_keys(&owner())
+        .unwrap();
+    let start = Sent {
+        signer: owner(),
+        op: Op::Start,
+        request_id: "owner-start".into(),
+        auth: None,
+        payload: json!({"agent_pubkey": agent().public_key(), "relay_url": "wss://relay.example.invalid", "trigger": trigger}),
+        created_at: now(),
+    };
+    let registration_name = Registration::name(
+        owner().public_key(),
+        agent().public_key(),
+        "wss://relay.example.invalid",
+    );
+    let registration_before = cluster.lock().unwrap().secrets[&registration_name].clone();
+    let Admission::Start { job, .. } = manager.admit(&start.event(), now()) else {
+        panic!("start refused")
+    };
+    let response = job.work.run(&manager).await;
+    assert_eq!(response["ok"], true, "{response}");
+    assert_eq!(env(), before);
+    assert_eq!(
+        cluster.lock().unwrap().secrets[&registration_name],
+        registration_before
+    );
     // Only the daemon Secret refuses replacement (a conflict every time).
     let immutable = |value: bool| {
         cluster
@@ -909,8 +952,7 @@ async fn a_registering_deploy_lists_the_agent_for_the_owners_paseo_daemon() {
     let mut expected = before;
     expected.insert(
         "BUZZ_PASEO_AGENTS".into(),
-        json!([{"id": "brokkr-ii", "label": "Brokkr II", "agent": agent().public_key().to_hex(),
-            "channel": "0b6c1f0e-2a7d-4c1e-9f3a-5d2b8e4c7a10"}])
+        json!([{"id": format!("brokkr-ii-{}", &agent().public_key().to_hex()[..8]), "label": "Brokkr II", "agent": agent().public_key().to_hex()}])
         .to_string(),
     );
     assert_eq!(env(), expected);

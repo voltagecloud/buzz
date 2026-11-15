@@ -2264,37 +2264,49 @@ daemon reads its Secret only at startup, so have an operator restart it
 (`kubectl --context voltage-staging -n buzz-paseo rollout restart
 deploy/paseo-daemon-<id>`) before you pair the Paseo apps again.
 
-`BUZZ_PASEO_AGENTS` is a JSON array `[{"id","label","agent","channel"}]`,
-derived from the developer's `buzz-mobile-launch-*` registrations on the
-manager's own relay (`BUZZ_RELAY_URL`):
+`BUZZ_PASEO_AGENTS` is a JSON array of objects with `id`, `label`, `agent`,
+and an optional legacy `channel`. It includes every valid registration from
+the developer's `buzz-mobile-launch-*` Secrets on the manager's relay
+(`BUZZ_RELAY_URL`), subject to the bounds below.
 
 - `agent` is the registered agent's hex public key.
-- `channel` is the channel of the agent's latest launch bound to a channel
-  thread: a desktop deploy (`provider_config.sandbox.channel_id`) or a
-  server-side `start` from a mention. A `start` that changes the channel
-  refreshes the list the same way, and reports a failed refresh as
-  `paseo_sync` beside its successful result. The manager keeps it
-  in the registration's `buzz.voltage.cloud/paseo-channel` annotation, not in
-  its payload, so older managers still read the registration. A
-  direct-message deploy keeps the saved channel. An agent never deployed into
-  a channel thread is not listed.
+- `channel`, when present, is the frozen legacy channel from the registration's
+  `buzz.voltage.cloud/paseo-channel` annotation. Deploys and starts never write
+  this annotation. Registrations without a valid annotation omit `channel`.
 - `label` is the launch's `BUZZ_ACP_DISPLAY_NAME` (`launch.env`, then
   `launch.policy_env`, then `env_vars`), or `Agent <first 8 hex>`.
-- `id` is the label's slug, `^[a-z][a-z0-9-]*$`. A slug that repeats one
-  before it (sorted by label, then key) or names a provider the daemon image
-  defines (`claude`, `codex`, …) gets `-<first 8 hex>`.
+- Shared namespaces can contain several owners' registrations for one agent.
+  Select one per agent before assigning IDs or applying the cap. Prefer legacy
+  entries, ordered by label, key, then channel. Otherwise prefer creation time,
+  key, then label. Identical entries produce the same provider.
+- Legacy entries keep their existing `id` rule, computed among legacy entries
+  only: the label's slug, with a key suffix for reserved or repeated slugs.
+- Other entries use `<label-slug>-<first 8 hex of agent key>`. If this ID
+  collides with a legacy ID or another new entry, use `<label-slug>-<full key>`.
+  A forced prefix collision expands both new entries, including an existing
+  provider. Otherwise adding an agent preserves existing IDs.
 
-Each successful registering deploy replaces `BUZZ_PASEO_AGENTS` in an
-existing Secret and keeps its other keys. If that write fails, the deploy
-still answers `ok`, because the Sandbox started and its registration is saved,
-and adds `"paseo_sync": {"ok": false, "code": "paseo_store_failed", ...}`.
-Enroll again to rebuild the list from the saved registrations; repeating the
-deploy with the same `request_id` only replays its first answer. The list holds
-at most 64 agents; with more registrations it is shortened (first by label,
-then key) and the manager logs a warning. Without a Secret (no enroll since
-Paseo was enabled), the deploy writes none. The
-daemon reads its environment when it starts, so a changed Secret applies at
-its next restart.
+Each successful registering deploy refreshes `BUZZ_PASEO_AGENTS` in an
+existing daemon Secret and preserves its other keys. A successful start also
+retries this refresh. A failed refresh adds `paseo_sync` to the successful
+response; it does not report the committed launch as failed.
+Enroll again to rebuild the list from saved registrations. Repeating a deploy
+with the same `request_id` only replays its first answer.
+
+The list holds at most 64 agents. Legacy entries come first, sorted by label
+and key. Other entries follow by registration Secret `creationTimestamp`,
+then key. A later-second registration cannot displace an existing provider
+at the cap. Within the same second, a smaller key can displace a larger key.
+The manager reads at most 256 registrations and logs a warning on truncation.
+Without an existing daemon Secret, a launch writes none. The daemon reads its
+environment at startup, so Secret changes apply at its next restart.
+
+Deploy PR 5's workspace-aware daemon image before this manager change (PR 6).
+Older `providers.mjs` rejects entries without `channel`: startup exits 64,
+and the watcher retains old providers. After PR 6 deploys, PR 5's image is the
+rollback floor. Roll the manager back below PR 6 before using an older image.
+A PR 6 rollback restores annotation writes; agents without annotations lose
+providers. Reapplying PR 6 can change IDs for agents annotated during rollback.
 
 The `enroll` and `profile` replies then add the pairing the owner opens in a
 Paseo app. Neither the daemon secret key nor the gateway secret key is returned:

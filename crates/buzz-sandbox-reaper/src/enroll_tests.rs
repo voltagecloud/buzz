@@ -354,13 +354,11 @@ async fn paseo_pairing_is_kept_only_in_the_daemon_secret_and_returned() {
         nostr::Keys::parse(&"33".repeat(32)).unwrap(),
         nostr::Keys::parse(&"22".repeat(32)).unwrap(),
     );
-    let channel = "0b6c1f0e-2a7d-4c1e-9f3a-5d2b8e4c7a10";
     let launch = json!({"relay_url": "wss://relay.example.invalid",
         "private_key_nsec": agent.secret_key().to_bech32().unwrap(),
         "launch": {"policy_env": {"BUZZ_ACP_DISPLAY_NAME": "Brokkr"}}});
     Registration::new(owner.public_key(), agent.public_key(), launch)
         .unwrap()
-        .in_channel(&json!({"sandbox": {"channel_id": channel, "thread_root": "b".repeat(64)}}))
         .save(sandbox_fake::client(&cluster), "buzz-agent-staging-dev")
         .await
         .unwrap();
@@ -373,7 +371,6 @@ async fn paseo_pairing_is_kept_only_in_the_daemon_secret_and_returned() {
             "private_key_nsec": elsewhere.secret_key().to_bech32().unwrap()}),
     )
     .unwrap()
-    .in_channel(&json!({"sandbox": {"channel_id": channel, "thread_root": "b".repeat(64)}}))
     .save(sandbox_fake::client(&cluster), "buzz-agent-staging-dev")
     .await
     .unwrap();
@@ -419,8 +416,8 @@ async fn paseo_pairing_is_kept_only_in_the_daemon_secret_and_returned() {
         assert!(stored(&written).get("paseo").is_none());
         let (metadata, env) = daemon_secret(&cluster).unwrap();
         assert_eq!(metadata["namespace"], "buzz-paseo");
-        let agents = json!([{"id": "brokkr", "label": "Brokkr",
-            "agent": agent.public_key().to_hex(), "channel": channel}]);
+        let agents = json!([{"id": format!("brokkr-{}", &agent.public_key().to_hex()[..8]), "label": "Brokkr",
+            "agent": agent.public_key().to_hex()}]);
         assert_eq!(
             env,
             BTreeMap::from([
@@ -480,7 +477,6 @@ async fn paseo_pairing_is_kept_only_in_the_daemon_secret_and_returned() {
                 "private_key_nsec": extra.secret_key().to_bech32().unwrap()}),
         )
         .unwrap()
-        .in_channel(&json!({"sandbox": {"channel_id": channel, "thread_root": "b".repeat(64)}}))
         .save(sandbox_fake::client(&cluster), "buzz-agent-staging-dev")
         .await
         .unwrap();

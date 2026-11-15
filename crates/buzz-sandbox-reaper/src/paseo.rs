@@ -38,11 +38,11 @@ const WRITE_ATTEMPTS: usize = 3;
 /// them.
 const MAX_AGENTS: usize = 64;
 /// Registrations read to build that list. Some are left out (another relay,
-/// no channel), so the read is wider than the list, and still bounded.
+/// invalid data), so the read is wider than the list, and still bounded.
 const MAX_LISTED: usize = 4 * MAX_AGENTS;
 /// Maximum configured daemon identities read during one shared admission.
 pub(crate) const MAX_DAEMON_IDENTITIES: usize = 64;
-/// The daemon's provider list, `[{"id","label","agent","channel"}]`.
+/// The daemon's provider list; only legacy entries include `channel`.
 pub const AGENTS_KEY: &str = "BUZZ_PASEO_AGENTS";
 /// Developer-supplied fine-grained, selected-repository read-only Git token.
 /// This narrow Secret key is explicitly mapped to GITHUB_READ_TOKEN by the pod.
@@ -204,27 +204,83 @@ fn slug(label: &str) -> String {
     }
 }
 
-/// The daemon's provider list from `(label, agent, channel)` entries, in a
-/// stable order. Each ID is the label's slug; a reserved or repeated slug
-/// gets the agent key's first 8 hex digits.
-fn agent_list(mut entries: Vec<(String, String, String)>) -> Value {
-    entries.sort();
+/// A validated registration. The optional channel is frozen legacy metadata.
+#[derive(Clone)]
+struct AgentEntry {
+    label: String,
+    agent: String,
+    legacy_channel: Option<String>,
+    created_at: Option<k8s_openapi::apimachinery::pkg::apis::meta::v1::Time>,
+}
+
+/// Keep legacy IDs computed only among legacy registrations. New IDs depend
+/// on their own key, except that a short-key collision expands both keys.
+fn agent_list(mut entries: Vec<AgentEntry>) -> Value {
+    entries.sort_by(|a, b| match (&a.legacy_channel, &b.legacy_channel) {
+        (Some(_), Some(_)) => {
+            (&a.label, &a.agent, &a.legacy_channel).cmp(&(&b.label, &b.agent, &b.legacy_channel))
+        }
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => {
+            (&a.created_at, &a.agent, &a.label).cmp(&(&b.created_at, &b.agent, &b.label))
+        }
+    });
+    // Shared namespaces can contain registrations by several owners for one
+    // agent. Choose one deterministically before assigning IDs or applying
+    // the cap: prefer legacy metadata, then the ordering above.
+    let mut agents = BTreeSet::new();
+    entries.retain(|entry| agents.insert(entry.agent.clone()));
     let mut used: BTreeSet<String> = RESERVED_IDS.iter().map(|id| (*id).to_owned()).collect();
-    let list = entries
-        .into_iter()
-        .map(|(label, agent, channel)| {
-            let mut id = slug(&label);
-            if used.contains(&id) {
-                id = format!("{id}-{}", &agent[..8]);
-            }
-            if used.contains(&id) {
-                id = format!("{}-{agent}", slug(&label));
-            }
-            used.insert(id.clone());
-            json!({"id": id, "label": label, "agent": agent, "channel": channel})
-        })
-        .collect();
-    Value::Array(list)
+    let mut legacy_ids = BTreeMap::new();
+    for entry in entries
+        .iter()
+        .filter(|entry| entry.legacy_channel.is_some())
+    {
+        let mut id = slug(&entry.label);
+        if used.contains(&id) {
+            id = format!("{id}-{}", &entry.agent[..8]);
+        }
+        if used.contains(&id) {
+            id = format!("{}-{}", slug(&entry.label), entry.agent);
+        }
+        used.insert(id.clone());
+        legacy_ids.insert(entry.agent.clone(), id);
+    }
+    // Count before truncation: even a collision beyond the cap must expand
+    // both keys, independently of timestamp and input ordering.
+    let mut short_ids = BTreeMap::<String, usize>::new();
+    for entry in entries
+        .iter()
+        .filter(|entry| entry.legacy_channel.is_none())
+    {
+        let id = format!("{}-{}", slug(&entry.label), &entry.agent[..8]);
+        *short_ids.entry(id).or_default() += 1;
+    }
+    Value::Array(
+        entries
+            .into_iter()
+            .take(MAX_AGENTS)
+            .map(|entry| {
+                let id = match legacy_ids.get(&entry.agent) {
+                    Some(id) => id.clone(),
+                    None => {
+                        let short = format!("{}-{}", slug(&entry.label), &entry.agent[..8]);
+                        if used.contains(&short) || short_ids[&short] > 1 {
+                            format!("{}-{}", slug(&entry.label), entry.agent)
+                        } else {
+                            short
+                        }
+                    }
+                };
+                let mut value = json!({"id": id, "label": entry.label, "agent": entry.agent});
+                if let Some(channel) = entry.legacy_channel {
+                    value["channel"] = channel.into();
+                }
+                value
+            })
+            .collect(),
+    )
 }
 
 /// A label for a Kubernetes error. The error itself is never logged.
@@ -288,15 +344,9 @@ impl DaemonSecrets {
         format!("paseo-daemon-{developer}")
     }
 
-    /// The developer's registered agents on the manager's relay that have a
-    /// channel: each desktop launch registration in their namespace, with
-    /// the channel of its latest channel-thread deploy. A registration that
-    /// does not read back as one the manager saved is left out, as a mobile
-    /// start would refuse it.
-    ///
-    /// The list is derived and capped, so too many registrations shorten it
-    /// (the first [`MAX_AGENTS`] by label, then key) with a warning; they
-    /// never block enrollment or a deploy.
+    /// Valid registrations on the manager's relay, including agents that
+    /// have never launched in a channel. Legacy entries come first; others
+    /// are capped by registration creation time, then key.
     async fn agents(&self, developer: &Developer) -> Result<Value, Failed> {
         let api: Api<Secret> = Api::namespaced(self.client.clone(), &developer.namespace);
         let list = api
@@ -313,7 +363,7 @@ impl DaemonSecrets {
                 .continue_
                 .as_ref()
                 .is_some_and(|c| !c.is_empty());
-        let mut entries: Vec<_> = list
+        let entries: Vec<_> = list
             .items
             .iter()
             .take(MAX_LISTED)
@@ -327,20 +377,19 @@ impl DaemonSecrets {
                 limit = MAX_AGENTS,
                 "Paseo agent list shortened: the developer has too many launch registrations"
             );
-            entries.sort();
-            entries.truncate(MAX_AGENTS);
         }
         Ok(agent_list(entries))
     }
 
-    /// One registration as `(label, agent, channel)`.
-    fn entry(&self, secret: &Secret, namespace: &str) -> Option<(String, String, String)> {
-        let channel = secret
+    /// One valid registration, with its optional frozen legacy channel.
+    fn entry(&self, secret: &Secret, namespace: &str) -> Option<AgentEntry> {
+        let legacy_channel = secret
             .metadata
             .annotations
-            .as_ref()?
-            .get(CHANNEL_ANNOTATION)
-            .filter(|channel| mobile_launch::is_channel_id(channel))?;
+            .as_ref()
+            .and_then(|annotations| annotations.get(CHANNEL_ANNOTATION))
+            .filter(|channel| mobile_launch::is_channel_id(channel))
+            .cloned();
         let raw = secret.data.as_ref()?.get(DATA_KEY)?;
         let saved: Registration = serde_json::from_slice(&raw.0).ok()?;
         let relay = saved.payload["relay_url"]
@@ -353,7 +402,12 @@ impl DaemonSecrets {
             && secret.metadata.name.as_deref()
                 == Some(&Registration::name(saved.owner, saved.agent, &saved.relay));
         let agent = saved.agent.to_hex();
-        valid.then(|| (label(&saved.payload, &agent), agent, channel.clone()))
+        valid.then(|| AgentEntry {
+            label: label(&saved.payload, &agent),
+            agent,
+            legacy_channel,
+            created_at: secret.metadata.creation_timestamp.clone(),
+        })
     }
 
     /// Save `secret`, created or replacing `prior` at its resourceVersion.

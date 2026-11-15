@@ -155,6 +155,15 @@ fn agent_ids_are_valid_unique_and_never_reserved() {
         ("Ünïcode only".to_owned(), key('5'), channel.clone()),
         ("日本".to_owned(), key('6'), channel.clone()),
     ];
+    let entries = entries
+        .into_iter()
+        .map(|(label, agent, channel)| AgentEntry {
+            label,
+            agent,
+            legacy_channel: Some(channel),
+            created_at: None,
+        })
+        .collect();
     let ids: Vec<_> = agent_list(entries)
         .as_array()
         .unwrap()
@@ -265,4 +274,163 @@ fn narrow_git_read_token_is_preserved_without_copying_the_sandbox_token() {
     }
     let public = pairing(&renewed, RELAY_ENDPOINT).unwrap().to_string();
     assert!(!public.contains("github_pat_"));
+}
+
+fn entry(label: &str, agent: String, channel: Option<&str>, second: i64) -> AgentEntry {
+    AgentEntry {
+        label: label.into(),
+        agent,
+        legacy_channel: channel.map(str::to_owned),
+        created_at: Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+            chrono::DateTime::from_timestamp(second, 0).unwrap(),
+        )),
+    }
+}
+
+fn ids(list: &Value) -> BTreeMap<String, String> {
+    list.as_array()
+        .unwrap()
+        .iter()
+        .map(|value| {
+            (
+                value["agent"].as_str().unwrap().into(),
+                value["id"].as_str().unwrap().into(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn adding_colliding_labels_keeps_existing_ids_even_with_same_second_descending_keys() {
+    let channel = "0b6c1f0e-2a7d-4c1e-9f3a-5d2b8e4c7a10";
+    for same_second in [false, true] {
+        let mut entries = vec![entry("Brokkr", "f".repeat(64), Some(channel), 1)];
+        let mut before = BTreeMap::new();
+        for index in (1..=9).rev() {
+            entries.push(entry(
+                "Brokkr",
+                format!("{index:08x}{}", "a".repeat(56)),
+                None,
+                if same_second { 10 } else { 20 - index },
+            ));
+            let list = agent_list(entries.clone());
+            let after = ids(&list);
+            for (key, id) in before {
+                assert_eq!(after[&key], id);
+            }
+            assert_eq!(after[&"f".repeat(64)], "brokkr");
+            before = after;
+        }
+    }
+}
+
+#[test]
+fn prefix_collisions_expand_both_keys_and_legacy_ids_win() {
+    let key_a = format!("12345678{}", "a".repeat(56));
+    let key_b = format!("12345678{}", "b".repeat(56));
+    let list = agent_list(vec![
+        entry("Same", key_a.clone(), None, 1),
+        entry("Same", key_b.clone(), None, 2),
+    ]);
+    assert_eq!(ids(&list)[&key_a], format!("same-{key_a}"));
+    assert_eq!(ids(&list)[&key_b], format!("same-{key_b}"));
+    let list = agent_list(vec![
+        entry("Same-12345678", "f".repeat(64), Some("legacy"), 1),
+        entry("Same", key_a.clone(), None, 2),
+    ]);
+    assert_eq!(ids(&list)[&key_a], format!("same-{key_a}"));
+    assert_eq!(ids(&list)[&"f".repeat(64)], "same-12345678");
+}
+
+#[test]
+fn cap_keeps_legacy_first_then_oldest_second_then_key() {
+    let original = || {
+        (1..=MAX_AGENTS)
+            .map(|i| entry("Same", format!("{i:08x}{}", "a".repeat(56)), None, 10))
+            .collect::<Vec<_>>()
+    };
+    let before = agent_list(original());
+    let mut entries = original();
+    entries.push(entry("Aardvark", "0".repeat(64), None, 11));
+    assert_eq!(
+        agent_list(entries),
+        before,
+        "a later second never displaces a provider"
+    );
+    let mut entries = original();
+    entries.push(entry("Same", "0".repeat(64), None, 10));
+    let list = agent_list(entries);
+    assert_eq!(list.as_array().unwrap().len(), MAX_AGENTS);
+    assert!(
+        ids(&list).contains_key(&"0".repeat(64)),
+        "same-second smaller key displaces the largest key"
+    );
+    assert!(!ids(&list).contains_key(&format!("{:08x}{}", MAX_AGENTS, "a".repeat(56))));
+    let mut entries = original();
+    entries.push(entry("Zebra", "f".repeat(64), Some("legacy"), 20));
+    let list = agent_list(entries);
+    assert_eq!(list[0]["id"], "zebra", "legacy wins over registration age");
+}
+
+#[tokio::test]
+async fn registrations_without_annotations_are_listed_and_invalid_ones_are_skipped() {
+    use buzz_backend_kubernetes::sandbox_fake;
+    use nostr::Keys;
+    let state = sandbox_fake::Shared::default();
+    let developer = Developer {
+        id: "dev".into(),
+        namespace: "buzz-agent-staging-dev".into(),
+        profile_secret_arn: String::new(),
+        region: String::new(),
+    };
+    let relay = "wss://relay.example.invalid";
+    let owner = Keys::parse(&"33".repeat(32)).unwrap().public_key();
+    let agent = Keys::parse(&"22".repeat(32)).unwrap().public_key();
+    let saved = Registration::new(owner, agent, json!({"relay_url": relay})).unwrap();
+    saved
+        .save(sandbox_fake::client(&state), &developer.namespace)
+        .await
+        .unwrap();
+    let daemon = DaemonSecrets::new(sandbox_fake::client(&state), RELAY_ENDPOINT, relay).unwrap();
+    let list = daemon.agents(&developer).await.unwrap();
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    assert_eq!(list[0]["agent"], agent.to_hex());
+    assert!(list[0].get("channel").is_none());
+    let name = Registration::name(owner, agent, relay);
+    state.lock().unwrap().secrets.get_mut(&name).unwrap()["metadata"]["annotations"] =
+        json!({CHANNEL_ANNOTATION: "invalid"});
+    assert_eq!(daemon.agents(&developer).await.unwrap(), list);
+    state.lock().unwrap().secrets.get_mut(&name).unwrap()["metadata"]["annotations"] =
+        json!({CHANNEL_ANNOTATION: "0b6c1f0e-2a7d-4c1e-9f3a-5d2b8e4c7a10"});
+    let legacy = daemon.agents(&developer).await.unwrap();
+    assert_eq!(legacy[0]["channel"], "0b6c1f0e-2a7d-4c1e-9f3a-5d2b8e4c7a10");
+    assert_eq!(
+        legacy[0]["id"],
+        slug(&label(&saved.payload, &agent.to_hex()))
+    );
+    state.lock().unwrap().secrets.get_mut(&name).unwrap()["metadata"]["name"] = "wrong-name".into();
+    assert_eq!(daemon.agents(&developer).await.unwrap(), json!([]));
+}
+
+#[test]
+fn shared_namespace_registrations_select_one_provider_per_agent() {
+    let key = "a".repeat(64);
+    let legacy = entry("Same", key.clone(), Some("legacy"), 3);
+    let new = entry("Same", key.clone(), None, 1);
+    for entries in [vec![new.clone(), legacy.clone()], vec![legacy, new.clone()]] {
+        assert_eq!(
+            agent_list(entries),
+            json!([{"id":"same", "label":"Same", "agent":key, "channel":"legacy"}])
+        );
+    }
+    let later = entry("Renamed", key.clone(), None, 2);
+    for entries in [
+        vec![later.clone(), new.clone(), new.clone()],
+        vec![new.clone(), later],
+    ] {
+        assert_eq!(
+            agent_list(entries),
+            json!([{"id":format!("same-{}", &key[..8]), "label":"Same", "agent":key}])
+        );
+    }
 }

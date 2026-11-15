@@ -397,44 +397,30 @@ fn invalid_desktop_registration_has_a_deploy_specific_refusal_without_url_secret
     assert!(!error.to_string().contains("private"));
 }
 
-/// The Paseo channel annotation follows the latest channel-thread deploy; a
-/// direct-message deploy keeps the saved one, and the payload never carries
-/// it, so a manager without the annotation still reads the registration.
+/// Redeploys preserve legacy annotations but never create a Paseo channel.
 #[tokio::test]
-async fn registrations_keep_the_latest_channel_thread_for_paseo() {
+async fn registrations_freeze_the_legacy_paseo_channel() {
     let state: sandbox_fake::Shared = Arc::new(Mutex::new(Default::default()));
     let name = Registration::name(owner().public_key(), agent().public_key(), RELAY);
-    let save = |config: Value| {
-        let state = state.clone();
-        async move {
-            Registration::new(owner().public_key(), agent().public_key(), launch())
-                .unwrap()
-                .in_channel(&config)
-                .save(sandbox_fake::client(&state), NAMESPACE)
-                .await
-                .unwrap();
-        }
-    };
-    let annotation = || {
-        state.lock().unwrap().secrets[&name]["metadata"]["annotations"][CHANNEL_ANNOTATION].clone()
-    };
-    let other = "1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f";
-    save(json!({"sandbox": {"channel_id": CHANNEL, "thread_root": "b".repeat(64)}})).await;
-    assert_eq!(annotation(), CHANNEL);
-    save(json!({"sandbox": {"dm_channel_id": other}})).await;
-    assert_eq!(annotation(), CHANNEL);
-    save(json!({"sandbox": {"channel_id": other.to_uppercase(), "thread_root": "b".repeat(64)}}))
-        .await;
-    assert_eq!(annotation(), CHANNEL);
-    save(json!({"sandbox": {"channel_id": other, "thread_root": "b".repeat(64)}})).await;
-    assert_eq!(annotation(), other);
-    let data = state.lock().unwrap().secrets[&name]["data"][DATA_KEY].clone();
-    let text = base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        data.as_str().unwrap(),
-    )
-    .unwrap();
-    assert!(!String::from_utf8(text).unwrap().contains("channel"));
+    let registration =
+        Registration::new(owner().public_key(), agent().public_key(), launch()).unwrap();
+    registration
+        .save(sandbox_fake::client(&state), NAMESPACE)
+        .await
+        .unwrap();
+    assert!(state.lock().unwrap().secrets[&name]["metadata"]["annotations"].is_null());
+    let annotations =
+        json!({CHANNEL_ANNOTATION: CHANNEL, "buzz.voltage.cloud/paseo-channel-at": "123"});
+    state.lock().unwrap().secrets.get_mut(&name).unwrap()["metadata"]["annotations"] =
+        annotations.clone();
+    let age = state.lock().unwrap().secrets[&name]["metadata"]["creationTimestamp"].clone();
+    registration
+        .save(sandbox_fake::client(&state), NAMESPACE)
+        .await
+        .unwrap();
+    let saved = state.lock().unwrap().secrets[&name].clone();
+    assert_eq!(saved["metadata"]["annotations"], annotations);
+    assert_eq!(saved["metadata"]["creationTimestamp"], age);
 }
 
 /// A workflow launch revalidates the current relay's proof at the final Start
@@ -507,51 +493,27 @@ fn gateway_workflow_start_revalidates_the_owner_proof() {
     assert!(Start::gateway(tampered, &request, at).is_err());
 }
 
-/// A registration saved before the Paseo channel annotation existed gains
-/// its channel from the next server-side start, so a mention-launched agent
-/// reaches its owner's Paseo daemon without a desktop redeploy.
+/// Resolving a launch leaves the registration and its legacy channel unchanged.
 #[tokio::test]
-async fn a_start_records_its_channel_for_paseo() {
-    let state: sandbox_fake::Shared = Arc::new(Mutex::new(Default::default()));
-    Registration::new(owner().public_key(), agent().public_key(), launch())
-        .unwrap()
-        .save(sandbox_fake::client(&state), NAMESPACE)
-        .await
-        .unwrap();
-    let name = Registration::name(owner().public_key(), agent().public_key(), RELAY);
-    let annotation = || {
-        state.lock().unwrap().secrets[&name]["metadata"]["annotations"][CHANNEL_ANNOTATION].clone()
-    };
-    assert_eq!(annotation(), Value::Null);
-    let event = mention(vec![]);
-    let start = Start::admit(
-        json!({"agent_pubkey":agent().public_key(),"relay_url":RELAY,"trigger":event}),
-        owner().public_key(),
-        event.created_at.as_secs(),
-    )
-    .unwrap();
-    let client = || sandbox_fake::client(&state);
-    let data = || state.lock().unwrap().secrets[&name]["data"].clone();
-    let before = data();
-    assert!(start.remember_channel(client(), NAMESPACE).await.unwrap());
-    assert_eq!(annotation(), CHANNEL);
-    assert_eq!(data(), before, "only the annotation changes");
-    assert!(
-        !start.remember_channel(client(), NAMESPACE).await.unwrap(),
-        "unchanged"
-    );
-    // The rewritten registration still launches.
-    assert!(start.request(client(), NAMESPACE).await.is_ok());
-
-    // A newer launch's channel is never replaced by an older start that
-    // finishes later.
-    let newer = "1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f";
-    {
-        let mut state = state.lock().unwrap();
-        let annotations = &mut state.secrets.get_mut(&name).unwrap()["metadata"]["annotations"];
-        annotations[CHANNEL_ANNOTATION] = json!(newer);
-        annotations[CHANNEL_AT_ANNOTATION] = json!((start.replay_floor + 60).to_string());
+async fn a_start_keeps_the_paseo_registration_unchanged() {
+    for channel in [None, Some("1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f")] {
+        let state: sandbox_fake::Shared = Arc::new(Mutex::new(Default::default()));
+        Registration::new(owner().public_key(), agent().public_key(), launch())
+            .unwrap()
+            .save(sandbox_fake::client(&state), NAMESPACE)
+            .await
+            .unwrap();
+        let name = Registration::name(owner().public_key(), agent().public_key(), RELAY);
+        if let Some(channel) = channel {
+            state.lock().unwrap().secrets.get_mut(&name).unwrap()["metadata"]["annotations"] =
+                json!({CHANNEL_ANNOTATION: channel});
+        }
+        let before = state.lock().unwrap().secrets[&name].clone();
+        let event = mention(vec![]);
+        assert!(start(&event)
+            .request(sandbox_fake::client(&state), NAMESPACE)
+            .await
+            .is_ok());
+        assert_eq!(state.lock().unwrap().secrets[&name], before);
     }
-    assert!(!start.remember_channel(client(), NAMESPACE).await.unwrap());
-    assert_eq!(annotation(), newer);
 }

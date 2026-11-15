@@ -395,7 +395,7 @@ impl Work {
                     Err(error) => return error,
                 };
                 let response = response_value(&provider::run(request, &target).await);
-                manager.finish_start(&start, &developer, response).await
+                manager.finish_start(&developer, response).await
             }
             Work::Enroll {
                 developer,
@@ -593,7 +593,7 @@ impl Manager {
             match request {
                 Ok(request) => {
                     let response = response_value(&provider::run(request, &target).await);
-                    self.finish_start(&start, developer, response).await
+                    self.finish_start(developer, response).await
                 }
                 Err(error) => error,
             }
@@ -625,20 +625,13 @@ impl Manager {
     /// Preserve a successful start and refresh its derived Paseo provider list.
     async fn finish_start(
         &self,
-        start: &Start,
         developer: &Developer,
         mut response: serde_json::Value,
     ) -> serde_json::Value {
         if response["ok"] == true {
             // The durable registration permits a later start/enroll to retry
             // this refresh. Never report a committed deploy as failed.
-            let synced = match start
-                .remember_channel(self.client.clone(), &developer.namespace)
-                .await
-            {
-                Ok(_) => self.enrollment.agents_changed(developer).await,
-                Err(error) => Err(error),
-            };
+            let synced = self.enrollment.agents_changed(developer).await;
             if let Err(error) = synced {
                 response["paseo_sync"] = error;
             }
@@ -785,9 +778,7 @@ impl Manager {
                     opened.signer,
                     opened.request.payload["agent"].clone(),
                 ) {
-                    Ok(registration) => {
-                        Some(registration.in_channel(&opened.request.payload["provider_config"]))
-                    }
+                    Ok(registration) => Some(registration),
                     Err(response) => return answer(response),
                 }
             } else {
