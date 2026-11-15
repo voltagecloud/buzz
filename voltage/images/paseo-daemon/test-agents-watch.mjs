@@ -91,4 +91,34 @@ restorer.add(["brokkr"]);
 await assert.rejects(watchOnce({ state, ...deps(null), readAgents: async () => { throw new Error("read failed"); }, restorer }));
 await settle();
 assert.deepEqual(passes[1], [{ id: "brokkr", sessions: null }], "a failed check still starts due restores");
+// Channel-less entries work at startup and on reload, with no --channel argv.
+const channelLess = { ...tyr };
+delete channelLess.channel;
+assert.deepEqual(buzzProviders([channelLess], owner, []).tyr.command,
+  ["buzz", "acp-bridge", "--agent", tyr.agent, "--owner", owner]);
+assert.throws(() => buzzProviders([{ ...tyr, channel: null }], owner, []), /channel must be a UUID/);
+const generated = { ...config, daemon: { appendSystemPrompt:
+  "<!-- BUZZ_AGENTS_BEGIN -->old agents<!-- BUZZ_AGENTS_END -->\n<!-- BUZZ_WORKSPACES_BEGIN -->old workspaces<!-- BUZZ_WORKSPACES_END -->" } };
+const generatedDeps = { ...deps(JSON.stringify([channelLess])), readConfig: async () => generated,
+  readWorkspacePrompt: async () => "scratch: channel example; pass workspaceId" };
+result = await checkOnce({ state: { applied: JSON.stringify([brokkr]) }, ...generatedDeps });
+assert.equal(result.outcome, "reloaded");
+assert.ok(written.daemon.appendSystemPrompt.includes("scratch: channel example"));
+assert.ok(written.daemon.appendSystemPrompt.includes('"Tyr"'));
+assert.ok(!written.daemon.appendSystemPrompt.includes("undefined"));
+const changedState = result.state;
+result = await checkOnce({ state: changedState, ...generatedDeps });
+assert.equal(result.outcome, "unchanged");
+result = await checkOnce({ state: changedState, ...generatedDeps,
+  readAgents: async () => null, readWorkspacePrompt: async () => "updated workspace channel" });
+assert.equal(result.outcome, "reloaded", "prompt refresh needs no agent-list mount");
+assert.ok(written.daemon.appendSystemPrompt.includes("updated workspace channel"));
+assert.deepEqual(result.added, []);
+const keyId = { ...channelLess, id: "1".repeat(64), label: "<!-- BUZZ_WORKSPACES_END -->" };
+assert.ok(buzzProviders([keyId], owner, [])[keyId.id]);
+result = await checkOnce({ state: changedState, ...generatedDeps, readAgents: async () => JSON.stringify([keyId]),
+  readWorkspacePrompt: async () => { throw new Error("unreadable prompt"); } });
+assert.equal(result.outcome, "reloaded", "bad workspace prompt does not block provider reload");
+assert.ok(written.agents.providers[keyId.id]);
+assert.equal(written.daemon.appendSystemPrompt.split("<!-- BUZZ_WORKSPACES_END -->").length, 2, "labels cannot inject section markers");
 console.log("agents-watch: ok");

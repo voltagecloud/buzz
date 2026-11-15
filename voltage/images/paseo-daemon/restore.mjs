@@ -361,20 +361,29 @@ export function failures(results) {
 
 /**
  * Whether the daemon answers `paseo project ls` with `project` registered,
- * polling at most `readyPolls` times. `paseo-workspaces` registers ~/buzz
+ * polling at most `readyPolls` times. Workspace registration is best effort
+ * within that same bound: the final listing decides, and only a missing ~/buzz
+ * or a failed or malformed listing fails readiness.
+ * `paseo-workspaces` registers ~/buzz
  * before it clones any repository.
  */
-export async function daemonReady({ project, exec = run, limits = LIMITS }) {
+export async function daemonReady({ project, workspaces = [], exec = run, limits = LIMITS }) {
+  let ready = false;
   for (let poll = 0; poll < limits.readyPolls; poll++) {
     if (poll > 0) await sleep(limits.readyDelayMs);
+    ready = false;
     const listed = await exec("paseo", ["project", "ls", "--json"], limits.requestMs);
     if (listed.code !== 0) continue;
     try {
       const projects = JSON.parse(listed.stdout);
-      if (Array.isArray(projects) && projects.some((entry) => path.resolve(String(entry?.path ?? "")) === project)) return true;
+      if (Array.isArray(projects)) {
+        const registered = new Set(projects.map((entry) => path.resolve(String(entry?.path ?? ""))));
+        ready = registered.has(project);
+        if (ready && workspaces.every((directory) => registered.has(directory))) return true;
+      }
     } catch { /* Not ready. */ }
   }
-  return false;
+  return ready;
 }
 
 /**
@@ -400,7 +409,13 @@ export async function restorePass(tasks, { configFile, home, paseoHome, exec = r
   const byId = new Map(configured.map((provider) => [provider.id, provider]));
   const providers = tasks.filter((task) => byId.has(task.id)).map((task) => ({ ...byId.get(task.id), sessions: task.sessions }));
   if (providers.length === 0) return new Map();
-  if (!(await daemonReady({ project: path.join(home, "buzz"), exec, limits }))) {
+  let workspaces = [];
+  try {
+    const snapshot = JSON.parse(await readFile(path.join(paseoHome, "buzz-workspaces.json"), "utf8"));
+    workspaces = (snapshot.directories ?? []).filter((name) => typeof name === "string" && name !== "." && name !== ".." && path.basename(name) === name)
+      .map((name) => path.join(home, "workspaces", name));
+  } catch { /* Workspace readiness is best effort; ~/buzz is sufficient. */ }
+  if (!(await daemonReady({ project: path.join(home, "buzz"), workspaces, exec, limits }))) {
     log("the daemon did not answer with ~/buzz registered");
     return new Map(providers.map((provider) => [provider.id, { sessions: provider.sessions }]));
   }

@@ -154,6 +154,12 @@ cat >"$stubs/buzz" <<'STUB'
 #!/bin/sh
 # The profile plugin reads the owner's and its own profile, then names itself.
 case "$*" in
+  "paseo workspace list --owner "*)
+    node -e 'console.log(JSON.stringify(["payments-review", "payments-review-other"].map((slug) => ({
+      owner: process.env.BUZZ_PASEO_OWNER, slug, name: slug, channel: "6f1c1b2e-3d4a-4b5c-8d9e-0f1a2b3c4d5e",
+      sources: ["https://github.com/fixture/context-only"], directory: slug, created_at: 1,
+    }))));'
+    exit 0 ;;
   "--format compact users get --pubkey "*) printf '[{"pubkey":"%s","display_name":"Owner"}]\n' "$6"; exit 0 ;;
   "--format compact users get") echo '[]'; exit 0 ;;
   "users set-profile "*) printf '%s\n' "$@" >"$RECORD_TEST_OUTPUT-profile"; chmod 0644 "$RECORD_TEST_OUTPUT-profile"; exit 0 ;;
@@ -212,6 +218,28 @@ docker exec -e PATH=/usr/local/bin:/usr/bin:/bin "$NAME" claude --version | grep
 docker exec "$NAME" paseo provider ls --json |
   jq -e '(map(select(.enabled == "Enabled")) | map(.provider) | sort) == ["brokkr", "claude"] and (map(.provider) | index("codex"))' >/dev/null ||
   fail "provider list: $(docker exec "$NAME" paseo provider ls --json)"
+
+# Real startup creates separate, empty routing roots even for a shared source.
+# Probe exact packaged upstream naming and registration, without source views.
+docker exec "$NAME" node --input-type=module -e '
+  import assert from "node:assert/strict";
+  import { readdir, lstat } from "node:fs/promises";
+  import { execFileSync } from "node:child_process";
+  import { deriveProjectKey, deriveProjectGroupingDisplayName } from "/usr/local/lib/node_modules/@getpaseo/server/dist/server/server/project-key.js";
+  const roots = ["payments-review", "payments-review-other"].map((slug) => `/home/paseo/workspaces/${slug}`);
+  let registered = false;
+  for (let poll = 0; poll < 30; poll++) {
+    const projects = JSON.parse(execFileSync("paseo", ["project", "ls", "--json"], { encoding: "utf8" }));
+    if (roots.every((root) => projects.some((project) => project.path === root))) { registered = true; break; }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  assert.ok(registered, "startup registers both workspace roots");
+  const input = (rootPath) => ({ rootPath, remoteUrl: null, worktreeRoot: null, mainRepoRoot: null });
+  for (const root of roots) assert.deepEqual(await readdir(root), [], "source context never materializes");
+  assert.notEqual(deriveProjectKey(input(roots[0])), deriveProjectKey(input(roots[1])));
+  assert.equal(deriveProjectGroupingDisplayName(input(roots[0])), "payments-review", "literal slug display");
+  await assert.rejects(lstat("/home/paseo/code/fixture/context-only"), { code: "ENOENT" });
+' || fail "empty routing roots, source context, or upstream project identity failed"
 
 # The pairing offer carries the provided identity.
 offer=$(docker exec "$NAME" paseo daemon pair --json | jq -r .url | sed 's/.*#offer=//')
@@ -436,10 +464,15 @@ docker run --rm --network none --user 0:0 --entrypoint sh -v "$stubs/records:/re
 docker rm "$NAME-shutdown-slow" >/dev/null
 
 # Fresh home, same synthetic Secret: pairing identity must remain unchanged.
-docker run -d --name "$NAME-replacement" "${HARDENED[@]}" "${ENV[@]}" "$IMAGE" >/dev/null
-replacement_status=$(wait_running "$NAME-replacement" "$NAME-shutdown-slow")
+# Keep workspace discovery offline, as in the first container. Without the
+# stub, --network none makes the workspace read fail and intentionally leaves
+# all project registration untouched, so restore cannot become ready.
+docker run -d --name "$NAME-replacement" "${HARDENED[@]}" "${ENV[@]}" \
+  -v "$stubs:/tmp/stubs:ro" -v "$stubs/records:/tmp/records" -e PATH="$STUB_PATH" \
+  -e RECORD_TEST_OUTPUT=/tmp/records/replacement "$IMAGE" >/dev/null
+replacement_status=$(wait_running "$NAME-replacement")
 [ "$(jq -r .serverId <<<"$replacement_status")" = srv_paseodaemontest ] || fail "replacement server identity changed"
-# The real bridge cannot reach the relay here; the restore logs and the daemon stays up.
+# The bridge stub fails; restore schedules a retry and the daemon stays up.
 restored "$NAME-replacement"
 replacement_offer=$(docker exec "$NAME-replacement" paseo daemon pair --json | jq -r .url | sed 's/.*#offer=//')
 docker exec "$NAME-replacement" node -e '
