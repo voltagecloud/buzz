@@ -474,6 +474,7 @@ mod setup;
 mod team;
 #[cfg(test)]
 mod test_prompt;
+pub(crate) mod workspaces;
 
 #[cfg(test)]
 mod tests;
