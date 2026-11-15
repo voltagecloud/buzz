@@ -19,6 +19,8 @@ The sandbox decides which suggestions to apply and pushes a branch for review.
 User-visible changes should include a sandbox-produced walkthrough video in the thread.
 The daemon does not run the site or expose a sandbox development server.
 
+See [workspace records](workspace-records.md) for owner-managed Paseo workspace commands and the shared reader contract.
+
 ## Identity and access
 
 The manager stores pairing credentials and the distinct gateway key in `paseo-daemon-<developer>` in namespace `buzz-paseo`.

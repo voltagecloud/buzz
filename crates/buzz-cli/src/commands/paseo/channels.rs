@@ -217,7 +217,11 @@ async fn channel_ids(client: &BuzzClient, pubkey: &str) -> Result<Vec<Uuid>, Cli
         .collect())
 }
 
-async fn add_member(client: &BuzzClient, channel: Uuid, gateway: &str) -> Result<(), CliError> {
+pub(super) async fn add_member(
+    client: &BuzzClient,
+    channel: Uuid,
+    gateway: &str,
+) -> Result<(), CliError> {
     let builder = buzz_sdk::build_add_member(channel, gateway, Some(buzz_sdk::MemberRole::Member))
         .map_err(|error| CliError::Other(format!("build_add_member failed: {error}")))?;
     let response = client.submit_event(client.sign_event(builder)?).await?;

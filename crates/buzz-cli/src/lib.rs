@@ -2724,7 +2724,7 @@ mod tests {
         );
         assert_eq!(
             names(&cmd, "paseo"),
-            vec!["import-team", "pairing", "setup"]
+            vec!["import-team", "pairing", "setup", "workspace"]
         );
         assert_eq!(names(&cmd, "feed"), vec!["get"]);
         assert_eq!(
@@ -2816,7 +2816,7 @@ mod tests {
             ("media", 1),
             ("messages", 8),
             ("pack", 2),
-            ("paseo", 3),
+            ("paseo", 4),
             ("patches", 4),
             ("pr", 5),
             ("projects", 8),
