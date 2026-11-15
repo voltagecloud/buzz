@@ -1,10 +1,17 @@
 use super::*;
 use nostr::Keys;
 
-struct NoRelay;
+#[derive(Default)]
+struct NoRelay {
+    channels: std::sync::Mutex<Vec<uuid::Uuid>>,
+}
 impl BridgeRelay for NoRelay {
+    fn set_channels(&self, channels: Vec<uuid::Uuid>) {
+        *self.channels.lock().unwrap() = channels;
+    }
     async fn prepare_prompt(
         &self,
+        _channel: uuid::Uuid,
         _content: String,
         _root: Option<String>,
     ) -> Result<Event, CliError> {
@@ -33,12 +40,13 @@ fn sample_bridge() -> (Bridge<NoRelay>, mpsc::Receiver<Value>) {
     let bridge = Bridge {
         views: BranchViews::new(scope.paseo_code.clone(), scope.home.clone()),
         scope,
-        relay: Arc::new(NoRelay),
+        relay: Arc::new(NoRelay::default()),
         out,
         ops,
         timing: Timing::default(),
         sessions: HashMap::new(),
         history_ops: 1,
+        memberships: Arc::new(Memberships::default()),
         loading: HashMap::from([(
             "missing".to_owned(),
             HistoryLoad {
@@ -108,4 +116,37 @@ async fn delayed_peer_name_cannot_duplicate_a_newer_replay() {
     bridge.on_op(Op::PeerNameWarmed).await.unwrap();
     assert!(replies.try_recv().is_err());
     assert_eq!(bridge.peer_names, 0);
+}
+
+/// Even an indefinitely blocked replay must establish subscription coverage.
+#[tokio::test]
+async fn history_load_subscribes_before_writing_to_a_full_output_queue() {
+    let (mut bridge, _replies) = sample_bridge();
+    let channel = uuid::Uuid::new_v4();
+    let root = nostr::EventBuilder::new(nostr::Kind::Custom(9), "history")
+        .tags([
+            nostr::Tag::parse(["h", &channel.to_string()]).unwrap(),
+            nostr::Tag::public_key(bridge.scope.agent),
+        ])
+        .sign_with_keys(&bridge.scope.signer)
+        .unwrap();
+    for _ in 0..4 {
+        bridge.out.try_send(json!({})).unwrap();
+    }
+    let relay = Arc::clone(&bridge.relay);
+    let load = bridge.finish_history_load(
+        json!(1),
+        "missing".into(),
+        1,
+        None,
+        Ok(Replay {
+            events: vec![root],
+            labels: HashMap::new(),
+            turns: Vec::new(),
+        }),
+    );
+    assert!(tokio::time::timeout(Duration::from_millis(50), load)
+        .await
+        .is_err());
+    assert_eq!(*relay.channels.lock().unwrap(), vec![channel]);
 }

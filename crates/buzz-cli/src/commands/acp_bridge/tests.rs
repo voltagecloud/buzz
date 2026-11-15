@@ -123,6 +123,7 @@ fn tag<'a>(event: &'a Event, name: &str) -> Vec<&'a [String]> {
 /// submissions and ephemeral publishes, and echoes stored events back
 /// through the subscription like the relay does.
 struct FakeRelay {
+    channels: tokio::sync::watch::Sender<std::collections::BTreeMap<Uuid, u64>>,
     query_count: AtomicUsize,
     query_filters: std::sync::Mutex<Vec<Value>>,
     scope: Scope,
@@ -222,9 +223,31 @@ fn fake_query_page(events: &[Event], filter: &Value) -> Vec<Event> {
 }
 
 impl BridgeRelay for FakeRelay {
+    fn set_channels(&self, channels: Vec<Uuid>) {
+        self.channels
+            .send_if_modified(|current| super::update_channels(current, &channels));
+    }
+
+    async fn relay_identity(&self) -> Result<PublicKey, CliError> {
+        Ok(self.scope.signer.public_key())
+    }
     async fn query(&self, filter: Value) -> Result<Vec<Event>, CliError> {
-        self.query_count.fetch_add(1, Ordering::SeqCst);
         self.query_filters.lock().unwrap().push(filter.clone());
+        if filter["kinds"] == json!([39002]) {
+            let state = self.history.lock().unwrap();
+            if state.1 {
+                return Err(CliError::Other("fixture history unavailable".into()));
+            }
+            let explicit = fake_query_page(&state.0, &filter);
+            if !explicit.is_empty() {
+                return Ok(explicit);
+            }
+            if filter["#d"] == json!([self.scope.channel.to_string()]) {
+                return Ok(vec![roster(&self.scope, self.scope.channel, true)]);
+            }
+            return Ok(Vec::new());
+        }
+        self.query_count.fetch_add(1, Ordering::SeqCst);
         let page = {
             let state = self.history.lock().unwrap();
             if state.1 {
@@ -248,6 +271,7 @@ impl BridgeRelay for FakeRelay {
 
     async fn prepare_prompt(
         &self,
+        channel: uuid::Uuid,
         content: String,
         thread_root: Option<String>,
     ) -> Result<Event, CliError> {
@@ -262,7 +286,7 @@ impl BridgeRelay for FakeRelay {
         });
         let agent = self.scope.agent.to_hex();
         buzz_sdk::build_message(
-            self.scope.channel,
+            channel,
             &content,
             thread.as_ref(),
             &[agent.as_str()],
@@ -426,6 +450,7 @@ fn start_scope(scope: Scope, timing: Timing) -> Harness {
     let query_entered = Arc::new(Notify::new());
     let consume_query_permits = Arc::new(AtomicBool::new(false));
     let relay = Arc::new(FakeRelay {
+        channels: tokio::sync::watch::channel(std::collections::BTreeMap::new()).0,
         query_count: AtomicUsize::new(0),
         query_filters: std::sync::Mutex::new(Vec::new()),
         scope: scope.clone(),
@@ -1858,3 +1883,7 @@ mod participation_tests;
 
 #[path = "transcript_replay_tests.rs"]
 mod transcript_replay_tests;
+
+#[path = "channel_tests.rs"]
+mod channel_tests;
+use channel_tests::roster;

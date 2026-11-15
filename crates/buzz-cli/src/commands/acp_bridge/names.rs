@@ -183,7 +183,12 @@ mod tests {
                 .cloned()
                 .collect())
         }
-        async fn prepare_prompt(&self, _: String, _: Option<String>) -> Result<Event, CliError> {
+        async fn prepare_prompt(
+            &self,
+            _: uuid::Uuid,
+            _: String,
+            _: Option<String>,
+        ) -> Result<Event, CliError> {
             Err(CliError::Other("unused".into()))
         }
         async fn submit(&self, _: Event) -> Result<(), CliError> {
