@@ -6,13 +6,22 @@ These commands do not create a channel, repository, or daemon directory.
 The bridge and daemon integrations consume these records in subsequent rollout steps.
 
 ```sh
-buzz paseo workspace create --slug scratch --name Scratch --channel <channel-uuid>
+buzz paseo workspace create --name "Payments Review" --channel <channel-uuid>
 buzz paseo workspace create --slug review --channel <channel-uuid> \
   --source https://github.com/voltagecloud/buzz
 buzz paseo workspace list --owner <owner-hex>
 buzz paseo workspace update --slug review --name Review --clear-sources
 buzz paseo workspace delete --slug review
 ```
+
+Supply `--name`, `--slug`, or both. An explicit slug always wins and must match
+`^[a-z0-9][a-z0-9._-]{0,63}$`; invalid values fail before relay access.
+Without `--slug`, creation lowercases ASCII letters and replaces runs outside `[a-z0-9]` with one hyphen.
+It trims separators, truncates to 64 characters, and trims trailing separators again.
+An empty result requires an explicit slug; there is no transliteration or hash fallback for creation.
+For example, `Payments Review` produces `payments-review`, while the `name` tag keeps `Payments Review` verbatim.
+The response includes `slug` and states that it is the name shown in the Paseo project list.
+If a derived slug already exists for this owner, creation reports the conflict; it never adds a suffix.
 
 `create` writes an owner-signed NIP-MP project (`kind:30621`) with these Voltage extension tags:
 
@@ -26,6 +35,7 @@ buzz paseo workspace delete --slug review
 **Workspace metadata is community-readable, including unlisted records.**
 Names, channel UUIDs, and source repository names are visible to community readers.
 The CLI prints this warning before creation.
+Sources are prompt context, not local clones or links.
 Sources grant no GitHub access and do not change the token's permissions.
 
 Optional `--repo` arguments add existing NIP-34 member coordinates to the project card.
@@ -38,7 +48,8 @@ Creation checks the channel, then adds each live delegated gateway only when its
 The owner must already belong to the channel.
 A failed membership step returns an error before the workspace is published.
 Rerun the same command to finish; existing memberships remain in place.
-An identical create returns `unchanged: true` and checks membership again.
+An identical create with an explicit `--slug` returns `unchanged: true` and checks membership again.
+A name-derived create always rejects an existing slug, including identical metadata.
 Changing a workspace's channel also prepares gateway membership in the new channel.
 Deletion never removes channel memberships.
 
@@ -50,7 +61,8 @@ Warnings appear on stderr and in write-response JSON.
 ## Shared reader contract
 
 `crates/buzz-cli/src/commands/paseo/workspaces.rs` owns parsing, strong relay reads, selection, and directory naming.
-The bridge uses `load(client, owner)`; the daemon consumes `workspace list --owner`.
+The CLI uses `load(client, owner)`; the daemon consumes `workspace list --owner`.
+The bridge can use `select`, `metadata_ids`, and `READ_BOUND` with its own relay transport.
 Both receive the same validated selection.
 Read failures return an error; callers must preserve their previous state.
 

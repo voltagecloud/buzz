@@ -1,13 +1,19 @@
 use super::*;
-use axum::{extract::State, routing::post, Json, Router};
+use axum::{
+    extract::State,
+    routing::{get, post},
+    Json, Router,
+};
 use nostr::Keys;
 use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
 struct Relay {
+    relay_keys: Option<Keys>,
     heads: Vec<Event>,
     metadata: Vec<Value>,
     rosters: Vec<Value>,
+    discovery_rosters: Option<Vec<Value>>,
     writes: Vec<Event>,
     fail_add: bool,
     replacement: Option<Event>,
@@ -24,7 +30,10 @@ async fn query(State(state): State<Arc<Mutex<Relay>>>, Json(filters): Json<Value
     assert_eq!(f["consistency"], "strong");
     let mut values = match f["kinds"][0].as_u64().unwrap() {
         39000 => state.metadata.clone(),
-        39002 => state.rosters.clone(),
+        39002 => state
+            .discovery_rosters
+            .clone()
+            .unwrap_or_else(|| state.rosters.clone()),
         _ => state.heads.iter().map(|e| json!(e)).collect(),
     };
     values.retain(|e| {
@@ -50,6 +59,20 @@ async fn query(State(state): State<Arc<Mutex<Relay>>>, Json(filters): Json<Value
         }
         true
     });
+    if f["kinds"][0] == 39002 && f["authors"].is_array() && f["#d"].is_array() {
+        values = state
+            .rosters
+            .iter()
+            .filter(|e| e["tags"][0][1] == f["#d"][0])
+            .map(|e| {
+                let tags: Vec<Tag> = serde_json::from_value(e["tags"].clone()).unwrap();
+                json!(EventBuilder::new(nostr::Kind::Custom(39002), "")
+                    .tags(tags)
+                    .sign_with_keys(state.relay_keys.as_ref().unwrap())
+                    .unwrap())
+            })
+            .collect();
+    }
     Json(json!(values))
 }
 async fn publish_event(
@@ -114,6 +137,7 @@ async fn publish_event(
 async fn fixture() -> (BuzzClient, Arc<Mutex<Relay>>, tokio::task::JoinHandle<()>) {
     let owner = Keys::generate();
     let state = Arc::new(Mutex::new(Relay {
+        relay_keys: Some(Keys::generate()),
         metadata: vec![json!({"kind":39000,"tags":[["d",Uuid::nil().to_string()],["t","stream"]]})],
         rosters: vec![
             json!({"kind":39002,"tags":[["d",Uuid::nil().to_string()],["p",owner.public_key().to_hex(),"","member"]]}),
@@ -121,6 +145,9 @@ async fn fixture() -> (BuzzClient, Arc<Mutex<Relay>>, tokio::task::JoinHandle<()
         ..Relay::default()
     }));
     let app = Router::new()
+        .route("/", get(|State(state): State<Arc<Mutex<Relay>>>| async move {
+            Json(json!({"self": state.lock().unwrap().relay_keys.as_ref().unwrap().public_key().to_hex()}))
+        }))
         .route("/query", post(query))
         .route("/events", post(publish_event))
         .with_state(state.clone());
@@ -449,6 +476,12 @@ async fn create_promotes_guest_gateway_to_posting_member() {
                 .sign_with_keys(client.keys())
                 .unwrap(),
         );
+        let mut stale = state.rosters.clone();
+        stale[0]["tags"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!(["p", gateway, "", "member"]));
+        state.discovery_rosters = Some(stale);
         state.rosters[0]["tags"]
             .as_array_mut()
             .unwrap()

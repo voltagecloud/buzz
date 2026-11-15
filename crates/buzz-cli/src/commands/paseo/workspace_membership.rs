@@ -43,13 +43,57 @@ async fn channel_ids(client: &BuzzClient, key: PublicKey) -> Result<HashMap<Uuid
         .collect())
 }
 
+async fn posting_member(
+    client: &BuzzClient,
+    channel: Uuid,
+    key: PublicKey,
+) -> Result<bool, CliError> {
+    let info: serde_json::Value = serde_json::from_str(&client.get_public("/").await?)
+        .map_err(|e| CliError::Other(format!("invalid relay info: {e}")))?;
+    let relay = info["self"]
+        .as_str()
+        .and_then(|s| PublicKey::parse(s).ok())
+        .ok_or_else(|| CliError::Other("relay info missing valid self key".into()))?;
+    let raw = client.query(&json!({"consistency":"strong", "kinds":[39002], "authors":[relay], "#d":[channel.to_string()], "limit":1})).await?;
+    let events: Vec<Event> = serde_json::from_str(&raw)
+        .map_err(|e| CliError::Other(format!("invalid current roster: {e}")))?;
+    if events.len() > 1 {
+        return Err(CliError::Other("multiple current rosters returned".into()));
+    }
+    let Some(event) = events.first() else {
+        return Ok(false);
+    };
+    if event.pubkey != relay
+        || event.kind.as_u16() != 39002
+        || event.tags.identifier() != Some(channel.to_string().as_str())
+        || event.verify().is_err()
+    {
+        return Err(CliError::Other("untrusted current roster".into()));
+    }
+    let key = key.to_hex();
+    let entries: Vec<_> = event
+        .tags
+        .iter()
+        .filter(|tag| {
+            let parts = tag.as_slice();
+            parts.first().is_some_and(|p| p == "p") && parts.get(1) == Some(&key)
+        })
+        .collect();
+    Ok(entries.len() == 1
+        && entries[0]
+            .as_slice()
+            .get(3)
+            .and_then(|role| role.parse::<buzz_core::channel::MemberRole>().ok())
+            .is_some_and(|role| role.can_post()))
+}
+
 pub(super) async fn ensure(
     client: &BuzzClient,
     channel: Uuid,
     explicit_agents: &[PublicKey],
 ) -> Result<Vec<String>, CliError> {
     let owner = client.keys().public_key();
-    if channel_ids(client, owner).await?.get(&channel) != Some(&true) {
+    if !posting_member(client, channel, owner).await? {
         return Err(CliError::Usage(
             "the owner must be a posting member of the workspace channel".into(),
         ));
@@ -67,10 +111,10 @@ pub(super) async fn ensure(
     )
     .await?;
     for gateway in gateways {
-        if channel_ids(client, gateway.gateway()).await?.get(&channel) != Some(&true) {
+        if !posting_member(client, channel, gateway.gateway()).await? {
             super::channels::add_member(client,channel,&gateway.gateway().to_hex()).await.map_err(|e|
                 CliError::Other(format!("gateway membership incomplete: {e}; rerun this command to finish; existing memberships are preserved")))?;
-            if channel_ids(client, gateway.gateway()).await?.get(&channel) != Some(&true) {
+            if !posting_member(client, channel, gateway.gateway()).await? {
                 return Err(CliError::Conflict(
                     "gateway membership was not confirmed; rerun to finish".into(),
                 ));
