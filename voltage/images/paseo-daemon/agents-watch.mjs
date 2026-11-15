@@ -11,7 +11,7 @@ import { spawn } from "node:child_process";
 import { readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { withAgents } from "./providers.mjs";
+import { withAgents, withPromptSection } from "./providers.mjs";
 import { buzzProvidersFromConfig, createRestorer, daemonPass } from "./restore.mjs";
 
 const MAX_FILE_BYTES = 256 * 1024;
@@ -36,21 +36,27 @@ function addedIds(agents, applied) {
  * new state and what happened: "absent", "unchanged", "invalid", "reload_failed"
  * or "reloaded". A reload also returns `added`, the ids of new agents.
  */
-export async function checkOnce({ state, readAgents, readConfig, writeConfig, reload, owner, log }) {
+export async function checkOnce({ state, readAgents, readConfig, writeConfig, reload, owner, log, readWorkspacePrompt }) {
   const text = await readAgents();
-  if (text === null) return { state, outcome: "absent" };
+  let workspacePrompt = null;
+  try { workspacePrompt = readWorkspacePrompt ? await readWorkspacePrompt() : null; }
+  catch { log("could not read the workspace prompt; continuing agent updates"); }
+  const promptChanged = workspacePrompt !== null && workspacePrompt !== state.workspacePrompt;
+  if (text === null && !promptChanged) return { state, outcome: "absent" };
   let agents;
   try {
-    if (Buffer.byteLength(text) > MAX_FILE_BYTES) throw new Error("the agent list is too large");
-    agents = JSON.parse(text);
+    if (text !== null && Buffer.byteLength(text) > MAX_FILE_BYTES) throw new Error("the agent list is too large");
+    agents = text === null ? null : JSON.parse(text);
   } catch (error) {
     log(`ignored the agent list: ${error.message.slice(0, 200)}`);
     return { state, outcome: "invalid" };
   }
-  if (canonical(agents) === state.applied) return { state, outcome: "unchanged" };
+  if (!promptChanged && canonical(agents) === state.applied) return { state, outcome: "unchanged" };
   let next;
   try {
-    next = withAgents(await readConfig(), agents, owner);
+    const current = await readConfig();
+    next = agents === null ? current : withAgents(current, agents, owner);
+    if (workspacePrompt !== null) next = withPromptSection(next, "WORKSPACES", workspacePrompt);
   } catch (error) {
     log(`kept the current agents: ${error.message.slice(0, 200)}`);
     return { state, outcome: "invalid" };
@@ -60,8 +66,9 @@ export async function checkOnce({ state, readAgents, readConfig, writeConfig, re
     log("paseo reload failed; retrying on the next check");
     return { state, outcome: "reload_failed" };
   }
-  log(`reloaded ${agents.length} Buzz agent provider(s)`);
-  return { state: { applied: canonical(agents) }, outcome: "reloaded", added: addedIds(agents, state.applied) };
+  log(`reloaded Buzz providers and workspace prompt`);
+  return { state: { applied: agents === null ? state.applied : canonical(agents),
+    ...(workspacePrompt === null ? {} : { workspacePrompt }) }, outcome: "reloaded", added: agents === null ? [] : addedIds(agents, state.applied) };
 }
 
 /**
@@ -97,6 +104,13 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
   const readAgents = async () => {
     try { return await readFile(file, "utf8"); } catch { return null; }
   };
+  const readWorkspacePrompt = async () => {
+    try {
+      const text = await readFile(path.join(process.env.PASEO_HOME, "buzz-workspaces-prompt.txt"), "utf8");
+      if (Buffer.byteLength(text) > MAX_FILE_BYTES) throw new Error("workspace prompt too large");
+      return text;
+    } catch (error) { if (error.code === "ENOENT") return null; throw error; }
+  };
   const readConfig = async () => JSON.parse(await readFile(configFile, "utf8"));
   const writeConfig = async (config) => {
     const temporary = `${configFile}.agents-watch`;
@@ -116,7 +130,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
   }
   for (;;) {
     try {
-      ({ state } = await watchOnce({ state, readAgents, readConfig, writeConfig, reload: reloadDaemon,
+      ({ state } = await watchOnce({ state, readAgents, readConfig, readWorkspacePrompt, writeConfig, reload: reloadDaemon,
         owner: process.env.BUZZ_PASEO_OWNER ?? "", log, restorer }));
     } catch (error) {
       log(`check failed: ${String(error?.message ?? error).slice(0, 200)}`);

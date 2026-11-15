@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buzzProviders } from "./providers.mjs";
-import { LIMITS, createRestorer, failures, restore, restorePass, run } from "./restore.mjs";
+import { LIMITS, daemonReady, createRestorer, failures, restore, restorePass, run } from "./restore.mjs";
 
 const directory = await realpath(await mkdtemp(path.join(os.tmpdir(), "paseo-restore-test-")));
 const bin = path.join(directory, "bin");
@@ -125,6 +125,23 @@ try {
   process.env.PATH = `${bin}:${process.env.PATH}`;
   process.env.RESTORE_FIXTURE = fixture;
 
+  let readyChecks = 0;
+  assert.equal(await daemonReady({ project: "/home/paseo/buzz", workspaces: ["/home/paseo/workspaces/missing"],
+    limits: { ...LIMITS, readyPolls: 3, readyDelayMs: 0 }, exec: async () => {
+      readyChecks += 1;
+      return { code: 0, stdout: JSON.stringify([{ path: "/home/paseo/buzz" }]) };
+    } }), true, "missing workspace never fails readiness");
+  assert.equal(readyChecks, 3, "workspace readiness waits only within the shared poll bound");
+  // Only the final listing counts: an earlier listing with ~/buzz does not
+  // survive a later failed or malformed one.
+  for (const [later, label] of [[{ code: 1, stdout: "" }, "failed"], [{ code: 0, stdout: "[{" }, "malformed"]]) {
+    const listings = [{ code: 0, stdout: JSON.stringify([{ path: "/home/paseo/buzz" }]) }, later, later];
+    assert.equal(await daemonReady({ project: "/home/paseo/buzz", workspaces: ["/home/paseo/workspaces/missing"],
+      limits: { ...LIMITS, readyPolls: 3, readyDelayMs: 0 }, exec: async () => listings.shift() }), false,
+      `a ${label} final listing fails readiness after an earlier success`);
+    assert.equal(listings.length, 0, `every poll lists after a ${label} listing`);
+  }
+
   // A fresh home: the 20 newest listed sessions, minus the unreadable id, are
   // imported newest first; listing stops at the cap. A native agent's record
   // neither makes the Buzz provider stale nor counts against the cap.
@@ -139,6 +156,9 @@ try {
   sessions[4].cwd = a.paseoHome;
   sessions[5].cwd = path.join(a.home, "code", "voltagecloud", "backend", "..", "..", "..", ".paseo");
   sessions[9].sessionId = "--help";
+  await mkdir(path.join(a.home, "workspaces", "review"), { recursive: true });
+  sessions[6].cwd = path.join(a.home, "workspaces", "review");
+  sessions[7].cwd = path.join(a.home, "workspaces", "missing");
   sessions[10].cwd = path.join(a.home, "code", "link");
   await setFixture(a.home, { [brokkr.agent]: { mode: "list", pageSize: 10, sessions }, [tyr.agent]: { mode: "nolist" }, failImports: [id(8)] });
   let result = cli(a.env);
@@ -154,6 +174,8 @@ try {
   assert.equal(cwd[id(1)], path.join(a.home, "code", "voltagecloud", "backend"), "an existing project directory is kept");
   for (const index of [0, 2, 3, 4, 5]) assert.equal(cwd[id(index)], fallback, `session ${index} falls back to ~/buzz`);
   assert.equal(cwd[id(10)], fallback, "a directory reached through a symlink falls back to ~/buzz");
+  assert.equal(cwd[id(6)], path.join(a.home, "workspaces", "review"), "workspace cwd is imported");
+  assert.equal(cwd[id(7)], fallback, "missing workspace falls back without failing readiness");
   const listed = JSON.parse(await readFile(`${fixture}.${brokkr.agent}`, "utf8"));
   assert.equal(listed.lists, 3, "paging stops once the cap is reached");
   assert.deepEqual(listed.argv, ["acp-bridge", "--agent", brokkr.agent, "--channel", brokkr.channel, "--owner", owner]);

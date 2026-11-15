@@ -79,13 +79,38 @@ Clone materializes the initial checkout; Git fetches file contents on demand.
 Checkouts live under `$HOME/code/<owner>/<repository>` and disappear with the pod.
 Open this directory in Paseo's file and diff views.
 
-At startup, `paseo-workspaces` clones each `GITHUB_READ_TOKEN_REPOSITORIES` manifest entry once and registers it with `paseo project create`.
+`paseo-workspaces` reads `buzz paseo workspace list --owner <BUZZ_PASEO_OWNER>` every 60 seconds.
+The CLI validates owner signatures, workspace markers, channel policy, directory names, ordering, and caps.
+The daemon does not parse relay events.
+Each accepted workspace becomes a non-Git project at `$HOME/workspaces/<directory>`.
+Literal slug directories and hashed names come directly from the shared Rust implementation.
+Rootless workspaces need no repository.
+
+The daemon registers `~/buzz` and every workspace root before manifest cloning.
+Workspace directories stay empty; their `cwd` selects the session's posting channel.
+`buzz-source` entries are prompt context, not source views or prefetch requests.
+The assistant clones a needed repository with `paseo-code clone owner/repository` and reads under `~/code/<owner>/<repository>`.
+The existing one-time manifest prefetch and `paseo-code scope` behavior remain in place.
 Repositories outside this startup prefetch manifest remain readable on demand when the token permits them.
-Paired apps then list those repositories as projects with file trees, with no manual step.
-It runs in the background after the daemon answers `paseo project ls`, polling at most 60 times.
-It never clones an existing checkout again or registers a project twice.
-Before any clone, it registers `~/buzz`, the project of restored conversations without one (see [Conversation restore](#conversation-restore)).
-A repository the token cannot read is logged to stderr and skipped; startup never waits for it.
+Existing checkouts are not fetched or reset automatically.
+
+Upstream `resolveScopedPath` restricts the file explorer UI, not the daemon's direct Read, Glob, Grep, diff, or show operations.
+External directory links fail that UI boundary, and Grep does not follow source symlinks by default.
+Workspace worktrees would add checkouts solely for a file-tree affordance; the daemon's standing instructions forbid repository writes and commits.
+The owner therefore removed source materialization from design section 4.4.
+Two empty workspace roots still register as separate non-Git projects.
+Upstream displays a non-Git root's last path segment literally: `payments-review` stays `payments-review`.
+
+A failed workspace or manifest read changes nothing.
+Overlapping sync ticks are skipped; failed operations retry on the next tick.
+Removed or invalid workspaces retain their project registration and directory.
+The daemon retains at most 32 unused retired directories, plus directories used by live agents.
+Cleanup only removes empty retired roots and rereads live agent records before each removal.
+Unreadable or incomplete agent records disable cleanup.
+The daemon never removes shared clones under `$HOME/code`, including on-demand clones; they remain until pod replacement.
+Retirement timestamps and active directory names are stored under `$PASEO_HOME/buzz-workspaces.json`.
+All state is pod-local and rebuilt from the relay after replacement.
+
 Fetch with a branch updates `origin/<branch>` and detaches the checkout at that fetched branch.
 It refuses to overwrite local changes and creates no worktrees.
 The developer compares the current branch against `origin/main` in Paseo's diff view.
@@ -115,7 +140,10 @@ Native terminals and workspace script tools are disabled.
 [{"id":"brokkr","label":"Brokkr","agent":"<64 hex characters>","channel":"<UUID>"}]
 ```
 
-Each provider runs `buzz acp-bridge --agent <key> --channel <UUID> --owner <owner key>`.
+Each provider runs `buzz acp-bridge --agent <key> --owner <owner key>`, with an optional legacy `--channel <UUID>`.
+A session’s workspace selects its posting channel.
+The assistant prompt lists current agents and workspaces and directs `create_agent` to use a `workspaceId`.
+The agent watcher refreshes both lists without a restart and remains the only `config.json` writer.
 Each provider declares one preselected model, so the model picker does not ask for a choice; the bridge offers no ACP model selection.
 
 New or changed agents need no daemon restart when Terraform mounts the daemon Secret's `BUZZ_PASEO_AGENTS` key at `/etc/paseo-buzz/agents/agents.json`.
@@ -176,7 +204,8 @@ So a provider with any record (a kept home after a container restart, or a conve
 A provider whose entry changes in a reload is not restored again.
 
 The directory is the listed `cwd` when it is an existing directory under `$HOME`, outside hidden directories and reached without symlinks.
-Otherwise it is `~/buzz`, a project registered at startup; today's bridge lists `/` for every session.
+An empty workspace directory is sufficient; restore never requires its source repositories.
+Otherwise it is `~/buzz`, a project registered at startup.
 A conversation whose repository is not cloned yet also goes to `~/buzz`.
 
 | Bound | Value |
@@ -341,3 +370,16 @@ The image workflow publishes staging ECR only after merge; its summary gives the
 Keep Terraform's image value empty until the manager and preceding core PRs are deployed in the authorized rollout.
 The final aggregate package still requires a rebuild from the adopted core stack and its applicable validation gates.
 No apply, sync, deployment, or registry push is part of this change.
+
+## Workspace rollout
+
+This image requires the workspace CLI and bridge routing from PRs 3 and 4 in the final image build.
+Deploy this image to every daemon before PR 6’s manager lists providers without legacy channels.
+After PR 6 deploys, this image is the daemon rollback floor.
+Roll the manager back below PR 6 before deploying an older daemon image.
+The existing GitHub credential boundary follows PR #204’s final outcome.
+Workspace sources never add credentials or widen GitHub token permissions.
+
+The image contract test registers two non-Git roots against the real daemon.
+It checks that source context produces no checkout, both routing roots stay empty, and upstream displays the slug literally.
+Run `bash voltage/images/paseo-daemon/test-image.sh <image>` in a Docker-capable environment.

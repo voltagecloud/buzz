@@ -128,7 +128,7 @@ const providers = Object.fromEntries(reserved.map((id) => [id, { enabled: false 
 
 // The same builder, shared with paseo-agents-watch, validates the manager's
 // agent list and writes one provider per remote agent.
-const { buzzProviders } = await import("/usr/local/lib/paseo-buzz/providers.mjs");
+const { buzzProviders, agentPrompt } = await import("/usr/local/lib/paseo-buzz/providers.mjs");
 const agents = env.BUZZ_PASEO_AGENTS ? parse("BUZZ_PASEO_AGENTS") : [];
 const owner = env.BUZZ_PASEO_OWNER ?? "";
 try {
@@ -169,7 +169,7 @@ if (assistant === "claude") {
           ...["clone", "fetch", "diff", "show"].map((command) => `Bash(paseo-code ${command}:*)`),
           // Memory reads only; set, patch and rm need developer approval.
           ...["mem ls", "mem get", "mem hash"].map((command) => `Bash(buzz ${command}:*)`),
-          "Read(~/code/**)", "Glob", "Grep", "mcp__paseo",
+          "Read(~/code/**)", "Read(~/workspaces/**)", "Glob", "Grep", "mcp__paseo",
         ] },
       },
     },
@@ -192,13 +192,7 @@ const manager = managerPubkey
       "Otherwise ask the developer for the manager's name, then find it with `buzz --format compact users get --name <name>`.",
     ].join(" ");
 
-const remoteAgents = agents.length
-  ? [
-      "These Paseo providers each connect to one Buzz agent in one channel:",
-      "",
-      ...agents.map((agent) => `- \`${agent.id}\`: ${agent.label} (pubkey \`${agent.agent}\`, channel \`${agent.channel}\`)`),
-    ].join("\n")
-  : "No Buzz remote providers are configured. Use the buzz CLI to reach Buzz agents.";
+const remoteAgents = agentPrompt(agents);
 // NIP-AE engrams on the Buzz relay, written by this daemon's gateway key for
 // the owner, survive pod replacement; Claude's local memory files do not.
 const memory = owner
@@ -295,8 +289,8 @@ ln -s /opt/paseo-buzz/no-terminal-worker "$PASEO_HOME/terminal-worker"
 # process environment.
 unset PASEO_DAEMON_KEYPAIR
 cd "$HOME/assistant"
-# Register ~/buzz, then clone the token's repositories and register them as
-# Paseo projects once the daemon answers, so paired apps show file trees.
+# Register empty owner workspace roots and refresh source context every 60 seconds.
+# Keep the existing manifest prefetch; workspace sources never request clones.
 # Best-effort and bounded; it logs to stderr and never blocks startup.
 /usr/local/bin/paseo-workspaces </dev/null >/dev/null &
 # Apply the manager's agent-list changes from the mounted Secret key without a

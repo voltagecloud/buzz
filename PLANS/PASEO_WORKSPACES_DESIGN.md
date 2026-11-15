@@ -10,7 +10,7 @@ created: 2026-11-14
 A Paseo workspace becomes an owner-signed NIP-MP `kind:30621` project with a
 Paseo workspace marker. The project gives the workspace its own slug and
 name, one `buzz-channel`, and an optional set of GitHub sources. The daemon
-materializes each workspace as one Paseo project directory. A session's
+registers each workspace as one empty Paseo project directory. A session's
 working directory selects its workspace, and the workspace selects the
 channel that the session posts in.
 
@@ -33,7 +33,7 @@ All code references are at `157150af8` unless a line names another revision.
 
 | Term | Meaning in this document |
 | --- | --- |
-| Workspace | An owner-signed `kind:30621` project with a `buzz-channel` tag, which the daemon materializes. |
+| Workspace | An owner-signed `kind:30621` project with a `buzz-channel` tag, which the daemon registers as an empty routing directory. |
 | Workspace directory | `$HOME/workspaces/<dir>` on the daemon. One per workspace. Registered as a Paseo project. |
 | Source | A GitHub repository that a workspace checks out for reading. |
 | Paseo project | Upstream Paseo's registered directory (`paseo project create`). |
@@ -222,70 +222,61 @@ workspace is complete with a channel. Decision D3 confirms it.
 
 ```text
 $HOME/
-├── buzz/                           conversations without a workspace (unchanged)
-├── code/<owner>/<repo>             shared partial clones (unchanged)
-├── code/<owner>/<repo>@<branch>    branch views (unchanged)
+├── buzz/                          conversations without a workspace (unchanged)
+├── code/<owner>/<repo>            shared partial clones (unchanged)
+├── code/<owner>/<repo>@<branch>   branch views (unchanged)
 └── workspaces/
-    ├── payments-review/            Paseo project root, not a Git repository
-    │   └── voltagecloud/
-    │       ├── backend -> ../../../code/voltagecloud/backend
-    │       └── buzz    -> ../../../code/voltagecloud/buzz
-    └── scratch/                    rootless workspace, empty
+    ├── payments-review/           empty non-Git routing directory
+    └── scratch/                   empty non-Git routing directory
 ```
 
-- The directory name is the `d` value when it matches
-  `^[a-z0-9][a-z0-9._-]{0,63}$`. Otherwise it is `_` and the first 16 hex
-  digits of SHA-256(`d`). A literal name cannot start with `_`, so the two
-  name sets are disjoint.
-- Before it registers anything, the daemon checks that no two workspaces map
-  to one directory. On a collision, it skips both workspaces and logs both
-  slugs. The bridge refuses new sessions in a skipped workspace.
-- The bridge and the daemon use one Rust implementation of these rules
-  (section 6).
-- A workspace root is not a Git repository. Upstream Paseo keys such a
-  project by its local path and names it by the last path segment
-  (`project-key.ts`, `deriveProjectKey` and `deriveProjectGroupingDisplayName`).
-  Two workspaces on one repository therefore become two projects.
-- Each source is a symbolic link to the shared clone, so one clone serves
-  every workspace. If upstream file trees do not follow directory links,
-  PR 5 uses a detached `git worktree` per workspace instead, as
-  `paseo-code view` does. A worktree costs one checkout per workspace and
-  source, and the clone bounds below then count worktrees.
-- `paseo-workspaces` registers workspace directories before it clones
-  anything. It then clones sources in the background, as today.
-- `paseo-workspaces` repeats this every 60 seconds, with the existing
-  process deadlines. Runs are single-flight: a run that is still in progress
-  skips the next tick.
-- A failed workspace read keeps the previous state. The run registers,
-  retires, and deletes nothing, and logs the failure.
-- A deleted or invalid workspace keeps its directory and registration, so
-  existing Paseo agents keep a valid `cwd`. The bridge refuses new sessions
-  there (section 4.5).
-- Retained state has its own bounds. At 32 retired directories, the daemon
-  stops admitting new workspace directories and source clones until cleanup
-  brings the count below 32. Count directories used by live agents and
-  directories with local work. Preserve existing agents and active workspaces.
-  Admission also caps active plus retired directories at 64, including a batch
-  that retires all 32 active workspaces. Never delete local work to meet a cap.
-- Cleanup removes the oldest unused retired directories only when they
-  contain generated links and unchanged daemon metadata. Treat unexpected
-  files, modified metadata, and failed inspections as local work; preserve
-  the whole directory. Archiving an agent never authorizes deleting its files.
-- Each run logs retained directories, their local-work status, live users,
-  and the clones that only they keep. To release state, the operator archives
-  its agents, then moves local work outside daemon-managed directories or
-  explicitly removes the retired directory after preserving wanted files.
-  Dirty-clone protection still applies independently.
-- Active workspaces name at most 64 distinct sources. The manifest keeps its
-  own cap of 64 (`voltage/images/paseo-daemon/code.mjs:27`), so active
-  sources and manifest entries keep at most 128 clones.
-- A resync deletes a clone only when no workspace directory on disk links to
-  it and no manifest entry or branch view uses it. It never deletes a clone
-  that has uncommitted changes or commits that its remote does not have; it
-  logs that clone and keeps it. The assistant has a shell, so a clone can
-  hold local work.
-- Pod-local home is lost on pod replacement, so the daemon rebuilds all of it
-  from the relay.
+**Owner revision, 2026-11-15:** source materialization is dropped.
+`buzz-source` entries are prompt context, not files or background-clone requests.
+The assistant reads existing shared clones under `$HOME/code/<owner>/<repo>`.
+It calls `paseo-code clone` on demand when a needed clone is absent.
+The pre-existing one-time manifest prefetch and `paseo-code scope` behavior stay unchanged.
+
+Upstream 0.15.3's `resolveScopedPath` restricts the file explorer UI.
+It does not govern direct Read, Glob, Grep, or `paseo-code diff` and `show` operations.
+External directory links fail that UI boundary; symlinked sources also produce silent-empty Grep results without link following.
+Detached worktrees would add up to 512 checkouts solely for file-tree browsing.
+The daemon's standing instructions forbid repository writes, worktree creation, builds, commits, and pushes; sandbox agents perform implementation.
+The empty-directory model replaces both the symbolic-link layout and its approved detached-worktree fallback.
+
+- Workspace directories remain real and otherwise empty: their `cwd` selects the channel under section 4.5.
+- Directory naming remains unchanged. A `d` matching `^[a-z0-9][a-z0-9._-]{0,63}$` is used literally.
+  Otherwise, use `_` plus the first 16 hex digits of SHA-256(`d`).
+  Literal names cannot start with `_`, so the name sets are disjoint.
+- The bridge and CLI use one Rust implementation for validation, selection, caps, collisions, and directory names.
+  A forced directory collision skips both workspaces; neither routes new sessions.
+- The daemon reads `buzz paseo workspace list --owner`, with no second event parser.
+  It accepts at most 32 selected workspaces.
+- A workspace root is not a Git repository. Upstream keys it by local path and displays its last path segment literally.
+  `payments-review` stays `payments-review`, without title casing.
+  Two workspaces naming one repository remain two projects.
+- `paseo-workspaces` registers `~/buzz` and workspace roots before the existing manifest prefetch.
+  Workspace sources never trigger background cloning, links, or worktrees.
+- Resync runs every 60 seconds with existing process deadlines. A running sync skips overlapping ticks.
+- A failed workspace or manifest read changes no registration, directory, retirement state, clone, or prompt snapshot.
+- A deleted or invalid workspace keeps its directory and registration for existing Paseo agents.
+  The bridge refuses new sessions there under section 4.5.
+- Retain at most 32 retired directories unused by live agents, removing the oldest above that cap.
+  Live agent directories remain regardless of the cap. Reread agent cwds immediately before removal.
+  Remove only empty routing roots; unexpected contents prevent removal.
+- Workspace sources have no source-view cleanup or dirty-worktree retention machinery.
+  The daemon never removes shared clones under `$HOME/code`; they remain until pod replacement.
+- State and prompt snapshots use atomic replacement. Pod replacement rebuilds routing roots from relay records.
+
+The approved section 4.4 revision was requested in
+[b6c410879](buzz://message?channel=b462f128-d11a-4ee1-951b-dcef9fccbbd6&id=b6c410879ca831b44e7361858c869003a2e74432831c4c311bc205820c911bbb).
+
+**Owner revision, 2026-11-16:** shared-clone cleanup is dropped.
+PR #204 makes on-demand clones of token-permitted repositories first-class, and sources clone nothing.
+Cleanup therefore removed only the assistant's on-demand clones, possibly while the assistant read them.
+A fetch that overlapped the removal could also leave a half-deleted checkout that clone, fetch, and cleanup all refuse.
+Clones now remain until pod replacement, as before workspaces. Retired-root cleanup is unchanged.
+The decision is recorded in
+[0f5846ea8](buzz://message?channel=b462f128-d11a-4ee1-951b-dcef9fccbbd6&id=0f5846ea82bd41afc8e2fa12e783406d78017b854a3037c6a5c37823f586193b).
 
 ### 4.5 Providers and the bridge
 
@@ -387,8 +378,7 @@ Rules:
   uses one bounded subscription per channel. History of one root queries its
   own `h` and `#e`. Every query keeps today's page and scan limits.
 - **Path identity.** The bridge matches a `cwd` to a workspace after lexical
-  normalization (`acp_bridge/projects.rs:111-126`), without resolving links. A path
-  through a source link stays in its workspace.
+  normalization (`acp_bridge/projects.rs:111-126`), without resolving links. No source links are created; the workspace routing directory remains the session cwd.
 - **Subscription.** The live thread subscription covers the channels of the
   sessions in memory. A session's channel joins the set when the session is
   created or loaded. It leaves after the last session in memory with that
@@ -503,6 +493,7 @@ A session in workspace W works only when all of these hold:
   existing restore keys stay valid.
 - `session/list` reports the workspace directory as `cwd`. `importCwd`
   accepts it: it is a real directory under `$HOME` with no hidden segment.
+  Source clones and workspace contents are not prerequisites; an empty routing root is sufficient.
 - `daemonReady` waits for `~/buzz`, and a failed check fails every restore
   task (`restore.mjs:398-406`). `~/buzz` stays its only condition. Restore
   waits for workspace directories only as a best effort, within the same
@@ -513,7 +504,9 @@ A session in workspace W works only when all of these hold:
 ### 4.9 Assistant prompt
 
 The generated prompt lists one line per agent and one line per workspace with
-its channel. It tells the assistant to pass a `workspaceId` to `create_agent`.
+its channel, directory, and source URLs as context.
+It instructs the assistant to clone on demand and read from `$HOME/code`, not the empty routing root. It tells the assistant to pass a `workspaceId` to `create_agent`.
+A clone that the assistant creates remains until pod replacement; the daemon never removes it.
 The workspace lines are refreshed by the same resync that registers
 directories.
 
@@ -581,7 +574,7 @@ flowchart TD
   P2 --> P3["PR 3: bridge resolves workspace channels"]
   P1 --> P4["PR 4: buzz paseo workspace commands"]
   P4 --> P3
-  P3 --> P5["PR 5: daemon materializes workspaces"]
+  P3 --> P5["PR 5: daemon registers workspace routing roots"]
   P5 --> P6["PR 6: manager stops binding providers to launches"]
   P6 --> P8["PR 8: drop the legacy channel (later)"]
   P4 --> P7["PR 7: setup shares only workspace channels (optional)"]
@@ -592,9 +585,9 @@ flowchart TD
 | --- | --- | --- | --- |
 | 1 | `docs(plans): design channel-bound Paseo workspaces` | None | Decisions D1 to D9 answered |
 | 2 | `feat(acp-bridge): list and load the agent's threads in every channel` | Sessions carry their own channel. `session/list` and `session/load` follow section 4.5: discovery, owner membership, loading, subscription, and telemetry. New sessions still post in `--channel`. This fixes problem 4 alone. | Existing `acp_bridge` tests pass. New tests use the production list, load, and prompt paths: threads in two channels are listed; a thread in a channel the owner left is neither listed nor loadable; a global event without `h` is never listed; a thread loaded from channel B gets replies and posts only in B, while a new session posts in C; a telemetry frame with a B session's root and channel C is dropped; a reply in B that arrives during subscription catch-up is delivered once, without replaying A after deduplication eviction; a listing across more than 32 uncached channels returns every thread across pages. `cargo test -p buzz-cli` passes. |
-| 3 | `feat(acp-bridge): post each session in its workspace channel` | Section 4.5 routing. `--channel` becomes optional. | Tests: two workspaces on one repository post in two channels; an unmarked project and a project from another key are ignored; a new session after a replacement or deletion uses the new state, with a warm cache; outside a workspace with no `--channel`, nothing posts; a session in a shared clone posts in C; a failed lookup posts nothing; a slow lookup does not delay a prompt in another session; `MAX_SESSIONS` holds when lookups complete together; `/fresh` in a workspace, and after its channel moves, posts in the current channel and links the old root in its own channel; a `paseo-workspace` tag on a root that another member authored is ignored; a missing gateway or agent membership returns an error and posts nothing. Each placement step and each transition row holds across a bridge restart and a restore run, including a third-party root that the agent joined before its workspace moved. Path cases: lexical workspace path, path through a source link, and `..` traversal. The fake relay accepts a multi-value `#h`. |
+| 3 | `feat(acp-bridge): post each session in its workspace channel` | Section 4.5 routing. `--channel` becomes optional. | Tests: two workspaces on one repository post in two channels; an unmarked project and a project from another key are ignored; a new session after a replacement or deletion uses the new state, with a warm cache; outside a workspace with no `--channel`, nothing posts; a session in a shared clone posts in C; a failed lookup posts nothing; a slow lookup does not delay a prompt in another session; `MAX_SESSIONS` holds when lookups complete together; `/fresh` in a workspace, and after its channel moves, posts in the current channel and links the old root in its own channel; a `paseo-workspace` tag on a root that another member authored is ignored; a missing gateway or agent membership returns an error and posts nothing. Each placement step and each transition row holds across a bridge restart and a restore run, including a third-party root that the agent joined before its workspace moved. Path cases: lexical workspace path, shared-clone cwd named by workspace source context, and `..` traversal. A shared-clone session uses the legacy channel; without one, nothing posts. The fake relay accepts a multi-value `#h`. |
 | 4 | `feat(cli): manage Paseo workspaces` | `buzz paseo workspace create`, `list`, `update`, `delete`. `create` writes the marker and `unlisted`, and warns that workspace metadata is community-readable. `list --owner <hex>` prints validated workspaces and their directory names as JSON. | Unit tests for every rule in 4.1, including a DM, system, and archived channel; zero members; two workspaces on one channel; more than 64 distinct sources with overlap; directory names (a literal slug never equals a hashed name, and a forced collision skips both workspaces); an unmarked project is never listed, updated, or deleted; `update` keeps `a`, `description`, and unknown tags. Create adds the gateway once and is idempotent. Create warns when the agent is not a member or belongs to more than 64 channels. Refuses NIP-OA agent credentials, as `buzz gateway grant` does. |
-| 5 | `feat(paseo-daemon): materialize owner workspaces` | Section 4.4, 4.8, and 4.9. `providers.mjs` accepts an entry without `channel`. | `test-workspaces.mjs`: rootless workspace; two workspaces on one repository; cap of 32; removal keeps the directory; retired-directory and unused-clone cleanup never removes a directory a live agent uses, including with more than 32 such directories; a retired workspace with a unique source keeps that source after a resync; a clone with uncommitted changes or unpushed commits is kept; a failed workspace read changes nothing; an overlapping run is skipped. `test-agents-watch.mjs`: channel-less entries. `test-restore.mjs`: workspace placement, and a missing workspace directory does not fail readiness. Image test confirms that upstream accepts a non-Git project root and follows directory links. |
+| 5 | `feat(paseo-daemon): register owner workspace routing roots` | Section 4.4, 4.8, and 4.9. `providers.mjs` accepts an entry without `channel`. | `test-workspaces.mjs`: rootless workspace; two workspaces on one repository; cap of 32; removal keeps the directory; retired-directory cleanup never removes a directory a live agent uses, including with more than 32 such directories; workspace source URLs appear in the prompt without cloning or materialization; manifest prefetch remains unchanged; unused clones and clones of archived agents are kept, and the daemon runs no Git commands; a failed workspace read changes nothing; an overlapping run is skipped. `test-agents-watch.mjs`: channel-less entries. `test-restore.mjs`: workspace placement, and a missing workspace directory does not fail readiness. Image test confirms that upstream accepts distinct empty non-Git roots, displays slug names literally, and source context produces no checkout. |
 | 6 | `feat(sandbox-reaper): stop binding Paseo providers to launches` | Section 4.7. | Replaces `registrations_keep_the_latest_channel_thread_for_paseo` and `a_start_records_its_channel_for_paseo`. New tests: an agent with no annotation is listed without `channel`; a launch does not change an entry; successive additions of agents with colliding labels, including registrations with equal `creationTimestamp` values and descending keys, keep every existing id; a forced 8-digit prefix collision gives both agents their full key; at the cap, an agent registered in a later second never displaces an existing provider. Updates `docs/remote-agents.md:2267-2297`. |
 | 7 | `feat(cli): share the gateway only into workspace channels` | Decision D4. | `channels_tests.rs` covers the new plan. No membership is removed. |
 | 8 | `feat(sandbox-reaper): drop the legacy Paseo channel` | Entries lose `channel`. Sessions outside a workspace fail with the section 4.5 error. | Decision D9 holds. Existing ids stay the same. Legacy threads stay listed and loadable. |
@@ -669,13 +662,13 @@ Rollback:
 - **Writer reads.** Workspace resolution uses strong reads, so a lagging
   replica cannot route a post to a replaced channel.
 - **Bounds.** Active state: 32 workspaces, 16 sources each, 64 distinct
-  sources, at most 128 clones with the manifest, 64 subscribed channels, and
-  64 sessions per bridge. Retired-directory admission stops at 32, counting
-  live-agent directories and local work; total workspace directories cannot
-  exceed 64. Retained clones include those linked by directories, the manifest,
-  or branch views, and clones with local work. Each run logs retained state.
-- **Local work.** Cleanup preserves agent-created files in retired workspace
-  roots and clones with uncommitted changes or unpushed commits.
+  sources, 64 subscribed channels, and 64 sessions per bridge. Retained
+  state: 32 unused retired directories and retired directories in use by
+  live agents. Each run logs every retained directory. Shared clones are
+  not daemon state: manifest clones and the assistant's on-demand clones remain
+  until pod replacement, as before workspaces.
+- **Local work.** The daemon never deletes a shared clone, so uncommitted
+  changes and unpushed commits remain until pod replacement.
 - **Removal paths.** Deletion, channel change, invalid replacement, a name
   collision, the cap, and the owner leaving the channel each stop new
   sessions in the affected workspace. None hides a thread from
