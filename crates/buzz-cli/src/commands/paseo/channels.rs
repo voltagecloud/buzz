@@ -1,10 +1,6 @@
-//! Interim channel sharing for the daemon's gateway, until the relay lets a
-//! live gateway inherit its owner's channel access.
-//!
-//! The gateway joins every stream and forum channel the owner is in, open or
-//! private, except excluded ones. Direct messages and system channels are
-//! never shared: gateway delegation excludes owner DMs, and adding a third key
-//! to a DM changes the other participant's conversation.
+//! Add the daemon's gateway only to the owner's validated workspace channels.
+//! Existing memberships are never removed, including non-workspace channels.
+//! Direct messages, system, unknown and archived channels are never added.
 
 use std::collections::HashSet;
 
@@ -77,7 +73,7 @@ pub(super) struct Plan {
     /// member can need channel administration, so sharing only reports them.
     pub excluded_present: Vec<Channel>,
     /// Channels never shared: direct messages, system or unknown types, and
-    /// archived channels.
+    /// archived channels, plus channels without an active owner workspace.
     pub skipped: usize,
 }
 
@@ -88,6 +84,7 @@ pub(super) struct Plan {
 pub(super) fn plan(
     channels: Vec<Channel>,
     gateway_in: &HashSet<Uuid>,
+    workspace_channels: &HashSet<Uuid>,
     exclude: &[String],
     pending: Option<&str>,
 ) -> Result<Plan, CliError> {
@@ -114,6 +111,8 @@ pub(super) fn plan(
                 plan.excluded_present.push(channel.clone());
             }
             plan.excluded.push(channel);
+        } else if !workspace_channels.contains(&channel.id) {
+            plan.skipped += 1;
         } else if gateway_in.contains(&channel.id) {
             plan.present.push(channel);
         } else {
@@ -131,7 +130,7 @@ pub(super) fn plan(
     Ok(plan)
 }
 
-/// Share the owner's channels with `gateway` and return the report. A
+/// Share the owner's workspace channels with `gateway` and return the report. A
 /// gateway the community has not admitted yet gets no channels; the report
 /// names the operator command instead.
 pub(super) async fn share(
@@ -164,7 +163,9 @@ pub(super) async fn share(
             .filter(|channel| owner_ids.contains(&channel.id))
             .collect()
     };
-    let plan = plan(channels, &gateway_in, exclude, pending)?;
+    let selection = super::workspaces::load(client, client.keys().public_key()).await?;
+    let workspace_channels = selection.workspaces.iter().map(|w| w.channel).collect();
+    let plan = plan(channels, &gateway_in, &workspace_channels, exclude, pending)?;
     let (mut added, mut failed) = (Vec::new(), Vec::new());
     for channel in &plan.add {
         match add_member(client, channel.id, &gateway_hex).await {

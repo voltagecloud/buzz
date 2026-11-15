@@ -221,13 +221,13 @@ pub(super) fn show_pairing(outcome: &Outcome) {
     } else {
         let count = |key: &str| channels[key].as_array().map_or(0, Vec::len);
         eprintln!(
-            "Shared {} new channel(s) with your daemon ({} already shared, {} excluded).",
+            "Shared {} new workspace channel(s) with your daemon ({} already shared, {} excluded).",
             count("added"),
             count("already_present"),
             count("excluded")
         );
     }
-    eprintln!("Rerun `buzz paseo setup` after you join channels, and within 90 days to renew the daemon's access.\n");
+    eprintln!("Rerun `buzz paseo setup` after you create or move workspaces, and within 90 days to renew the daemon's access.\n");
 }
 
 /// Fail after reporting when any channel refused the gateway, so a rerun is
