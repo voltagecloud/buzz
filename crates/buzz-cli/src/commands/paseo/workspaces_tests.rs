@@ -246,3 +246,18 @@ async fn load_normalizes_channel_uuid_and_uses_strong_reads() {
     );
     server.abort();
 }
+
+#[test]
+fn channel_labels_do_not_change_the_first_type_tag() {
+    let key = Keys::generate();
+    let event = record(&key, "labeled", 1, &[]);
+    let mut meta = metadata("stream", false);
+    meta[0]["tags"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!(["t", "urgent"]));
+    assert_eq!(
+        select(key.public_key(), &[event], &meta).workspaces.len(),
+        1
+    );
+}

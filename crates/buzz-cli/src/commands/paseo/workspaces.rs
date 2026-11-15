@@ -121,8 +121,9 @@ pub(crate) fn valid_channel(channel: Uuid, metadata: &[Value]) -> bool {
         return false;
     };
     let types: Vec<_> = tags.iter().filter(|t| t[0] == "t").collect();
-    types.len() == 1
-        && matches!(types[0][1].as_str(), Some("stream" | "forum"))
+    types
+        .first()
+        .is_some_and(|tag| matches!(tag[1].as_str(), Some("stream" | "forum")))
         && !tags.iter().any(|t| t[0] == "archived" && t[1] != "false")
 }
 
