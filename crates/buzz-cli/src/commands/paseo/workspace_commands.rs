@@ -11,13 +11,14 @@ use crate::{client::BuzzClient, commands::parse_write_response, error::CliError}
 pub(crate) enum WorkspaceCmd {
     /// Create a workspace; metadata is readable by the whole community.
     Create {
+        /// Visible Paseo directory name: lowercase letters, digits, dots, underscores, hyphens.
         #[arg(long)]
         slug: String,
         #[arg(long)]
         name: Option<String>,
         #[arg(long)]
         channel: Uuid,
-        /// GitHub source URL; repeatable. No repository is created.
+        /// GitHub URL for prompt context; repeatable. Sources are not materialized locally.
         #[arg(long)]
         source: Vec<String>,
         /// Optional NIP-34 member coordinate, or your repository ID.
@@ -90,6 +91,11 @@ async fn execute(command: WorkspaceCmd, client: &BuzzClient) -> Result<Value, Cl
             listed,
             agent,
         } => {
+            if workspaces::directory_name(&slug) != slug {
+                return Err(CliError::Usage(
+                    "workspace slug must match ^[a-z0-9][a-z0-9._-]{0,63}$ (for example payments-review); it is displayed unchanged in Paseo".into(),
+                ));
+            }
             let tags = create_tags(
                 client.keys().public_key(),
                 &slug,

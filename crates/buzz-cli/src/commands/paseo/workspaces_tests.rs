@@ -261,3 +261,42 @@ fn channel_labels_do_not_change_the_first_type_tag() {
         1
     );
 }
+
+#[test]
+fn metadata_ids_normalize_deduplicate_and_sort() {
+    let keys = Keys::generate();
+    let base = record(&keys, "x", 1, &[]);
+    let ids = [
+        "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF",
+        "00000000-0000-0000-0000-000000000000",
+        "ffffffffffffffffffffffffffffffff",
+        "invalid",
+    ];
+    let mut events: Vec<_> = ids
+        .iter()
+        .map(|id| change(&keys, &base, "buzz-channel", &[vec!["buzz-channel", id]]))
+        .collect();
+    events.push(change(&keys, &base, "buzz-channel", &[]));
+    assert_eq!(
+        metadata_ids(&events),
+        [
+            "00000000-0000-0000-0000-000000000000",
+            "ffffffff-ffff-ffff-ffff-ffffffffffff"
+        ]
+    );
+    assert!(metadata_ids(&[]).is_empty());
+}
+
+#[test]
+fn reader_retains_hash_fallback_for_external_slugs() {
+    let keys = Keys::generate();
+    let event = record(&keys, "Payments Review", 1, &[]);
+    let selection = select(keys.public_key(), &[event], &metadata("stream", false));
+    assert!(selection.skipped.is_empty());
+    assert_eq!(selection.workspaces.len(), 1);
+    assert_eq!(
+        selection.workspaces[0].directory,
+        directory_name("Payments Review")
+    );
+    assert!(selection.workspaces[0].directory.starts_with('_'));
+}

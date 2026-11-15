@@ -156,6 +156,38 @@ fn update() -> WorkspaceCmd {
     }
 }
 #[tokio::test]
+async fn create_rejects_hashed_slugs_before_membership_or_publication() {
+    let (client, state, server) = fixture().await;
+    for invalid in [
+        "Payments",
+        "payments review",
+        "é",
+        "x&owner=other",
+        "../payments",
+        "_private",
+        "",
+        &"a".repeat(65),
+    ] {
+        let mut command = create(vec![]);
+        if let WorkspaceCmd::Create { slug, .. } = &mut command {
+            *slug = invalid.into();
+        }
+        let error = execute(command, &client).await.unwrap_err();
+        assert!(matches!(error, CliError::Usage(_)), "{error}");
+        assert!(error.to_string().contains("^[a-z0-9][a-z0-9._-]{0,63}$"));
+        assert!(error.to_string().contains("payments-review"));
+        assert!(state.lock().unwrap().writes.is_empty());
+    }
+    let mut command = create(vec![]);
+    if let WorkspaceCmd::Create { slug, .. } = &mut command {
+        *slug = "payments-review".into();
+    }
+    execute(command, &client).await.unwrap();
+    assert_eq!(state.lock().unwrap().writes.len(), 1);
+    server.abort();
+}
+
+#[tokio::test]
 async fn create_is_rootless_idempotent_and_adds_live_gateway_once() {
     let (client, state, server) = fixture().await;
     let gateway = Keys::generate().public_key();
@@ -378,21 +410,6 @@ async fn update_normalizes_lookup_but_preserves_channel_tag() {
         Some("00000000000000000000000000000000")
     );
     server.abort();
-}
-
-#[tokio::test]
-async fn non_linkable_slugs_create_without_a_broken_deep_link() {
-    for slug in ["review notes", "é", "x&owner=other", &"x".repeat(65)] {
-        let (client, _, server) = fixture().await;
-        let mut command = create(vec![]);
-        if let WorkspaceCmd::Create { slug: value, .. } = &mut command {
-            *value = slug.into();
-        }
-        let result = execute(command, &client).await.unwrap();
-        assert!(result.get("link").is_none());
-        assert!(workspaces::directory_name(slug).starts_with('_'));
-        server.abort();
-    }
 }
 
 #[tokio::test]

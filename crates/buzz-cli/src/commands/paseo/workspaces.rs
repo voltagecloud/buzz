@@ -1,5 +1,6 @@
 //! Shared Paseo workspace contract. The bridge and `workspace list --owner`
-//! must use `load`, including its validation, ordering, caps, and directories.
+//! share `select` and the metadata lookup helpers for identical validation,
+//! ordering, caps, and directories.
 use std::collections::{BTreeMap, HashSet};
 
 use buzz_core::kind::KIND_PROJECT;
@@ -16,7 +17,7 @@ pub(crate) const MAX_WORKSPACES: usize = 32;
 /// Maximum distinct GitHub sources across active workspaces.
 pub(crate) const MAX_SOURCES: usize = 64;
 /// Exhaustive read bound; exceeding it fails the lookup, never truncates it.
-const READ_BOUND: u32 = 10_000;
+pub(crate) const READ_BOUND: u32 = 10_000;
 
 /// Validated owner-signed workspace, serialized by `workspace list`.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -262,6 +263,18 @@ fn select_with_directory(
     result
 }
 
+/// Canonical channel UUIDs to read, deduplicated and sorted for stable batches.
+pub(crate) fn metadata_ids(events: &[Event]) -> Vec<String> {
+    let mut ids: Vec<_> = events
+        .iter()
+        .filter_map(|e| tag_value(e, "buzz-channel").and_then(|value| Uuid::parse_str(value).ok()))
+        .map(|id| id.to_string())
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
 /// Strong, exhaustive read shared by bridge routing and daemon CLI output.
 /// A failed read is an error, never an empty or partially validated selection.
 pub(crate) async fn load(client: &BuzzClient, owner: PublicKey) -> Result<Selection, CliError> {
@@ -276,13 +289,9 @@ pub(crate) async fn load(client: &BuzzClient, owner: PublicKey) -> Result<Select
         .map(serde_json::from_value)
         .collect::<Result<_, _>>()
         .map_err(|e| CliError::Other(format!("invalid workspace response: {e}")))?;
-    let ids: HashSet<_> = events
-        .iter()
-        .filter_map(|e| tag_value(e, "buzz-channel").and_then(|value| Uuid::parse_str(value).ok()))
-        .map(|id| id.to_string())
-        .collect();
+    let ids = metadata_ids(&events);
     let mut metadata = Vec::new();
-    for chunk in ids.into_iter().collect::<Vec<_>>().chunks(256) {
+    for chunk in ids.chunks(256) {
         metadata.extend(
             client
                 .query_all_bounded(
