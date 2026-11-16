@@ -94,6 +94,7 @@ refuses "BUZZ_PASEO_RECORD_CHANNEL must be a UUID" -e BUZZ_PASEO_RECORD_CHANNEL=
 refuses "set both BUZZ_MANAGER_PUBKEY and BUZZ_MANAGER_CHANNEL" -e BUZZ_MANAGER_CHANNEL=
 refuses "invalid GITHUB_READ_TOKEN_REPOSITORIES" -e GITHUB_READ_TOKEN_REPOSITORIES='["fixture/private","Fixture/Private"]'
 refuses "invalid GITHUB_READ_TOKEN_REPOSITORIES" -e GITHUB_READ_TOKEN_REPOSITORIES='["fixture/../private"]'
+refuses "GITHUB_READ_TOKEN_REPOSITORIES lists repositories but GITHUB_READ_TOKEN is absent" -e GITHUB_READ_TOKEN=
 
 wait_running() {
   local name="$1" status=""
@@ -112,6 +113,11 @@ docker run -d --name "$NAME-pa-off" "${HARDENED[@]}" "${BASE_ENV[@]}" "$IMAGE" >
 status=$(wait_running "$NAME-pa-off")
 [ "$(jq -c '[.providers[].provider]' <<<"$status")" = '["brokkr"]' ] || fail "providers without the token: $status"
 docker rm -f "$NAME-pa-off" >/dev/null
+
+# Explicit empty scope preserves anonymous mode without a GitHub token.
+docker run -d --name "$NAME-optional" "${HARDENED[@]}" "${BASE_ENV[@]}" -e GITHUB_READ_TOKEN= -e GITHUB_READ_TOKEN_REPOSITORIES='[]' "$IMAGE" >/dev/null
+wait_running "$NAME-optional" >/dev/null
+docker rm -f "$NAME-optional" >/dev/null
 
 # Every optional-missing combination starts without a model or remote provider.
 for agents in missing '[]'; do

@@ -115,6 +115,10 @@ if (
 const claudeToken = credential("CLAUDE_CODE_OAUTH_TOKEN");
 const gitToken = credential("GITHUB_READ_TOKEN");
 if (gitToken && !/^github_pat_[A-Za-z0-9_]+$/.test(gitToken)) fail("GITHUB_READ_TOKEN must be a fine-grained GitHub token (github_pat_...)");
+// A configured scope needs a token; otherwise private reads fail later as anonymous Git requests.
+if (!gitToken && parse("GITHUB_READ_TOKEN_REPOSITORIES").length > 0) {
+  fail("GITHUB_READ_TOKEN_REPOSITORIES lists repositories but GITHUB_READ_TOKEN is absent; private reads would silently fall back to anonymous access");
+}
 const assistant = claudeToken ? "claude" : "";
 
 // Built-in providers and the providers of bundled plugins start disabled.
