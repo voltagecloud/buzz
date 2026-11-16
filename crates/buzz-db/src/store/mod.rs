@@ -104,3 +104,6 @@ mod admission_postgres_tests;
 
 /// Durable NIP-FI verified-profile projection state.
 pub mod verified_profiles;
+
+/// Owner-published team status persistence.
+pub mod team_status;

@@ -551,6 +551,7 @@ fn map_push_accept_error(error: super::push_lease::AcceptError) -> IngestError {
 /// Returns `Err` for unknown kinds — the relay rejects them.
 fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static str> {
     match kind {
+        buzz_core::kind::KIND_TEAM_AGENT_STATUS => Ok(Scope::UsersWrite),
         buzz_core::kind::KIND_AGENT_CHANNEL_GRANT => Ok(Scope::MessagesWrite),
         // Owner-managed global authority, like a profile or managed-agent record.
         buzz_core::kind::KIND_AGENT_GATEWAY_DELEGATION => Ok(Scope::UsersWrite),
@@ -843,6 +844,7 @@ pub(crate) fn requires_h_channel_scope(kind: u32) -> bool {
     matches!(
         kind,
         buzz_core::kind::KIND_AGENT_CHANNEL_GRANT
+            | buzz_core::kind::KIND_TEAM_AGENT_STATUS
             | KIND_STREAM_MESSAGE
             | KIND_STREAM_MESSAGE_V2
             | KIND_STREAM_MESSAGE_EDIT
@@ -3484,7 +3486,57 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
-    let thread_meta = if requires_h_channel_scope(kind_u32) {
+    // Status heads are ordering watermarks. Clearing replaces them; deletion
+    // must not permit an older still-live label to become current again.
+    if matches!(kind_u32, KIND_DELETION | KIND_NIP29_DELETE_EVENT) {
+        if event
+            .tags
+            .iter()
+            .filter(|t| t.as_slice().first().is_some_and(|s| s == "e"))
+            .count()
+            > 256
+        {
+            return Err(IngestError::Rejected(
+                "invalid: at most 256 deletion targets per event".into(),
+            ));
+        }
+        for tag in event.tags.iter() {
+            let parts = tag.as_slice();
+            if parts.first().is_some_and(|s| s == "a")
+                && parts.get(1).is_some_and(|s| s.starts_with("30623:"))
+            {
+                return Err(IngestError::Rejected(
+                    "invalid: clear team status instead of deleting its head".into(),
+                ));
+            }
+            if parts.first().is_some_and(|s| s == "e") {
+                if let Some(id) = parts.get(1).and_then(|s| hex::decode(s).ok()) {
+                    let target = state
+                        .db
+                        .get_event_by_id_including_deleted_for_event_write(tenant.community(), &id)
+                        .await
+                        .map_err(|e| {
+                            IngestError::Internal(format!(
+                                "status deletion check failed: {}",
+                                e.kind()
+                            ))
+                        })?;
+                    if target.is_some_and(|e| {
+                        buzz_core::kind::event_kind_u32(&e.event)
+                            == buzz_core::kind::KIND_TEAM_AGENT_STATUS
+                    }) {
+                        return Err(IngestError::Rejected(
+                            "invalid: clear team status instead of deleting its head".into(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    let thread_meta = if requires_h_channel_scope(kind_u32)
+        && kind_u32 != buzz_core::kind::KIND_TEAM_AGENT_STATUS
+    {
         if let Some(ch_id) = channel_id {
             resolve_nip10_thread_meta(tenant.community(), &event, ch_id, state)
                 .await
@@ -3755,6 +3807,19 @@ async fn ingest_event_inner(
             .replace_addressable_event(tenant.community(), &event, channel_id)
             .await
             .map_err(|e| IngestError::Internal(format!("error: {}", e.kind())))?
+    } else if kind_u32 == buzz_core::kind::KIND_TEAM_AGENT_STATUS {
+        state
+            .db
+            .replace_team_status(tenant.community(), &event)
+            .await
+            .map_err(|e| match e {
+                buzz_db::DbError::AccessDenied(reason) => {
+                    IngestError::Rejected(format!("invalid: {reason}"))
+                }
+                other => {
+                    IngestError::Internal(format!("team status write failed: {}", other.kind()))
+                }
+            })?
     } else if is_parameterized_replaceable(kind_u32) {
         // NIP-33 parameterized replaceable — keyed by (kind, pubkey, d_tag).
         let d_tag = buzz_db::event::extract_d_tag(&event).unwrap_or_default();

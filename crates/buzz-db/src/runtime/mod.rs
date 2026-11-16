@@ -58,6 +58,9 @@ pub(crate) async fn insert_mentions_in_transaction(
     event: &nostr::Event,
     channel_id: Option<Uuid>,
 ) -> Result<()> {
+    if buzz_core::kind::event_kind_u32(event) == buzz_core::kind::KIND_TEAM_AGENT_STATUS {
+        return Ok(());
+    }
     let community_id = tx.community();
     let p_tags: Vec<&str> = event
         .tags

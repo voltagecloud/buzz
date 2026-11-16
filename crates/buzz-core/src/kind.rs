@@ -537,6 +537,10 @@ pub const KIND_WORKFLOW_DEF: u32 = 30620;
 /// `hidden_at` per viewer; this is the only Nostr-visible projection of it.
 pub const KIND_DM_VISIBILITY: u32 = 30622;
 
+/// Owner-signed, channel-scoped coarse team status snapshot.
+/// Uses dedicated owner, audience, root and ordering enforcement.
+pub const KIND_TEAM_AGENT_STATUS: u32 = 30623;
+
 /// Lower bound of the NIP-33 parameterized replaceable range (30000–39999).
 pub const PARAM_REPLACEABLE_KIND_MIN: u32 = 30000;
 /// Upper bound of the NIP-33 parameterized replaceable range (30000–39999).
@@ -833,6 +837,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_CHANNEL_SUMMARY,
     KIND_PRESENCE_SNAPSHOT,
     KIND_DM_VISIBILITY,
+    KIND_TEAM_AGENT_STATUS,
     KIND_DM_OPEN,
     KIND_DM_ADD_MEMBER,
     KIND_DM_HIDE,

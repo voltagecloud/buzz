@@ -166,6 +166,35 @@ async fn check_fanout_access(
         })
         .collect();
 
+    if buzz_core::kind::event_kind_u32(&stored_event.event)
+        == buzz_core::kind::KIND_TEAM_AGENT_STATUS
+    {
+        if buzz_core::team_status::parse(&stored_event.event, community_id).is_err() {
+            return verified(Vec::new());
+        }
+        let mut allowed = Vec::new();
+        let mut unverified = Vec::new();
+        for pair in matches {
+            let Some(reader) = state.conn_manager.pubkey_for_conn(pair.0) else {
+                continue;
+            };
+            let query = buzz_db::EventQuery {
+                ids: Some(vec![stored_event.event.id.as_bytes().to_vec()]),
+                team_status_reader: Some(reader),
+                limit: Some(1),
+                ..buzz_db::EventQuery::for_community(community_id)
+            };
+            match state.db.query_events(&query).await {
+                Ok(events) if !events.is_empty() => allowed.push(pair),
+                Ok(_) => {}
+                Err(_) => unverified.push(pair),
+            }
+        }
+        return FanoutAccess {
+            allowed,
+            unverified,
+        };
+    }
     // Author-only kinds (NIP-ER reminders) may only ever be delivered to the
     // event's own author. This gate lives here — the chokepoint shared by the
     // ingest fan-out path and the Redis cross-node `subscribe_local` path, the
@@ -577,6 +606,7 @@ async fn dispatch_persistent_event_inner(
         && !buzz_core::kind::is_command_kind(kind_u32)
         && !is_relay_workflow_msg
         && kind_u32 != KIND_GIFT_WRAP
+        && kind_u32 != buzz_core::kind::KIND_TEAM_AGENT_STATUS
     {
         let workflow_engine = Arc::clone(&state.workflow_engine);
         let workflow_event = stored_event.clone();

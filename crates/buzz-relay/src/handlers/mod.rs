@@ -97,3 +97,6 @@ pub fn resolve_ttl(event: &nostr::Event, ephemeral_ttl_override: Option<i32>) ->
 
 /// NIP-AR artifact lifecycle.
 pub mod artifact;
+
+#[cfg(test)]
+mod team_status_postgres_tests;

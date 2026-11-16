@@ -168,7 +168,7 @@ async fn replace_parameterized_event_in_transaction_impl(
 
     let existing: Option<(DateTime<Utc>, Vec<u8>)> = sqlx::query_as(
         "SELECT created_at, id FROM events \
-         WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL \
+         WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND (deleted_at IS NULL OR kind = 30623) \
          ORDER BY created_at DESC, id ASC LIMIT 1",
     )
     .bind(community_id.as_uuid())
