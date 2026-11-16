@@ -3,7 +3,7 @@
 
 use crate::{mentions::Identity, mobile_launch::Registration};
 use buzz_sdk::sharing::policy::{self, Task};
-use buzz_ws_client::{NostrWsConnection, RelayMessage};
+use buzz_ws_client::{NostrWsConnection, RelayMessage, WsClientError};
 use k8s_openapi::api::core::v1::Secret;
 use kube::Api;
 use nostr::{Event, PublicKey, Timestamp};
@@ -110,6 +110,37 @@ pub(crate) async fn relay_key(relay: &str) -> Result<PublicKey, policy::Error> {
         .map_err(|_| policy::Error::Unavailable)
 }
 
+// Deliberately exclude Display/Debug error strings: relay frames and URLs can
+// contain credentials or task text. Only fixed categories cross this boundary.
+fn lookup_error(step: &'static str, error: &WsClientError, kinds: &Value) {
+    let category = match error {
+        WsClientError::Timeout | WsClientError::NoAuthChallenge => "timeout",
+        WsClientError::ConnectionClosed => "connection_closed",
+        WsClientError::AuthFailed(_) => "authentication_rejected",
+        WsClientError::WebSocket(_) => "websocket",
+        WsClientError::Json(_) | WsClientError::UnexpectedMessage(_) => "invalid_frame",
+        _ => "client",
+    };
+    lookup_failed(step, category, kinds);
+}
+
+fn lookup_failed(step: &'static str, category: &'static str, kinds: &Value) {
+    // The filter itself is not logged. Only numeric kind identifiers are safe.
+    let kinds: Vec<u16> = kinds
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|kind| kind.as_u64().and_then(|kind| u16::try_from(kind).ok()))
+        .take(64)
+        .collect();
+    tracing::warn!(
+        lookup_step = step,
+        lookup_error = category,
+        ?kinds,
+        "authorization lookup failed; task remains unauthorized and may be retried"
+    );
+}
+
 async fn query(identity: &Identity, mut filter: Value) -> Result<Vec<Event>, ()> {
     // Admission must observe committed retirement before a daemon identity
     // Secret may be removed. Replica snapshots cannot supply that authority.
@@ -119,6 +150,7 @@ async fn query(identity: &Identity, mut filter: Value) -> Result<Vec<Event>, ()>
         .as_u64()
         .filter(|limit| (1..=MAX_QUERY_EVENTS).contains(limit))
         .ok_or(())? as usize;
+    let kinds = filter["kinds"].clone();
     tokio::time::timeout(Duration::from_secs(10), async {
         let mut connection = NostrWsConnection::connect_authenticated(
             &identity.relay,
@@ -126,23 +158,24 @@ async fn query(identity: &Identity, mut filter: Value) -> Result<Vec<Event>, ()>
             Some(&identity.auth),
         )
         .await
-        .map_err(|_| ())?;
+        .map_err(|error| lookup_error("connect", &error, &kinds))?;
         connection
             .send_raw(&json!(["REQ", "shared-admission", filter]))
             .await
-            .map_err(|_| ())?;
+            .map_err(|error| lookup_error("send", &error, &kinds))?;
         let mut events = Vec::new();
         for _ in 0..limit + 8 {
             match connection
                 .next_event(Duration::from_secs(10))
                 .await
-                .map_err(|_| ())?
+                .map_err(|error| lookup_error("receive", &error, &kinds))?
             {
                 RelayMessage::Event {
                     subscription_id,
                     event,
                 } if subscription_id == "shared-admission" => {
                     if events.len() >= limit {
+                        lookup_failed("receive", "event_limit", &kinds);
                         return Err(());
                     }
                     events.push(*event);
@@ -150,12 +183,20 @@ async fn query(identity: &Identity, mut filter: Value) -> Result<Vec<Event>, ()>
                 RelayMessage::Eose { subscription_id } if subscription_id == "shared-admission" => {
                     return Ok(events)
                 }
-                RelayMessage::Closed { .. } | RelayMessage::Auth { .. } => return Err(()),
+                RelayMessage::Closed { .. } => {
+                    lookup_failed("receive", "subscription_closed", &kinds);
+                    return Err(());
+                }
+                RelayMessage::Auth { .. } => {
+                    lookup_failed("receive", "authentication_challenge", &kinds);
+                    return Err(());
+                }
                 _ => {}
             }
         }
+        lookup_failed("receive", "frame_limit", &kinds);
         Err(())
     })
     .await
-    .map_err(|_| ())?
+    .map_err(|_| lookup_failed("query", "deadline", &kinds))?
 }

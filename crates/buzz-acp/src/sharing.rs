@@ -15,7 +15,7 @@ mod tests;
 
 /// Admission transport failure. It propagates to the task owner for recovery.
 #[derive(Debug, thiserror::Error)]
-#[error("shared task admission unavailable; retry or recover this task")]
+#[error("temporary authorization lookup or transport failure; permission has not been determined; retry or recover this task")]
 pub struct Error;
 
 /// A verified manager admission, or a permanent refusal safe to show the user.
