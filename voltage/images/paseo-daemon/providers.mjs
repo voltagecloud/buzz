@@ -16,7 +16,7 @@ function provider({ label, agent: pubkey, channel }, owner) {
   return {
     extends: "acp",
     label,
-    command: ["buzz", "acp-bridge", "--agent", pubkey, "--channel", channel, "--owner", owner],
+    command: ["buzz", "acp-bridge", "--agent", pubkey, ...(channel === undefined ? [] : ["--channel", channel]), "--owner", owner],
     env: { PASEO_PASSWORD: "", CLAUDE_CODE_OAUTH_TOKEN: "", CODEX_ACCESS_TOKEN: "", GITHUB_READ_TOKEN: "", github_read_token: "" },
     options: {
       supportsMcpServers: false,
@@ -43,11 +43,11 @@ export function buzzProviders(agents, owner, taken) {
   for (const [index, agent] of agents.entries()) {
     const where = `BUZZ_PASEO_AGENTS[${index}]`;
     const { id, label, agent: pubkey, channel } = agent ?? {};
-    if (typeof id !== "string" || !/^[a-z][a-z0-9-]*$/.test(id)) throw new Error(`${where}.id must match ^[a-z][a-z0-9-]*$`);
+    if (typeof id !== "string" || (!/^[a-z][a-z0-9-]*$/.test(id) && !HEX_PUBKEY.test(id))) throw new Error(`${where}.id must match ^[a-z][a-z0-9-]*$ or be a full hex pubkey`);
     if (taken.includes(id) || Object.hasOwn(providers, id)) throw new Error(`${where}.id "${id}" is reserved or duplicated`);
     if (typeof label !== "string" || label.trim() === "") throw new Error(`${where}.label must be a non-empty string`);
     if (typeof pubkey !== "string" || !HEX_PUBKEY.test(pubkey)) throw new Error(`${where}.agent must be a 64-character hex pubkey`);
-    if (typeof channel !== "string" || !UUID.test(channel)) throw new Error(`${where}.channel must be a UUID`);
+    if (channel !== undefined && (typeof channel !== "string" || !UUID.test(channel))) throw new Error(`${where}.channel must be a UUID`);
     providers[id] = provider(agent, owner);
   }
   return providers;
@@ -67,5 +67,25 @@ export function withAgents(config, agents, owner) {
   const current = config?.agents?.providers ?? {};
   const kept = Object.fromEntries(Object.entries(current).filter(([, entry]) => !isBuzzProvider(entry)));
   const added = buzzProviders(agents, owner, Object.keys(kept));
-  return { ...config, agents: { ...config.agents, providers: { ...kept, ...added } } };
+  return { ...withPromptSection(config, "AGENTS", agentPrompt(agents)), agents: { ...config.agents, providers: { ...kept, ...added } } };
+}
+
+/** Replace one generated section; only the agent watcher rewrites config.json. */
+export function withPromptSection(config, section, text) {
+  text = text.replaceAll("<!-- BUZZ_", "\\u003c!-- BUZZ_");
+  const begin = `<!-- BUZZ_${section}_BEGIN -->`;
+  const end = `<!-- BUZZ_${section}_END -->`;
+  const prompt = config.daemon?.appendSystemPrompt;
+  if (typeof prompt !== "string") return config;
+  const start = prompt.indexOf(begin), stop = prompt.indexOf(end, start);
+  if (start < 0 || stop < start) return config;
+  return { ...config, daemon: { ...config.daemon, appendSystemPrompt:
+    `${prompt.slice(0, start + begin.length)}\n${text}\n${prompt.slice(stop)}` } };
+}
+
+/** Generated agent lines stay current when the mounted list changes. */
+export function agentPrompt(agents) {
+  return agents.length ? ["These Paseo providers connect to Buzz agents. The workspace selects the posting channel:",
+    ...agents.map((agent) => `- ${JSON.stringify(agent.id)}: ${JSON.stringify(agent.label).replaceAll("<", "\\u003c")} (pubkey ${agent.agent}${agent.channel ? `, legacy channel ${agent.channel}` : ""})`)].join("\n")
+    : "No Buzz remote providers are configured. Use the buzz CLI to reach Buzz agents.";
 }

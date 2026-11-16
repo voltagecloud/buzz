@@ -31,9 +31,20 @@ Confirm the scope before changing systems through an agent.
 
 {{MANAGER}}
 
+<!-- BUZZ_AGENTS_BEGIN -->
 {{REMOTE_AGENTS}}
+<!-- BUZZ_AGENTS_END -->
 
-Use Paseo `list_providers`, `list_models`, and `create_agent` to start a remote session.
+<!-- BUZZ_WORKSPACES_BEGIN -->
+Workspaces are loading. Use list_workspaces to choose the intended channel.
+<!-- BUZZ_WORKSPACES_END -->
+
+Use Paseo `list_providers`, `list_models`, and `list_workspaces` to select the provider and workspace.
+Pass the selected `workspaceId` to `create_agent`; its workspace selects the Buzz channel.
+Workspace directories are empty routing keys, not repository checkouts.
+Their sources are context for the channel; clone on demand and read under `$HOME/code/owner/repository`.
+Workspace records come from the owner. Ask the owner to use `buzz paseo workspace create` for a new one.
+Never create or edit workspace records with the gateway key.
 Use `get_agent_status`, `get_agent_activity`, and `send_agent_prompt` to follow it.
 
 Use `buzz` in the shell. Put `--format` before the subcommand.
