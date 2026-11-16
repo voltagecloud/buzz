@@ -44,7 +44,7 @@ impl Ids {
             signer: self.signer.clone(),
             owner: self.signer.public_key(),
             agent: self.agent.public_key(),
-            channel: self.channel,
+            channel: Some(self.channel),
             home: self.home.path().to_path_buf(),
             paseo_code: self.home.path().join("bin/paseo-code"),
         }
@@ -188,7 +188,9 @@ fn fake_query_page(events: &[Event], filter: &Value) -> Vec<Event> {
                 && filter["authors"]
                     .as_array()
                     .is_none_or(|authors| authors.contains(&json!(event.pubkey.to_hex())))
-                && (!single("#h") || tagged(event, "#h"))
+                // The relay turns `#h`, single or multi-valued, into a SQL
+                // channel predicate (`apply_channel_scope_to_query`).
+                && tagged(event, "#h")
                 && (!single("#p") || tagged(event, "#p"))
                 && tagged(event, "#e")
                 && (!nip33 || tagged(event, "#d"))
@@ -242,8 +244,12 @@ impl BridgeRelay for FakeRelay {
             if !explicit.is_empty() {
                 return Ok(explicit);
             }
-            if filter["#d"] == json!([self.scope.channel.to_string()]) {
-                return Ok(vec![roster(&self.scope, self.scope.channel, true)]);
+            if let Some(channel) = self
+                .scope
+                .channel
+                .filter(|channel| filter["#d"] == json!([channel.to_string()]))
+            {
+                return Ok(vec![roster(&self.scope, channel, true)]);
             }
             return Ok(Vec::new());
         }
@@ -1520,7 +1526,7 @@ fn telemetry_is_accepted_only_from_the_agent_to_the_signer() {
         FrameError::NotForSigner
     );
 
-    let control = cancel_turn_frame(&scope, "r1").unwrap();
+    let control = cancel_turn_frame(&scope, ids.channel, "r1").unwrap();
     assert_eq!(
         decode_telemetry(&scope, &control).unwrap_err(),
         FrameError::NotTelemetry
@@ -1887,3 +1893,6 @@ mod transcript_replay_tests;
 #[path = "channel_tests.rs"]
 mod channel_tests;
 use channel_tests::roster;
+
+#[path = "workspace_routing_tests.rs"]
+mod workspace_routing_tests;

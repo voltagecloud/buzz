@@ -340,10 +340,15 @@ enum Cmd {
         name = "acp-bridge",
         long_about = "\
 Act as an ACP (Agent Client Protocol) agent on stdin/stdout that drives one Buzz
-remote agent through the relay. Each ACP session is one thread in --channel:
-the first prompt posts a kind 9 thread root that mentions --agent (which starts
-the agent's sandbox), and later prompts post replies in that thread. The
-agent's observer telemetry streams back as session/update notifications.
+remote agent through the relay. Each ACP session is one thread: the first
+prompt posts a kind 9 thread root that mentions --agent (which starts the
+agent's sandbox), and later prompts post replies in that thread. The agent's
+observer telemetry streams back as session/update notifications.
+
+A session whose working directory is in a Paseo workspace
+($HOME/workspaces/<directory>, see `buzz paseo workspace`) posts in the
+workspace's channel. Other sessions post in --channel; without it, they are
+refused and nothing is posted.
 
 When the thread's agent session has ended, the bridge says so and accepts
 /fresh (resend as a new thread, new empty workspace) or /recover (resend in the
@@ -354,7 +359,9 @@ requests; live telemetry is only readable when it is the agent owner's key.
 stdout carries only JSON-RPC; diagnostics go to stderr.",
         after_help = "\
 Example Paseo provider:
-  {\"extends\":\"acp\",\"command\":[\"buzz\",\"acp-bridge\",\"--agent\",\"<agent pubkey>\",\"--channel\",\"<channel uuid>\"]}"
+  {\"extends\":\"acp\",\"command\":[\"buzz\",\"acp-bridge\",\"--agent\",\"<agent pubkey>\",\"--owner\",\"<owner pubkey>\"]}
+
+Add \"--channel\",\"<channel uuid>\" for sessions outside every workspace."
     )]
     AcpBridge {
         /// Pubkey of the remote agent to drive (hex or npub)
@@ -363,9 +370,11 @@ Example Paseo provider:
         /// Owner public key when signing with a delegated gateway key
         #[arg(long)]
         owner: Option<String>,
-        /// Channel UUID where prompts are posted as thread messages
+        /// Legacy channel UUID for sessions outside every Paseo workspace.
+        /// A session in a workspace posts in the workspace's channel.
+        /// Without it, sessions outside a workspace are refused.
         #[arg(long)]
-        channel: String,
+        channel: Option<String>,
     },
 }
 
@@ -2409,7 +2418,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             agent,
             channel,
             owner,
-        } => commands::acp_bridge::run(client, &agent, &channel, owner.as_deref()).await,
+        } => commands::acp_bridge::run(client, &agent, channel.as_deref(), owner.as_deref()).await,
         Cmd::Pack(_) => unreachable!("handled above"),
     }
 }

@@ -31,7 +31,7 @@ fn sample_bridge() -> (Bridge<NoRelay>, mpsc::Receiver<Value>) {
         owner: signer.public_key(),
         signer,
         agent: Keys::generate().public_key(),
-        channel: uuid::Uuid::new_v4(),
+        channel: Some(uuid::Uuid::new_v4()),
         home: std::path::PathBuf::from("/nonexistent"),
         paseo_code: std::path::PathBuf::from("/nonexistent/paseo-code"),
     };
@@ -53,6 +53,7 @@ fn sample_bridge() -> (Bridge<NoRelay>, mpsc::Receiver<Value>) {
                 token: 1,
                 overflowed: false,
                 project: None,
+                cwd: None,
             },
         )]),
         history_live: Vec::new(),
@@ -64,6 +65,8 @@ fn sample_bridge() -> (Bridge<NoRelay>, mpsc::Receiver<Value>) {
         names: Arc::new(Names::default()),
         peer_names: 0,
         prepares: Arc::new(Semaphore::new(4)),
+        workspaces: Arc::new(workspaces::Cache::default()),
+        route_ops: 0,
     };
     (bridge, replies)
 }

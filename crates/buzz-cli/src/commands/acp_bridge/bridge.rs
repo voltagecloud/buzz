@@ -22,6 +22,7 @@ use super::projects;
 use super::prompt::{self, Prompt};
 use super::views::BranchViews;
 use super::wire::{self, Inbound, StdinMsg};
+use super::workspaces::{self, Route};
 use crate::error::CliError;
 
 #[path = "history.rs"]
@@ -51,6 +52,8 @@ const DUPLICATE_RESIGN_DELAY: Duration = Duration::from_millis(1100);
 const OUT_QUEUE: usize = 256;
 const IN_QUEUE: usize = 4;
 const OPS_QUEUE: usize = 64;
+/// Most workspace lookups for `session/new` and `/fresh` in flight at once.
+const MAX_ROUTE_OPS: usize = 4;
 /// Time allowed for queued client frames to drain after the loop ends.
 const WRITER_DRAIN: Duration = Duration::from_secs(5);
 
@@ -82,8 +85,9 @@ pub(crate) trait BridgeRelay: Send + Sync + 'static {
         async { Err(CliError::Other("history queries unavailable".into())) }
     }
 
-    /// Build and sign a kind 9 prompt that mentions the agent: a thread root
-    /// when `thread_root` is `None`, otherwise a reply in that thread.
+    /// Build and sign a kind 9 prompt in `channel` that mentions the agent: a
+    /// thread root when `thread_root` is `None`, otherwise a reply in that
+    /// thread.
     fn prepare_prompt(
         &self,
         channel: uuid::Uuid,
@@ -196,6 +200,8 @@ impl RecentIds {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
+    /// A `/fresh` waiting for its workspace lookup; nothing is prepared yet.
+    Resolving,
     /// Waiting for the relay subscription before posting.
     AwaitingRelay,
     Preparing,
@@ -231,6 +237,27 @@ struct PendingPrompt {
     prepare: Option<PrepareTask>,
 }
 
+impl PendingPrompt {
+    fn new(request_id: Value, generation: u64, prompt: Prompt, phase: Phase) -> Self {
+        Self {
+            request_id,
+            generation,
+            prompt,
+            phase,
+            event_id: None,
+            created_at: None,
+            is_root: false,
+            turn_id: None,
+            stop_reason: None,
+            usage: None,
+            cancel: None,
+            fallback_deadline: None,
+            silence_deadline: None,
+            prepare: None,
+        }
+    }
+}
+
 /// Aborts a prompt's preparation when the prompt is cancelled, finished, or
 /// replaced, so a prompt that is gone never waits for a slot, uploads, or signs.
 struct PrepareTask(tokio::task::AbortHandle);
@@ -242,15 +269,22 @@ impl Drop for PrepareTask {
 }
 
 struct Session {
-    /// Posting and replay channel, taken from the loaded root or new-session default.
+    /// Posting and replay channel, taken from the loaded root or the new
+    /// session's route; `/fresh` routes it again.
     channel: uuid::Uuid,
     id: String,
     /// Changes on replay installation, fencing pending presentation lookups.
     replay_epoch: u64,
     /// Thread root event id, once the first prompt is signed.
     root: Option<String>,
+    /// The client's working directory; `/fresh` resolves its channel again.
+    cwd: Option<String>,
+    /// The workspace of the working directory, recorded on each new thread
+    /// root as [`workspaces::WORKSPACE_TAG`].
+    workspace: Option<String>,
     /// The `<owner>/<repo>` project of the `session/new` working directory,
-    /// or of a loaded thread's root; recorded on each new thread root.
+    /// or of a loaded thread's root; recorded on each new thread root
+    /// outside a workspace.
     project: Option<String>,
     /// The sandbox manager's notice that this thread's agent session ended,
     /// up to [`ENDED_REASON_CHARS`]. New prompts are not posted until the
@@ -304,6 +338,18 @@ pub(crate) fn parse_recovery(text: &str) -> Option<(Recovery, &str)> {
 /// Results of background relay calls, fenced by session generation.
 enum Op {
     PeerNameWarmed,
+    /// The workspace lookup of a `session/new`.
+    Created {
+        id: Value,
+        cwd: Option<String>,
+        result: Result<Route, CliError>,
+    },
+    /// The workspace lookup of a `/fresh`.
+    Refreshed {
+        session: String,
+        generation: u64,
+        result: Result<Route, CliError>,
+    },
     HistoryListed {
         id: Value,
         result: Result<Value, CliError>,
@@ -339,6 +385,8 @@ struct HistoryLoad {
     overflowed: bool,
     /// The project of the client's `cwd`, adopted by an untagged root.
     project: Option<String>,
+    /// The client's `cwd`, from which `/fresh` routes a new root.
+    cwd: Option<String>,
 }
 
 /// Run the bridge until the client closes stdin (`Ok`) or stdout, stdin, or
@@ -382,6 +430,8 @@ where
         names: Arc::new(Names::default()),
         peer_names: 0,
         prepares: Arc::new(Semaphore::new(4)),
+        workspaces: Arc::new(workspaces::Cache::default()),
+        route_ops: 0,
     };
     let result = bridge.run(&mut in_rx, &mut relay_rx, &mut ops_rx).await;
     reader.abort();
@@ -415,6 +465,10 @@ struct Bridge<R> {
     seen: RecentIds,
     /// Counter that orders session use, for eviction.
     tick: u64,
+    /// Workspace lookups shared with listing.
+    workspaces: Arc<workspaces::Cache>,
+    /// Workspace lookups in flight for `session/new` and `/fresh`.
+    route_ops: usize,
 }
 
 fn stdout_closed() -> CliError {
@@ -544,31 +598,83 @@ impl<R: BridgeRelay> Bridge<R> {
         }
     }
 
+    /// Create a session. A working directory outside every workspace posts
+    /// in the legacy channel at once; any other needs a workspace lookup,
+    /// which runs in the background so other sessions are not delayed.
     async fn on_session_new(&mut self, id: Value, params: &Value) -> Result<(), CliError> {
-        if self.sessions.len() >= MAX_SESSIONS && !self.evict_idle_session() {
+        if !self.session_fits() {
+            return self.sessions_full(id).await;
+        }
+        let cwd = params.get("cwd").and_then(Value::as_str).map(str::to_owned);
+        if let Some(route) = workspaces::immediate(&self.scope, cwd.as_deref()) {
+            return self.create_session(id, cwd, route).await;
+        }
+        if self.route_ops >= MAX_ROUTE_OPS {
             return self
                 .respond_error(
                     id,
                     wire::INTERNAL_ERROR,
-                    &format!(
-                        "acp-bridge has {MAX_SESSIONS} sessions with running prompts; wait for one to finish"
-                    ),
+                    "workspace lookups are busy; retry",
                 )
                 .await;
         }
+        self.route_ops += 1;
+        let (relay, scope, cache, ops) = (
+            Arc::clone(&self.relay),
+            self.scope.clone(),
+            Arc::clone(&self.workspaces),
+            self.ops.clone(),
+        );
+        tokio::spawn(async move {
+            let result = workspaces::resolve(relay.as_ref(), &scope, &cache, cwd.as_deref()).await;
+            let _ = ops.send(Op::Created { id, cwd, result }).await;
+        });
+        Ok(())
+    }
+
+    /// Whether a new session fits, if need be in an idle session's place.
+    /// Only [`Self::create_session`] evicts, so a refused session costs none.
+    fn session_fits(&self) -> bool {
+        self.sessions.len() < MAX_SESSIONS || self.sessions.values().any(|s| s.pending.is_none())
+    }
+
+    async fn sessions_full(&self, id: Value) -> Result<(), CliError> {
+        self.respond_error(
+            id,
+            wire::INTERNAL_ERROR,
+            &format!(
+                "acp-bridge has {MAX_SESSIONS} sessions with running prompts; wait for one to finish"
+            ),
+        )
+        .await
+    }
+
+    /// Insert a new session that posts its thread root by `route`. At the
+    /// cap it takes the least recently used idle session's place; other
+    /// sessions may have filled the bridge during a workspace lookup.
+    async fn create_session(
+        &mut self,
+        id: Value,
+        cwd: Option<String>,
+        route: Route,
+    ) -> Result<(), CliError> {
+        if self.sessions.len() >= MAX_SESSIONS && !self.evict_idle_session() {
+            return self.sessions_full(id).await;
+        }
         let session_id = uuid::Uuid::new_v4().to_string();
         let last_used = self.next_tick();
-        let project = params
-            .get("cwd")
-            .and_then(Value::as_str)
+        let project = cwd
+            .as_deref()
             .and_then(|cwd| projects::project_of_cwd(&self.scope.home, cwd));
         self.sessions.insert(
             session_id.clone(),
             Session {
-                channel: self.scope.channel,
+                channel: route.channel,
                 id: session_id.clone(),
                 replay_epoch: 0,
                 root: None,
+                cwd,
+                workspace: route.workspace,
                 project,
                 ended: None,
                 generation: 0,
@@ -651,7 +757,6 @@ impl<R: BridgeRelay> Bridge<R> {
         let Some(session) = self.sessions.get_mut(session_id) else {
             return Ok(());
         };
-        let channel = session.channel;
         let command = parse_recovery(&text.text);
         let body = match command {
             Some((_, rest)) if !rest.is_empty() || !text.images.is_empty() => Some(Prompt {
@@ -667,24 +772,83 @@ impl<R: BridgeRelay> Bridge<R> {
                 .send(wire::ok(id, json!({ "stopReason": "end_turn" })))
                 .await;
         };
-        session.ended = None;
-        let posted = match command {
-            Recovery::SameThread => body.clone(),
-            Recovery::NewThread => {
-                session.channel = self.scope.channel;
-                match session.root.take() {
-                    Some(old_root) => Prompt {
-                        text: format!(
-                            "{}\n\nPrevious thread (its agent session ended): {}",
-                            body.text,
-                            message_link(channel, &old_root)
-                        ),
-                        ..body.clone()
-                    },
-                    None => body.clone(),
-                }
-            }
+        if command == Recovery::SameThread {
+            session.ended = None;
+            self.send(wire::session_update(
+                session_id,
+                wire::available_commands(&[]),
+            ))
+            .await?;
+            self.begin_prompt(id, session_id, body.clone(), body);
+            return Ok(());
+        }
+        // A new root posts where the working directory routes now: a moved
+        // or deleted workspace never reuses the old channel.
+        if let Some(route) = workspaces::immediate(&self.scope, session.cwd.as_deref()) {
+            return self.start_fresh(id, session_id, body, route).await;
+        }
+        if self.route_ops >= MAX_ROUTE_OPS {
+            return self
+                .respond_error(
+                    id,
+                    wire::INTERNAL_ERROR,
+                    "workspace lookups are busy; retry",
+                )
+                .await;
+        }
+        self.route_ops += 1;
+        session.generation += 1;
+        let generation = session.generation;
+        let cwd = session.cwd.clone();
+        // A placeholder that blocks other prompts and accepts a cancel; the
+        // session stays ended until the lookup succeeds.
+        session.pending = Some(PendingPrompt::new(id, generation, body, Phase::Resolving));
+        let (relay, scope, cache, ops) = (
+            Arc::clone(&self.relay),
+            self.scope.clone(),
+            Arc::clone(&self.workspaces),
+            self.ops.clone(),
+        );
+        let session = session_id.to_owned();
+        tokio::spawn(async move {
+            let result = workspaces::resolve(relay.as_ref(), &scope, &cache, cwd.as_deref()).await;
+            let _ = ops
+                .send(Op::Refreshed {
+                    session,
+                    generation,
+                    result,
+                })
+                .await;
+        });
+        Ok(())
+    }
+
+    /// Resend `body` as a new thread root by `route`, linking the old root
+    /// in its own channel.
+    async fn start_fresh(
+        &mut self,
+        id: Value,
+        session_id: &str,
+        body: Prompt,
+        route: Route,
+    ) -> Result<(), CliError> {
+        let Some(session) = self.sessions.get_mut(session_id) else {
+            return Ok(());
         };
+        session.ended = None;
+        let posted = match session.root.take() {
+            Some(old_root) => Prompt {
+                text: format!(
+                    "{}\n\nPrevious thread (its agent session ended): {}",
+                    body.text,
+                    message_link(session.channel, &old_root)
+                ),
+                ..body.clone()
+            },
+            None => body.clone(),
+        };
+        session.channel = route.channel;
+        session.workspace = route.workspace;
         self.send(wire::session_update(
             session_id,
             wire::available_commands(&[]),
@@ -700,13 +864,8 @@ impl<R: BridgeRelay> Bridge<R> {
         let session = self.sessions.get(session_id);
         let root = session.and_then(|s| s.root.as_deref()).unwrap_or_default();
         let reason = session.and_then(|s| s.ended.as_deref()).unwrap_or_default();
-        let notice = ended_notice(
-            reason,
-            &message_link(
-                session.map(|s| s.channel).unwrap_or(self.scope.channel),
-                root,
-            ),
-        );
+        let channel = session.map(|s| s.channel).unwrap_or_default();
+        let notice = ended_notice(reason, &message_link(channel, root));
         self.send(wire::session_update(
             session_id,
             wire::agent_text_chunk(&notice),
@@ -731,22 +890,12 @@ impl<R: BridgeRelay> Bridge<R> {
         session.generation += 1;
         session.streamed.clear();
         session.deferred.clear();
-        session.pending = Some(PendingPrompt {
-            request_id: id,
-            generation: session.generation,
+        session.pending = Some(PendingPrompt::new(
+            id,
+            session.generation,
             prompt,
-            phase: Phase::AwaitingRelay,
-            event_id: None,
-            created_at: None,
-            is_root: false,
-            turn_id: None,
-            stop_reason: None,
-            usage: None,
-            cancel: None,
-            fallback_deadline: None,
-            silence_deadline: None,
-            prepare: None,
-        });
+            Phase::AwaitingRelay,
+        ));
         if self.relay_live {
             self.start_prepare(session_id.to_owned(), Duration::ZERO);
         }
@@ -831,24 +980,22 @@ impl<R: BridgeRelay> Bridge<R> {
         if pending.cancel.is_some() {
             return Ok(());
         }
-        if matches!(pending.phase, Phase::AwaitingRelay | Phase::Preparing) {
+        if matches!(
+            pending.phase,
+            Phase::Resolving | Phase::AwaitingRelay | Phase::Preparing
+        ) {
             // Nothing reached the relay; a late Prepared result is fenced out
             // because the pending prompt is gone.
             return self.finish(session_id, "cancelled").await;
         }
         let request_id = uuid::Uuid::new_v4().to_string();
         let generation = pending.generation;
+        let channel = session.channel;
         pending.cancel = Some(CancelState {
             request_id: request_id.clone(),
             deadline: Instant::now() + self.timing.cancel_wait,
         });
-        let frame = match frames::cancel_turn_frame(
-            &Scope {
-                channel: session.channel,
-                ..self.scope.clone()
-            },
-            &request_id,
-        ) {
+        let frame = match frames::cancel_turn_frame(&self.scope, channel, &request_id) {
             Ok(frame) => frame,
             Err(e) => return self.fail(session_id, &cancel_failed(&e)).await,
         };
@@ -882,6 +1029,41 @@ impl<R: BridgeRelay> Bridge<R> {
             Op::PeerNameWarmed => {
                 self.peer_names = self.peer_names.saturating_sub(1);
                 Ok(())
+            }
+            Op::Created { id, cwd, result } => {
+                self.route_ops = self.route_ops.saturating_sub(1);
+                match result {
+                    Ok(route) => self.create_session(id, cwd, route).await,
+                    Err(error) => {
+                        self.respond_error(id, wire::INTERNAL_ERROR, &error.to_string())
+                            .await
+                    }
+                }
+            }
+            Op::Refreshed {
+                session,
+                generation,
+                result,
+            } => {
+                self.route_ops = self.route_ops.saturating_sub(1);
+                let Some(state) = self.current(&session, generation) else {
+                    return Ok(());
+                };
+                if state.pending.as_ref().map(|p| p.phase) != Some(Phase::Resolving) {
+                    return Ok(());
+                }
+                match result {
+                    Ok(route) => {
+                        let Some(pending) = state.pending.take() else {
+                            return Ok(());
+                        };
+                        self.start_fresh(pending.request_id, &session, pending.prompt, route)
+                            .await
+                    }
+                    // The session stays ended with its root, so `/fresh` can
+                    // be retried.
+                    Err(error) => self.fail(&session, &error.to_string()).await,
+                }
             }
 
             Op::HistoryListed { id, result } => {
@@ -928,7 +1110,9 @@ impl<R: BridgeRelay> Bridge<R> {
                 if state.root.is_none() {
                     let mut tags = event.tags.to_vec();
                     let mut added = vec![["d".to_owned(), format!("buzz-acp:{session}")]];
-                    if let Some(project) = &state.project {
+                    if let Some(workspace) = &state.workspace {
+                        added.push([workspaces::WORKSPACE_TAG.to_owned(), workspace.clone()]);
+                    } else if let Some(project) = &state.project {
                         added.push([projects::PROJECT_TAG.to_owned(), project.clone()]);
                     }
                     match added

@@ -5,11 +5,15 @@
 //! created in one of those directories records the project on its thread root
 //! as [`PROJECT_TAG`], so `session/list` can return a working directory that
 //! exists after the daemon (and its local session list) is replaced.
-//! Conversations without a usable project share `$HOME/buzz`.
+//! Workspace directories (see [`super::workspaces`]) are placed first.
+//! Conversations without a usable workspace or project share `$HOME/buzz`.
 
 use std::path::{Component, Path, PathBuf};
 
 use nostr::{Event, PublicKey};
+
+use super::workspaces;
+use crate::error::CliError;
 
 /// Thread root tag naming the GitHub project of the session, `<owner>/<repo>`.
 pub(crate) const PROJECT_TAG: &str = "paseo-project";
@@ -49,28 +53,52 @@ pub(crate) fn project_of_root(root: &Event, trusted: &[PublicKey]) -> Option<Str
     Some(value.clone())
 }
 
-/// The working directory `session/list` reports for a thread root; see
-/// [`project_of_root`] for `trusted`. `fallback` is computed at most once
-/// per listing.
-pub(crate) fn session_cwd(
+/// The working directory `session/list` reports for a thread root, by the
+/// placement order of the design's section 4.5:
+///
+/// 1. A recorded workspace ([`workspaces::slug_of_root`]): its directory,
+///    live or retained, when it exists; otherwise `$HOME/buzz`.
+/// 2. A recorded project ([`project_of_root`]): its directory, when it exists.
+/// 3. A live workspace that binds the root's channel: its directory.
+/// 4. `$HOME/buzz`.
+///
+/// `trusted` keys may choose a directory with a tag. `live` reads the
+/// current workspaces for step 3 at most once per listing. `fallback` is
+/// computed at most once per listing.
+pub(crate) async fn session_cwd<R: super::bridge::BridgeRelay>(
     home: &Path,
     root: &Event,
     trusted: &[PublicKey],
+    live: &mut workspaces::Live<'_, R>,
     fallback: &mut Option<PathBuf>,
-) -> PathBuf {
+) -> Result<PathBuf, CliError> {
+    if let Some(slug) = workspaces::slug_of_root(root, trusted) {
+        if let Some(dir) = workspaces::recorded_directory(home, &slug) {
+            return Ok(dir);
+        }
+        return Ok(fallback.get_or_insert_with(|| buzz_dir(home)).clone());
+    }
     if let Some(project) = project_of_root(root, trusted) {
         let dir = home.join("code").join(project);
         if dir.is_dir() {
-            return dir;
+            return Ok(dir);
         }
     }
-    fallback.get_or_insert_with(|| buzz_dir(home)).clone()
+    if let Some(dir) = workspaces::bound_directory(home, root, &*live.get().await?) {
+        return Ok(dir);
+    }
+    Ok(fallback.get_or_insert_with(|| buzz_dir(home)).clone())
 }
 
 /// The `cwd` filter of `session/list`, in the form [`session_cwd`] returns:
-/// a project, its branch views, and their subdirectories become the project
-/// directory; `$HOME/buzz` and its subdirectories become `$HOME/buzz`.
+/// a workspace directory and its subdirectories become the workspace
+/// directory; a project, its branch views, and their subdirectories become
+/// the project directory; `$HOME/buzz` and its subdirectories become
+/// `$HOME/buzz`.
 pub(crate) fn filter_cwd(home: &Path, cwd: &str) -> Option<PathBuf> {
+    if let Some(directory) = workspaces::directory_of_cwd(home, cwd) {
+        return Some(workspaces::path_of(home, &directory));
+    }
     if let Some(project) = project_of_cwd(home, cwd) {
         return Some(home.join("code").join(project));
     }
@@ -108,7 +136,7 @@ fn buzz_dir(home: &Path) -> PathBuf {
 }
 
 /// An absolute path with `.` and `..` resolved lexically.
-fn normalise(path: &Path) -> Option<PathBuf> {
+pub(crate) fn normalise(path: &Path) -> Option<PathBuf> {
     if !path.is_absolute() {
         return None;
     }

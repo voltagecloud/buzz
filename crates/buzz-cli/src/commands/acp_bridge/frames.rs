@@ -58,7 +58,8 @@ const STOP_REASONS: &[&str] = &[
     "cancelled",
 ];
 
-/// Bridge identity and the default channel for new sessions.
+/// Bridge identity and the legacy channel for sessions outside every
+/// workspace.
 #[derive(Clone)]
 pub(crate) struct Scope {
     /// The bridge signer: posts prompts, decrypts telemetry, signs control frames.
@@ -67,8 +68,9 @@ pub(crate) struct Scope {
     pub owner: PublicKey,
     /// The driven agent.
     pub agent: PublicKey,
-    /// The default channel for newly created sessions.
-    pub channel: Uuid,
+    /// The legacy channel: where sessions outside every workspace post.
+    /// Without it, those sessions are refused (see [`super::workspaces`]).
+    pub channel: Option<Uuid>,
     /// The daemon's home directory, which holds the Paseo projects
     /// (see [`super::projects`]).
     pub home: std::path::PathBuf,
@@ -306,7 +308,7 @@ pub(crate) fn prompt_usage(usage: &Value) -> Option<Value> {
 }
 
 /// Build a signed `cancel_turn` control frame for the agent's turn in
-/// `scope.channel`.
+/// `channel`.
 ///
 /// Matches what `handle_relay_observer_control_event` and
 /// `handle_cancel_turn_control` in `crates/buzz-acp/src/lib.rs` accept: kind
@@ -315,10 +317,14 @@ pub(crate) fn prompt_usage(usage: &Value) -> Option<Value> {
 /// echoes in its `control_result`. The harness only accepts frames signed by
 /// the agent's owner and created within five minutes of its clock, so the
 /// frame is stamped now and must be published promptly.
-pub(crate) fn cancel_turn_frame(scope: &Scope, request_id: &str) -> Result<Event, CliError> {
+pub(crate) fn cancel_turn_frame(
+    scope: &Scope,
+    channel: Uuid,
+    request_id: &str,
+) -> Result<Event, CliError> {
     let payload = json!({
         "type": "cancel_turn",
-        "channelId": scope.channel.to_string(),
+        "channelId": channel.to_string(),
         "requestId": request_id,
     });
     let encrypted = encrypt_observer_payload(&scope.signer, &scope.agent, &payload)
