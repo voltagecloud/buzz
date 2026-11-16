@@ -342,6 +342,11 @@ impl Session {
     /// Stops the session for good: pending sends end and nothing writes
     /// local storage afterwards, so it can be purged.
     pub async fn dispose(&self) {
+        self.team_status_task.abort();
+        if let Err(error) = self.team_status.stop() {
+            // Existing active intents survive in viewer prefs and become clears on reopen.
+            tracing::error!(%error, "team status clear remains unconfirmed");
+        }
         self.workflows.dispose();
         self.homes.clear();
         let (reply, done) = tokio::sync::oneshot::channel();

@@ -176,7 +176,7 @@ async fn check_epoch(ops: &Ops, epoch: u64) -> Result<(), String> {
     }
 }
 
-async fn state(ctx: &Context, channel: &str) -> Result<ChannelState, String> {
+pub(super) async fn state(ctx: &Context, channel: &str) -> Result<ChannelState, String> {
     lifecycle::channel_id(channel).map_err(|e| e.to_string())?;
     ChannelState::parse(
         &read(ctx, lifecycle::state_filters(&ctx.relay, channel)).await?,
@@ -218,7 +218,7 @@ async fn grants(ctx: &Context, channel: &str) -> Result<BTreeMap<String, Verifie
     Ok(heads)
 }
 
-async fn profile(ctx: &Context, agent: &str) -> Result<Verified, String> {
+pub(super) async fn profile(ctx: &Context, agent: &str) -> Result<Verified, String> {
     let events = read(
         ctx,
         vec![filter(

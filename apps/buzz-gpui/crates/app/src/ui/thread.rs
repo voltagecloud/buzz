@@ -128,6 +128,7 @@ pub struct ThreadPanel {
     input: Entity<TextareaState>,
     /// Row actions: the hover bar, menus, reactions and dialogs.
     message_actions: Entity<MessageActions>,
+    team_status: Option<Entity<super::team_status::TeamStatus>>,
     error: Option<SharedString>,
     on_close: OnClose,
     /// Draws its own "Thread" header. Off inside a tab pane, whose tab
@@ -337,6 +338,7 @@ impl ThreadPanel {
             message_actions,
             error: None,
             on_close,
+            team_status: None,
             show_header: false,
             require_ready_root: false,
             revealing: exact.then_some(root_id),
@@ -1572,6 +1574,34 @@ impl Render for ThreadPanel {
                 }
             }))
             .children(header)
+            .child(
+                super::team_status::action(
+                    "thread-team-status",
+                    "Share team status for this thread",
+                    false,
+                    cx,
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    if this.team_status.is_some() {
+                        this.team_status = None;
+                    } else {
+                        this.team_status = Some(cx.new(|cx| {
+                            super::team_status::TeamStatus::new(
+                                this.community.clone(),
+                                this.channel.clone(),
+                                this.snapshot
+                                    .root
+                                    .as_ref()
+                                    .map_or_else(|| this.root_id.to_hex(), |root| root.id.to_hex()),
+                                window,
+                                cx,
+                            )
+                        }));
+                    }
+                    cx.notify();
+                })),
+            )
+            .children(self.team_status.clone())
             .child(match join {
                 Some(join) => div()
                     .relative()

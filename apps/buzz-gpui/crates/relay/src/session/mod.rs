@@ -42,6 +42,7 @@ mod reminders;
 pub mod share;
 mod sidebar;
 mod statuses;
+pub mod team_status;
 mod threads;
 mod timeline;
 mod unread;
@@ -338,6 +339,8 @@ pub struct Session {
     homes: crate::projects::Homes,
     /// Submitted shares by source conversation (`share-attempt.ts`).
     shares: std::sync::Mutex<HashMap<String, Arc<share::ShareAttempt>>>,
+    team_status: Arc<team_status::Publisher>,
+    team_status_task: tokio::task::JoinHandle<()>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -474,6 +477,14 @@ impl Session {
         };
         let (reminder_owner, reminders) = reminders::new();
         let (inbox_owner, inbox_view) = inbox::new();
+        let team_status = team_status::Publisher::shared(store.clone(), viewer.clone());
+        let team_status_task = team_status::spawn(
+            runtime,
+            team_status.clone(),
+            actions::Ops {
+                commands: commands.clone(),
+            },
+        );
         let actor = Actor {
             reminders: reminder_owner,
             inbox: inbox_owner,
@@ -564,6 +575,8 @@ impl Session {
             workflows,
             homes,
             shares: Default::default(),
+            team_status,
+            team_status_task,
             task,
         }
     }
@@ -1104,6 +1117,7 @@ enum Write {
 
 impl Drop for Session {
     fn drop(&mut self) {
+        self.team_status_task.abort();
         self.task.abort();
     }
 }

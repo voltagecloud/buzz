@@ -91,6 +91,7 @@ voltage-sandbox = [
 runtime-shaders = ["dep:gpui-pre-macos", "gpui-pre-macos/runtime_shaders"]
 
 [dev-dependencies]
+gpui-kit = { workspace = true, features = ["test-support"] }
 # Paused time for timing tests.
 tokio = { version = "1", features = ["test-util"] }
 

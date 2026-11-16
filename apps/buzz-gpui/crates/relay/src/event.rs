@@ -39,6 +39,8 @@ pub mod kinds {
     pub const REMINDERS: u16 = 30300;
     pub const USER_STATUS: u16 = 30315;
     pub const HIDDEN_DMS: u16 = 30622;
+    /// Owner-signed, channel-scoped team status.
+    pub const TEAM_AGENT_STATUS: u16 = 30623;
     pub const CHANNEL_METADATA: u16 = 39000;
     pub const CHANNEL_ADMINS: u16 = 39001;
     pub const CHANNEL_MEMBERS: u16 = 39002;
