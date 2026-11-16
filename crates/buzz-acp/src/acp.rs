@@ -83,47 +83,8 @@ impl StopReason {
     }
 }
 
-/// Errors that can occur in the ACP client.
-#[derive(Debug, thiserror::Error)]
-pub enum AcpError {
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
-
-    #[error("JSON error: {0}")]
-    Json(#[from] serde_json::Error),
-
-    #[error("Agent process exited unexpectedly")]
-    AgentExited,
-
-    #[error("Idle timeout — no agent activity for {0:?}")]
-    IdleTimeout(std::time::Duration),
-
-    #[error("Hard turn timeout exceeded (silence {silence:?})")]
-    HardTimeout { silence: std::time::Duration },
-
-    #[error("Agent did not stop within {0:?} after cancellation")]
-    CancelDrainTimeout(std::time::Duration),
-
-    #[error("Request timeout — agent did not respond within {0:?}")]
-    Timeout(std::time::Duration),
-
-    #[error("Write timeout — agent stopped reading stdin (blocked for {0:?})")]
-    WriteTimeout(std::time::Duration),
-
-    #[error("Protocol error: {0}")]
-    Protocol(String),
-
-    #[error("Shared task permission: {0}")]
-    TaskPermission(String),
-
-    #[error("Agent reported error (code {code}): {message}")]
-    AgentError { code: i64, message: String },
-
-    /// The adapter cannot run the permission mode this harness requires.
-    /// The pipe is intact, and neither a retry nor a respawn can repair it.
-    #[error("Required permission mode unavailable: {0}")]
-    PermissionModeUnavailable(String),
-}
+mod error;
+pub use error::AcpError;
 
 /// Build an [`AcpError::AgentError`] from a JSON-RPC error object,
 /// preserving the numeric code. When the `message` field is missing or
@@ -192,6 +153,7 @@ pub struct AcpClient {
     /// The current turn's NIP-AT transcript recorder, fed from the same raw
     /// ACP reads and writes as the observer feed.
     transcript: Option<crate::transcript::SharedRecorder>,
+    pub(crate) handoff_completion: crate::sharing::completion::Slot,
     /// Most recently observed `_meta.goose.activeRunId` from a
     /// `session/update` notification of kind `session_info_update`.
     ///
@@ -639,6 +601,7 @@ impl AcpClient {
             observer_agent_index: None,
             observer_context: ObserverContext::default(),
             transcript: None,
+            handoff_completion: Default::default(),
             active_run_id: None,
             steering_supported: false,
             steer_rx: None,
@@ -679,6 +642,11 @@ impl AcpClient {
     /// Emit a semantic event to the local observer feed, if enabled.
     pub fn observe(&self, kind: impl Into<String>, payload: serde_json::Value) {
         let kind = kind.into();
+        if kind == "acp_read" {
+            if let Some(state) = self.handoff_completion.get() {
+                state.record(&payload);
+            }
+        }
         if let Some(recorder) = &self.transcript {
             let mut recorder = recorder
                 .lock()

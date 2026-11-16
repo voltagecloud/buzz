@@ -365,6 +365,8 @@ pub struct EventQueue {
     in_flight_deadline: Duration,
 }
 
+mod retention;
+
 impl EventQueue {
     /// Create a new empty event queue with the given dedup mode.
     ///
@@ -459,42 +461,6 @@ impl EventQueue {
         // partitioning cannot multiply the admitted backlog.
         self.enforce_channel_cap(channel_id);
         true
-    }
-
-    /// Total queued events across every scope belonging to `channel_id`.
-    fn channel_event_total(&self, channel_id: Uuid) -> usize {
-        self.queues
-            .iter()
-            .filter(|(s, _)| s.channel_id() == channel_id)
-            .map(|(_, q)| q.len())
-            .sum()
-    }
-
-    /// Drop the globally-oldest queued event(s) across a channel's scopes until
-    /// its aggregate depth is within [`MAX_PENDING_PER_CHANNEL`]. Preserves
-    /// cross-scope FIFO fairness by always evicting the oldest head event.
-    fn enforce_channel_cap(&mut self, channel_id: Uuid) {
-        while self.channel_event_total(channel_id) > MAX_PENDING_PER_CHANNEL {
-            // Find the channel's scope whose head event is oldest.
-            let victim = self
-                .queues
-                .iter()
-                .filter(|(s, q)| s.channel_id() == channel_id && !q.is_empty())
-                .min_by_key(|(_, q)| q.front().unwrap().received_at)
-                .map(|(s, _)| s.clone());
-            let Some(scope) = victim else { break };
-            if let Some(q) = self.queues.get_mut(&scope) {
-                q.pop_front();
-                if q.is_empty() {
-                    self.queues.remove(&scope);
-                }
-            }
-            tracing::warn!(
-                channel_id = %channel_id,
-                limit = MAX_PENDING_PER_CHANNEL,
-                "aggregate per-channel queue cap reached — dropped oldest event"
-            );
-        }
     }
 
     /// Try to flush the next batch.
