@@ -57,9 +57,14 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # Paseo's Claude provider resolves the executable from PATH.
 COPY --from=claude-runtime /out/claude /usr/local/bin/claude
 RUN HOME=/tmp claude --version | grep -qx '2.1.325 (Claude Code)'
-# The runtime carries no package managers, compilers, build/test tools, or
-# scanners. Node is the upstream daemon runtime, not an installation surface.
-RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
+# Install analysis tools from Debian before removing package managers.
+# Debian's yq is the Python jq wrapper, not mikefarah/yq. Python is for
+# analysis only; no pip, compilers, build/test tools, or scanners are added.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        jq python3 sqlite3 xxd file tree unzip zstd less fd-find yq bsdextrautils \
+    && ln -s /usr/bin/fdfind /usr/local/bin/fd \
+    && rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
     && rm -f /usr/local/bin/{npm,npx,corepack,yarn,yarnpkg} \
     && rm -rf /var/lib/apt/lists /usr/lib/apt /root/.npm \
     && rm -f /usr/bin/apt* /usr/bin/dpkg* /usr/bin/cpan* \
