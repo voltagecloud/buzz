@@ -49,7 +49,8 @@ The following unsigned JSON is schematic. `KIND_TEAM_AGENT_STATUS` is a placehol
   "pubkey": "OWNER_HEX",
   "created_at": 1794656400,
   "tags": [
-    ["d", "team-status:AGENT_HEX:CHANNEL_UUID:ROOT_EVENT_HEX"],
+    ["d", "team-status:COMMUNITY_UUID:AGENT_HEX:CHANNEL_UUID:ROOT_EVENT_HEX"],
+    ["community", "COMMUNITY_UUID"],
     ["h", "CHANNEL_UUID"],
     ["p", "AGENT_HEX"],
     ["e", "ROOT_EVENT_HEX", "", "root"],
@@ -66,7 +67,11 @@ Cross-channel references and DM references are prohibited in version 1.
 A thread root is mandatory. Work without an approved shareable thread has no team status.
 
 The replacement address is community plus owner, kind, and `d`.
-The `d` value must exactly match the agent, channel, and root tags.
+The `community` tag contains the canonical community UUID resolved by the relay, not a client-selected host alias.
+Its value is covered by the event signature and must match the request's resolved community.
+Validate this binding on ingestion and every read or delivery path before exposing content or tags.
+Reject missing, malformed, duplicate, or mismatched community tags, including on clear events.
+The `d` value must exactly match the community, agent, channel, and root tags.
 This permits concurrent threads for one agent without exposing internal session IDs.
 Allow one subject agent, one channel, and one root per event; reject ambiguous duplicates and extra payload fields.
 
@@ -87,7 +92,15 @@ Sharing defaults off per owner, agent, and channel.
 The owner previews the exact label, thread reference, and recipient channel before first publication.
 Show that all authorized channel readers, including future members while the event remains readable, can read the status.
 Channel visibility rules define the audience; do not imply that an open channel is a closed team roster.
-Publish into the task's own channel only. A private task must never appear in a broader engineering status stream.
+The owner must publish into the task's own channel and keep private work out of broader status streams.
+The owner client must retain the approved task's originating community, channel, and root when publishing lifecycle updates.
+It must reject a broader-channel selection and omit publication when that originating scope is unavailable.
+Manual publication requires the owner to confirm that the selected thread and caption describe shareable work in that channel.
+
+The relay verifies the signature, ownership, membership, and referenced root within the signed community.
+Version 1 carries no independently verifiable task provenance.
+A valid broader-channel root cannot prove where the underlying work originated.
+Preventing such mislabeling is the owner and publisher's responsibility, not a relay-enforced guarantee.
 
 For version 1, accept only the actual owner's signature.
 Use the relay's existing owner-agent association as the ownership source, as presence does.
@@ -191,8 +204,11 @@ The digest proposal is independent and does not depend on this event.
 | Non-owner signs; ownership is forged in tags | Relay rejects the event. |
 | Shared-agent invocation or workflow authority is reused | It grants no status-publishing authority. |
 | Non-member queries by ID, `p`, `d`, or subscription | Neither content nor reference tags are disclosed. |
-| Same keys and channel IDs exist in another community | No cross-community delivery or cache reuse. |
-| Private task points at a broader channel | Relay rejects the reference mismatch. |
+| Signed event is replayed in another community with identical keys, channel, and root | Relay rejects the signed community mismatch on ingestion and reads; clients do not reuse cached state. |
+| Community tag is missing, malformed, duplicated, or differs from `d` | Relay rejects the event, including clears. |
+| Lifecycle publisher selects a broader channel for private work | Publisher rejects the scope change; missing originating scope suppresses publication. |
+| Owner manually selects a valid broader-channel root | Owner confirmation is required; relay cannot detect the underlying task's private provenance. |
+| Referenced root belongs to a different channel or community | Relay rejects the reference mismatch. |
 | Extra telemetry fields, excessive content, duplicate scope tags | Relay rejects the payload. |
 | Clear, expiry, duplicate, and out-of-order updates | Old status never reappears as the current head. |
 | Publisher offline or opt-out while offline | Pending clear is visible to owner; readers age out within the expiry window. |
