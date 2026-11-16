@@ -331,8 +331,10 @@ docker exec "$NAME" node -e '
   const lookup=(requested)=>cp.spawnSync("git",["credential","fill"],{env:{...process.env,GIT_TERMINAL_PROMPT:"0"},input:`protocol=https\nhost=github.com\npath=${requested}\n\n`,encoding:"utf8",timeout:2000});
   const allowed=lookup("fixture/private.git");
   assert.equal(allowed.status,0);assert.ok(allowed.stdout.includes(`password=${process.env.GITHUB_READ_TOKEN}\n`));
-  const refused=lookup("fixture/public.git");assert.notEqual(refused.status,0);assert.equal(refused.stdout,"");
-' || fail "packaged Git credential repository binding"
+  const unlisted=lookup("fixture/public.git");
+  assert.equal(unlisted.status,0);assert.ok(unlisted.stdout.includes(`password=${process.env.GITHUB_READ_TOKEN}\n`));
+  const refused=lookup("fixture/private.git/extra");assert.notEqual(refused.status,0);assert.equal(refused.stdout,"");
+' || fail "packaged Git credential path binding"
 
 # Nothing is written outside the tmpfs mounts.
 [ "$(docker inspect -f '{{.HostConfig.ReadonlyRootfs}}' "$NAME")" = true ] || fail "root filesystem is writable"

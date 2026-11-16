@@ -48,14 +48,16 @@ try {
     }
     let requested;
     try { requested = canonicalRepository(fields.path?.replace(/\.git$/i, "")); } catch { /* Unrecognized paths never receive credentials. */ }
-    if (repository === "get" && fields.protocol === "https" && fields.host === "github.com" && scopedRepositories.includes(requested) && process.env.GITHUB_READ_TOKEN) {
+    // The token's GitHub permissions are the access boundary. A canonical
+    // owner/repository path is still required to refuse malformed requests.
+    if (repository === "get" && fields.protocol === "https" && fields.host === "github.com" && requested && process.env.GITHUB_READ_TOKEN) {
       process.stdout.write(`username=x-access-token\npassword=${process.env.GITHUB_READ_TOKEN}\n\n`);
     }
   } else {
     const normalized = canonicalRepository(repository);
     if (!["clone", "fetch", "diff", "show", "view"].includes(action)) throw new Error("use clone, fetch, diff, show, or view");
     if (args.length > 2 || args.some((ref) => !/^[A-Za-z0-9][A-Za-z0-9_./-]{0,200}$/.test(ref) || /\.\.|\/\/|\/$|\.$|\.lock(?:\/|$)/.test(ref))) throw new Error("invalid branch or revision");
-    if (action === "view" && (args.length !== 1 || !scopedRepositories.includes(normalized))) throw new Error("view needs one branch of a GITHUB_READ_TOKEN_REPOSITORIES repository");
+    if (action === "view" && args.length !== 1) throw new Error("view needs one branch");
     const root = path.join(process.env.HOME, "code");
     const directory = path.join(root, normalized);
     await mkdir(path.dirname(directory), { recursive: true, mode: 0o700 });
