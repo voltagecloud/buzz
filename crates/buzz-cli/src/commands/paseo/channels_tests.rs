@@ -1,6 +1,6 @@
 use super::*;
 use axum::{extract::State, routing::post, Json, Router};
-use nostr::{Event, Keys};
+use nostr::{Event, EventBuilder, Keys, Kind, Tag};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -31,7 +31,15 @@ fn plan_shares_member_channels_and_never_dms_or_exclusions() {
         channel("old", "stream", false, true),
     ];
     let gateway_in = HashSet::from([joined.id]);
-    let plan = plan(all.clone(), &gateway_in, &[leadership.id.to_string()], None).unwrap();
+    let workspaces = all.iter().map(|c| c.id).collect();
+    let plan = plan(
+        all.clone(),
+        &gateway_in,
+        &workspaces,
+        &[leadership.id.to_string()],
+        None,
+    )
+    .unwrap();
     assert_eq!(plan.add, vec![design, general.clone()]);
     assert_eq!(plan.present, vec![joined]);
     assert_eq!(plan.excluded, vec![leadership]);
@@ -42,7 +50,13 @@ fn plan_shares_member_channels_and_never_dms_or_exclusions() {
         ("genral", false),
         ("alice-taylor", true),
     ] {
-        let result = super::plan(all.clone(), &gateway_in, &[entry.to_string()], None);
+        let result = super::plan(
+            all.clone(),
+            &gateway_in,
+            &workspaces,
+            &[entry.to_string()],
+            None,
+        );
         assert_eq!(result.is_ok(), ok, "{entry}");
     }
     // A team channel that a later import creates may be excluded before it
@@ -50,16 +64,37 @@ fn plan_shares_member_channels_and_never_dms_or_exclusions() {
     // the exclusion.
     let asgard = channel("Asgard", "stream", true, false);
     let pending = ["Asgard".to_string()];
-    assert!(super::plan(all.clone(), &gateway_in, &pending, None).is_err());
-    let absent = super::plan(all.clone(), &gateway_in, &pending, Some("Asgard")).unwrap();
+    assert!(super::plan(all.clone(), &gateway_in, &workspaces, &pending, None).is_err());
+    let absent = super::plan(
+        all.clone(),
+        &gateway_in,
+        &workspaces,
+        &pending,
+        Some("Asgard"),
+    )
+    .unwrap();
     assert!(absent.excluded.is_empty());
     let mut with_asgard = all.clone();
     with_asgard.push(asgard.clone());
-    let present = super::plan(with_asgard, &gateway_in, &pending, Some("Asgard")).unwrap();
+    let present = super::plan(
+        with_asgard,
+        &gateway_in,
+        &workspaces,
+        &pending,
+        Some("Asgard"),
+    )
+    .unwrap();
     assert_eq!(present.excluded, vec![asgard]);
     assert!(present.add.iter().all(|c| c.name != "Asgard"));
     // Excluding a DM by name never makes it shareable.
-    let plan = super::plan(all.clone(), &gateway_in, &["alice-taylor".into()], None).unwrap();
+    let plan = super::plan(
+        all.clone(),
+        &gateway_in,
+        &workspaces,
+        &["alice-taylor".into()],
+        None,
+    )
+    .unwrap();
     assert!(plan.add.iter().all(|c| c.channel_type != "dm") && plan.excluded.is_empty());
 }
 
@@ -89,6 +124,7 @@ fn channel_parse_reads_relay_metadata_tags() {
 #[derive(Default)]
 struct Relay {
     admitted: Vec<String>,
+    projects: Vec<Event>,
     /// channel id -> (kind:39000 tags, roster)
     channels: HashMap<Uuid, (Vec<Vec<String>>, HashSet<String>)>,
     refused: HashSet<Uuid>,
@@ -122,6 +158,15 @@ async fn query(State(relay): State<Arc<Mutex<Relay>>>, Json(filters): Json<Value
             .iter()
             .map(|key| json!(["member", key, "member"]))
             .collect::<Vec<_>>()})],
+        Some(30621) => {
+            let authors = strings("authors");
+            relay
+                .projects
+                .iter()
+                .filter(|event| authors.contains(&event.pubkey.to_hex()))
+                .map(|event| serde_json::to_value(event).unwrap())
+                .collect()
+        }
         Some(39002) => {
             let wanted = strings("#p");
             relay
@@ -229,6 +274,13 @@ async fn share_waits_for_admission_then_shares_and_reruns_idempotently() {
             .unwrap()
             .channels
             .insert(id, (tags, members.into_iter().collect()));
+        if name != "leadership" {
+            relay
+                .lock()
+                .unwrap()
+                .projects
+                .push(workspace(&owner, name, id));
+        }
         ids.insert(name, id);
     }
     relay.lock().unwrap().refused.insert(ids["broken"]);
@@ -293,4 +345,133 @@ async fn share_waits_for_admission_then_shares_and_reruns_idempotently() {
     assert_eq!(names(&rerun, "already_present"), ["design", "general"]);
     assert_eq!(relay.lock().unwrap().writes.len(), writes + 1);
     server.abort();
+}
+
+#[tokio::test]
+async fn sharing_only_adds_owner_workspace_channels_and_never_removes_members() {
+    for has_workspaces in [false, true] {
+        let owner = Keys::generate();
+        let owner_key = owner.public_key();
+        let gateway = Keys::generate().public_key();
+        let gateway_hex = gateway.to_hex();
+        let other = Keys::generate();
+        let relay = Arc::new(Mutex::new(Relay::default()));
+        relay.lock().unwrap().admitted.push(gateway_hex.clone());
+        let mut ids = HashMap::new();
+        for (name, kind, archived, already_in, workspace_owner) in [
+            ("workspace", "stream", false, false, Some(&owner)),
+            ("forum", "forum", false, false, Some(&owner)),
+            ("present", "stream", false, true, Some(&owner)),
+            ("unrelated", "stream", false, false, None),
+            ("unrelated-present", "stream", false, true, None),
+            ("other-owner", "stream", false, false, Some(&other)),
+            ("dm", "dm", false, false, Some(&owner)),
+            ("system", "system", false, false, Some(&owner)),
+            ("unknown", "canvas", false, false, Some(&owner)),
+            ("archived", "stream", true, false, Some(&owner)),
+        ] {
+            let id = Uuid::new_v4();
+            let tags = vec![
+                vec!["name".into(), name.into()],
+                vec!["t".into(), kind.into()],
+                // The first t tag is the channel type; later tags are labels.
+                vec!["t".into(), "project-label".into()],
+                vec!["archived".into(), archived.to_string()],
+            ];
+            let mut members = HashSet::from([owner_key.to_hex()]);
+            if already_in {
+                members.insert(gateway_hex.clone());
+            }
+            let mut state = relay.lock().unwrap();
+            state.channels.insert(id, (tags, members));
+            if has_workspaces {
+                if let Some(signer) = workspace_owner {
+                    state.projects.push(workspace(signer, name, id));
+                }
+            }
+            ids.insert(name, id);
+        }
+        let initial = relay.lock().unwrap().channels.clone();
+        let app = Router::new()
+            .route("/query", post(query))
+            .route("/events", post(submit))
+            .with_state(relay.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = BuzzClient::new(url, owner, None, None).unwrap();
+        let report = share(&client, gateway, &[], None).await.unwrap();
+        assert_eq!(
+            names(&report, "added"),
+            if has_workspaces {
+                vec!["forum", "workspace"]
+            } else {
+                vec![]
+            }
+        );
+        assert_eq!(
+            names(&report, "already_present"),
+            if has_workspaces {
+                vec!["present"]
+            } else {
+                vec![]
+            }
+        );
+        assert!(names(&report, "failed").is_empty());
+        {
+            let state = relay.lock().unwrap();
+            for (id, (_, before)) in &initial {
+                let after = &state.channels[id].1;
+                assert!(before.is_subset(after), "no membership is removed");
+                if !has_workspaces || ![ids["workspace"], ids["forum"]].contains(id) {
+                    assert_eq!(before, after, "non-target roster stays untouched");
+                }
+            }
+            assert_eq!(state.writes.len(), if has_workspaces { 2 } else { 0 });
+            for event in &state.writes {
+                assert_eq!(
+                    event.kind.as_u16(),
+                    9000,
+                    "only membership adds, never 30180/30181"
+                );
+                assert_eq!(event.pubkey, owner_key);
+                assert_eq!(tag_value(event, "p"), Some(gateway_hex.as_str()));
+                assert_eq!(tag_value(event, "role"), Some("member"));
+            }
+        }
+        let writes = relay.lock().unwrap().writes.len();
+        let again = share(&client, gateway, &[], None).await.unwrap();
+        assert!(names(&again, "added").is_empty());
+        assert_eq!(
+            relay.lock().unwrap().writes.len(),
+            writes,
+            "rerun is idempotent"
+        );
+        // Setup renews this global delegation separately from membership.
+        super::super::super::gateway::grant(
+            &client,
+            gateway,
+            buzz_sdk::gateway::MAX_DELEGATION_SECS,
+        )
+        .await
+        .unwrap();
+        let state = relay.lock().unwrap();
+        let delegation = state.writes.last().unwrap();
+        assert_eq!(delegation.kind.as_u16(), 30181);
+        assert!(tag_value(delegation, "h").is_none());
+        assert!(tag_value(delegation, "channel").is_none());
+        assert!(state.writes.iter().all(|e| e.kind.as_u16() != 30180));
+        server.abort();
+    }
+}
+
+fn workspace(owner: &Keys, slug: &str, channel: Uuid) -> Event {
+    EventBuilder::new(Kind::Custom(30621), "")
+        .tags([
+            Tag::parse(["d", slug]).unwrap(),
+            Tag::parse(["buzz-paseo", "workspace"]).unwrap(),
+            Tag::parse(["buzz-channel", &channel.to_string()]).unwrap(),
+        ])
+        .sign_with_keys(owner)
+        .unwrap()
 }

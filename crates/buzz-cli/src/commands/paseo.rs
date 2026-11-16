@@ -46,7 +46,7 @@ pub(crate) enum PaseoCmd {
         /// Create a new signing key for your agents and add it to GitHub
         #[arg(long)]
         replace_signing_key: bool,
-        /// A channel name or UUID to keep your daemon out of; repeatable
+        /// A workspace channel name or UUID to skip adding your daemon to; repeatable
         #[arg(long = "exclude", value_name = "CHANNEL")]
         exclude: Vec<String>,
         /// Also create the personas of this team snapshot as remote agents
@@ -150,7 +150,7 @@ pub(crate) async fn dispatch(command: PaseoCmd, client: &BuzzClient) -> Result<(
                         team_result = team::outcome(&report);
                         outcome.report["team"] = report;
                         // The team channel did not exist when setup shared
-                        // channels; share again so the daemon can use it.
+                        // channels; refresh in case it now has a workspace.
                         if let Some(gateway) = outcome.report["gateway_pubkey"]
                             .as_str()
                             .and_then(|key| PublicKey::from_hex(key).ok())
