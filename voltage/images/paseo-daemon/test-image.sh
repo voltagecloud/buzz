@@ -374,8 +374,53 @@ docker exec "$NAME" sh -c '
   for command in codex npm npx yarn corepack apt apt-get dpkg cargo rustc gcc cc make cmake python3 pip gitleaks; do
     if command -v "$command" >/dev/null 2>&1; then echo "unexpected runtime tool: $command" >&2; exit 1; fi
   done
-  command -v git >/dev/null && command -v node >/dev/null
+  command -v git >/dev/null && command -v node >/dev/null && command -v via >/dev/null
 ' || fail "runtime tool inventory"
+# Packaging does not enroll services or inherit the Sandbox profile.
+docker exec "$NAME" via version | grep -qx 'via 0.6.1' || fail "via version"
+# Competing profiles must not become daemon enrollment through a fallback.
+docker exec "$NAME" node -e '
+  const fs = require("node:fs");
+  for (const [directory, service] of [["via", "default-fixture"], ["buzz-agent", "sandbox-fixture"]]) {
+    const base = `/home/paseo/.config/${directory}`;
+    fs.mkdirSync(base, { recursive: true });
+    const filename = directory === "via" ? "config.toml" : "via.toml";
+    fs.writeFileSync(`${base}/${filename}`, `version = 1
+[providers.fixture]
+type = "1password"
+[services.${service}]
+provider = "fixture"
+[services.${service}.commands.api]
+mode = "rest"
+base_url = "http://127.0.0.1:1"
+`, { mode: 0o600 });
+  }
+' || fail "competing via profiles"
+if docker exec -e VIA_CONFIG=/home/paseo/.config/buzz-agent/via.toml "$NAME" via capabilities >"$stubs/via-output" 2>&1; then
+  fail "via unexpectedly worked without daemon enrollment"
+fi
+grep -qF '/home/paseo/.config/paseo/via.toml' "$stubs/via-output" || fail "via profile path"
+if grep -qE 'default-fixture|sandbox-fixture' "$stubs/via-output"; then
+  fail "via exposed a competing profile"
+fi
+docker exec "$NAME" rm /home/paseo/.config/via/config.toml /home/paseo/.config/buzz-agent/via.toml
+# Only a daemon-specific, synthetic profile enables discovery. No vault is used.
+docker exec "$NAME" node -e '
+  const fs = require("node:fs");
+  fs.mkdirSync("/home/paseo/.config/paseo", { recursive: true });
+  fs.writeFileSync("/home/paseo/.config/paseo/via.toml", `version = 1
+[providers.fixture]
+type = "1password"
+[services.fixture]
+provider = "fixture"
+[services.fixture.commands.api]
+mode = "rest"
+base_url = "http://127.0.0.1:1"
+`, { mode: 0o600 });
+' || fail "synthetic daemon via profile"
+docker exec "$NAME" via capabilities | grep -q 'fixture' || fail "daemon via discovery"
+docker exec "$NAME" rm /home/paseo/.config/paseo/via.toml
+
 docker exec "$NAME" node -e '
   const fs = require("node:fs");
   const config = JSON.parse(fs.readFileSync("/home/paseo/.paseo/config.json"));

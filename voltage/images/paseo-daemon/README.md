@@ -2,7 +2,7 @@
 
 One developer's headless Paseo daemon stays available while their laptop is closed.
 The image uses unmodified Paseo 0.15.3 with Claude Code 2.1.325 from the developer image’s shared runtime lockfile.
-It adds the Buzz CLI, a configuration wrapper, read-only Git helpers, a turn recorder, and a gateway profile plugin.
+It adds the Buzz and via CLIs, a configuration wrapper, read-only Git helpers, a turn recorder, and a gateway profile plugin.
 Codex stays disabled pending its shell and credential review.
 
 ```mermaid
@@ -63,6 +63,58 @@ The container uses a read-only root filesystem, an unprivileged UID, dropped cap
 It carries no package managers, compilers, build/test tools, or scanners.
 Node remains necessary for the upstream daemon and plugin runtime.
 Never install packages or execute repository scripts here.
+
+## via client and enrollment prerequisite
+
+The image packages via 0.6.1 for Linux amd64 and arm64, built statically with musl from SHA-256-pinned source at `87d1301158d9c1ac585110869f8bb993b15270da`.
+It was the latest published release when checked on 2026-11-14.
+The published Linux binaries require glibc 2.39, which the daemon runtime does not provide.
+The source download and locked build run in a separate Alpine builder; no installer or package manager is added to the runtime.
+
+`via` selects `$HOME/.config/paseo/via.toml`, separate from the Sandbox's enrolled profile.
+`via version` and `via --help` work before enrollment.
+`via capabilities` fails when that daemon profile is absent; it never falls back to the Sandbox profile or via's default configuration.
+The wrapper does not load a vault token, export service credentials, or enroll services.
+It selects configuration and is not an authorization boundary.
+
+**This image change installs the client only. It does not enable service reads.**
+Today's GPUI/manager enrollment provisions the worker Sandbox profile, not this daemon file.
+The manager's daemon Secret allowlist and Terraform mounts need separate provisioning work before the daemon can use services.
+Do not copy the worker's profile, `op-token`, or `OP_SERVICE_ACCOUNT_TOKEN` into the daemon.
+No enrollment, manager, or Terraform changes are included here.
+
+### Proposed enrollment contract for tee8z
+
+Enroll one daemon-specific profile per developer and mount it read-only at `$HOME/.config/paseo/via.toml`, readable by UID 1000.
+The policy is **all available read capabilities**, excluding mutations and operations that return credential material.
+Enforce that rule through the service provider or a credential-isolating broker; assistant tool permissions cannot enforce it.
+Keep service credentials outside the shell-enabled daemon and grant its caller only the approved read authority.
+Do not activate a service until its provider enforces the complete rule.
+
+| Capability | Enrollment requirement |
+| --- | --- |
+| Read-only service data | Permit every operation the provider classifies as a credential-safe read. |
+| Writes, deploys, cluster changes, package installs | Deny at the provider, regardless of assistant approval. |
+| Secret values, token-bearing environments, credential files | Deny, including reads that return them inside larger responses. |
+| GraphQL reads, including Linear | Distinguish queries from mutations at the provider; HTTP POST alone does not classify the operation. |
+| CI logs, application logs, artifacts, rendered manifests | Treat as potentially credential-bearing; expose only through a provider that enforces the credential exclusion. |
+| Git credentials | Retain the separate `GITHUB_READ_TOKEN_REPOSITORIES` boundary from main; this change does not alter Git behavior. |
+
+The published via 0.6.1 profile cannot enforce this contract by itself.
+Its REST capabilities accept arbitrary HTTP methods and have no method/path policy.
+[Via's newer broker design](https://github.com/tee8z/via/blob/ca7edf707bb73bfe93887b33a082b7463c1432f9/docs/broker-mode.md) isolates credentials and adds method/path rules.
+It still does not inspect GraphQL bodies or identify arbitrary credentials in API responses.
+A broker-capable release and service-side enforcement are enrollment prerequisites; no unsupported policy fields are added to the v0.6.1 config.
+Tee8z must provision that enforcement and daemon configuration separately, then validate each enabled service before rollout.
+
+Raw CI logs can echo secrets.
+[GitHub documents that automatic masking is not guaranteed](https://docs.github.com/en/actions/reference/security/secure-use), including when secret values are transformed.
+Via's exact-value redaction also does not establish that a log is credential-free.
+This image adds no GitHub Actions capability and enables no new CI-log reads.
+
+After provisioning a compliant profile, run `via capabilities` in the daemon and exercise one permitted read per service.
+Verify denied writes and credential-returning requests against isolated fixtures, without production probes or real secrets.
+Assistant shell calls retain the existing Paseo approval behavior; this change adds no via tool allowlist.
 
 ## Read-only code workflow
 

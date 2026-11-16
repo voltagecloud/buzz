@@ -6,6 +6,23 @@
 # See README.md next to this file.
 # Build from the repository root; Dockerfile.dockerignore next to this file
 # selects the context.
+# Build via v0.6.1 from immutable, checksum-pinned source. Its published
+# GNU/Linux binaries need glibc 2.39, newer than the daemon runtime.
+# Native Alpine builds produce static musl binaries on both image architectures.
+FROM rust:1.95-alpine3.22@sha256:064dfc925d68d1a63f4fd2871bd7dc6e6ea56692989a487185855d62885d90aa AS via-builder
+RUN apk add --no-cache build-base curl musl-dev
+WORKDIR /via
+ENV CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2
+RUN curl -fsSL https://codeload.github.com/tee8z/via/tar.gz/87d1301158d9c1ac585110869f8bb993b15270da -o /tmp/via.tar.gz \
+    && echo "7dcd493f5db9a7406bac7448a52f97de7a03bf7128ceff390910dfae8b525428  /tmp/via.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/via.tar.gz --strip-components=1 \
+    && cargo build --locked --release --bin via \
+    && install -D -m 0755 -s target/release/via /out/via \
+    && readelf -l /out/via > /tmp/via-headers \
+    && if grep -q INTERP /tmp/via-headers; then echo "via must be statically linked" >&2; exit 1; fi \
+    && /out/via version | grep -qx 'via 0.6.1' \
+    && rm -rf /tmp/via.tar.gz /tmp/via-headers target
+
 FROM rust:1.95-alpine3.22@sha256:064dfc925d68d1a63f4fd2871bd7dc6e6ea56692989a487185855d62885d90aa AS builder
 RUN apk add --no-cache build-base cmake git musl-dev perl pkgconf
 WORKDIR /build
@@ -48,6 +65,8 @@ RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack 
     && rm -f /usr/bin/apt* /usr/bin/dpkg* /usr/bin/cpan* \
     && install -d -o root -g root -m 0555 /opt/paseo-buzz/no-terminal-worker /opt/paseo-buzz/no-hooks /etc/paseo-buzz /etc/paseo-buzz/agents /usr/local/lib/paseo-buzz
 COPY --from=builder /out/buzz /usr/local/bin/buzz
+COPY --from=via-builder /out/via /opt/agent-tools/via
+COPY --chmod=0755 voltage/images/paseo-daemon/via.sh /usr/local/bin/via
 COPY voltage/images/paseo-daemon/recorder /opt/paseo-buzz/recorder
 COPY voltage/images/paseo-daemon/profile /opt/paseo-buzz/profile
 COPY --chmod=0644 voltage/images/paseo-daemon/assistant.md /etc/paseo-buzz/assistant.md

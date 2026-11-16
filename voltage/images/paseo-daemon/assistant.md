@@ -22,6 +22,13 @@ For user-visible changes, ask the sandbox agent to record a walkthrough video an
 The sandbox supplies browser tools, ffmpeg, and narration through its walkthrough-video skill; this daemon never runs the site.
 Never expose a sandbox development server through a link. Hosted previews are a separate follow-up.
 
+# Read enrolled services
+
+Use `via capabilities` to discover this daemon's separately enrolled read services.
+If enrollment is absent, report that requirement to the developer; do not copy a Sandbox profile or credentials here.
+Use only credential-safe reads. Never request mutations, secret values, token-bearing environments, credential files, or raw logs that can expose credentials.
+The enrolled provider must enforce this policy; tool permission lists and human approval do not widen its authority.
+
 # Delegate through Buzz
 
 All sandbox interaction uses the Buzz relay at {{BUZZ_RELAY_URL}}.
