@@ -13,6 +13,11 @@ use crate::{client::BuzzClient, error::CliError};
 
 #[derive(clap::Subcommand)]
 pub(crate) enum PaseoCmd {
+    /// Manage owner-signed, channel-bound Paseo workspaces.
+    Workspace {
+        #[command(subcommand)]
+        command: workspace_commands::WorkspaceCmd,
+    },
     /// Show a Paseo pairing QR code and link; secrets go only to an interactive stderr
     Pairing {
         #[arg(long, env = "BUZZ_MANAGER_PUBKEY", hide_env_values = true)]
@@ -70,12 +75,13 @@ pub(crate) enum PaseoCmd {
 }
 
 pub(crate) async fn dispatch(command: PaseoCmd, client: &BuzzClient) -> Result<(), CliError> {
-    if client.auth_tag_owner_hex().is_some() {
+    if client.auth_tag_owner_hex().is_some() && !matches!(command, PaseoCmd::Workspace { .. }) {
         return Err(CliError::Auth(
             "Paseo pairing and setup require the owner's direct signing key".into(),
         ));
     }
     match command {
+        PaseoCmd::Workspace { command } => workspace_commands::dispatch(command, client).await,
         PaseoCmd::Pairing { manager } => {
             require_terminal()?;
             let manager = Manager::new(client, &manager)?;
@@ -474,6 +480,9 @@ mod setup;
 mod team;
 #[cfg(test)]
 mod test_prompt;
+mod workspace_commands;
+mod workspace_membership;
+pub(crate) mod workspaces;
 
 #[cfg(test)]
 mod tests;
