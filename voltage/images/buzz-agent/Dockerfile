@@ -16,6 +16,16 @@ RUN cargo build --locked --profile sprig -p sprig \
     && strip target/sprig/sprig
 
 FROM rust:1.97.1-slim-trixie@sha256:8e8cf8f7fd54a2d23d5a743b3a03f56e26b6c774276c33fa0595111704ebb15c AS development-rust
+# cargo-llvm-cov (the engineering-skills rust-crap-score skill) reads coverage
+# with the toolchain's LLVM tools.
+RUN rustup component add llvm-tools-preview
+
+# knots 1.16.0, the complexity analyzer rust-crap-score requires. Its releases
+# have no linux arm64 binary, so build it from crates.io with its published
+# Cargo.lock; cargo checks the crate against the registry checksum.
+FROM development-rust AS crap-tools
+RUN cargo install --locked --version 1.16.0 knots --root /opt/crap-tools \
+    && strip /opt/crap-tools/bin/knots
 
 FROM node:22-trixie-slim@sha256:154ba2f4d6fec323d28e4f4bb86bba4677f1223391a1979cf521304e03a98dfa
 LABEL maintainer="Voltage <hello@voltage.cloud>"
@@ -34,22 +44,24 @@ ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/home/agent/.cargo CARGO_BUILD_JOBS=2
 # credentials enter only at runtime.
 ARG TARGETARCH
 RUN case "$TARGETARCH" in \
-        amd64) via=x86_64 gitleaks=x64 sccache=x86_64 \
+        amd64) via=x86_64 gitleaks=x64 sccache=x86_64 llvm_cov=x86_64 \
             kubectl_sha=874d5e72dbb819f43cff16bcd1e4f8bac5b7f2361fe1e55049b0a6c676fb0cbf \
             via_sha=9e5a7f9384cacda29061d814e9397e7b6d90a72ee4663775362978ac9b65d8b7 \
             op_sha=198b05dcf9a0972778ce5a4e262c459979b0c837257b5da65e2fba6187734226 \
             gitleaks_sha=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb \
             depot_sha=7a469c767bd3b7e67b3174f91af9c6315fea0ced4871948ee9d41a006fb2347e \
             sccache_sha=45f1447fbe231e3037bde351ef70677dd212216c8d62ae7ca409fecc4d6acc89 \
-            ghstack_sha=957e822cfa7e435cd84a297cd96c419b58e51e3ac58be249762c24bd9e45099b ;; \
-        arm64) via=arm64 gitleaks=arm64 sccache=aarch64 \
+            ghstack_sha=957e822cfa7e435cd84a297cd96c419b58e51e3ac58be249762c24bd9e45099b \
+            llvm_cov_sha=e9fc23dbbdc502ee9267544f8c6e8e162c6d7df8fb2e3f62d8289a4c0bd240ce ;; \
+        arm64) via=arm64 gitleaks=arm64 sccache=aarch64 llvm_cov=aarch64 \
             kubectl_sha=cc749967b62f4422260bc9c0aa7a7c55f45175ae38cb8d95767b5d2b7e04c1fd \
             via_sha=26cc174802c875424b9846a398d4b2d890b911506f7c574dee96859620caa535 \
             op_sha=7b5c361a23e738a3969cf676960f4843af4aa9aa68dbec23d18a9134da428ba3 \
             gitleaks_sha=e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080 \
             depot_sha=042d846f544919e6b5bcb328387b1963af4e298bfa441a41f36bc46663202f2b \
             sccache_sha=2b3284d5da3b46a47dc4229e75bb7b88ac4aa99c8d754fb7d2f84997e5a4354a \
-            ghstack_sha=803ec91eeba9b2ac38827e299a79830fe75ca7284f0c28d60e6a2704bb34ed13 ;; \
+            ghstack_sha=803ec91eeba9b2ac38827e299a79830fe75ca7284f0c28d60e6a2704bb34ed13 \
+            llvm_cov_sha=bc14a4551e633b12ec89bb15469e6099b4ddc998a5d1bcad0fd95320b148a40f ;; \
         *) echo "Unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
     esac \
     && curl -fsSL "https://github.com/tee8z/via/releases/download/v0.6.1/via-linux-$via.tar.gz" -o /tmp/via.tar.gz \
@@ -77,7 +89,10 @@ RUN case "$TARGETARCH" in \
     && echo "$ghstack_sha  /opt/gh-extensions/gh-stack/gh-stack" | sha256sum -c - \
     && chmod 0755 /opt/gh-extensions/gh-stack/gh-stack \
     && printf 'owner: github\nname: gh-stack\nhost: github.com\ntag: v0.3.0\nispinned: true\npath: /opt/gh-extensions/gh-stack/gh-stack\n' > /opt/gh-extensions/gh-stack/manifest.yml \
-    && rm /tmp/via.tar.gz /tmp/op.zip /tmp/gitleaks.tar.gz /tmp/depot.tar.gz /tmp/sccache.tar.gz
+    && curl -fsSL "https://github.com/taiki-e/cargo-llvm-cov/releases/download/v0.8.5/cargo-llvm-cov-$llvm_cov-unknown-linux-musl.tar.gz" -o /tmp/cargo-llvm-cov.tar.gz \
+    && echo "$llvm_cov_sha  /tmp/cargo-llvm-cov.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/cargo-llvm-cov.tar.gz -C /usr/local/bin cargo-llvm-cov \
+    && rm /tmp/via.tar.gz /tmp/op.zip /tmp/gitleaks.tar.gz /tmp/depot.tar.gz /tmp/sccache.tar.gz /tmp/cargo-llvm-cov.tar.gz
 # Browser recording and narration for the walkthrough-video skill.
 # Each Playwright version has its own browser build, so the image carries only
 # the system libraries Chromium needs; the agent installs the browser that
@@ -109,6 +124,7 @@ RUN npm ci --omit=dev --no-audit --no-fund \
     && rm -rf node_modules/@anthropic-ai/*-linux-*-musl \
     && npm cache clean --force
 COPY --from=builder /build/target/sprig/sprig /usr/local/bin/sprig
+COPY --from=crap-tools /opt/crap-tools/bin/knots /usr/local/bin/knots
 COPY --chmod=0755 voltage/images/buzz-agent/account.py /usr/local/bin/buzz-agent-account
 COPY --chmod=0755 voltage/images/buzz-agent/profile.py /usr/local/bin/buzz-agent-profile
 COPY --chmod=0755 voltage/images/buzz-agent/cache.py /usr/local/bin/buzz-agent-cache

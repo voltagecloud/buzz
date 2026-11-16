@@ -6,6 +6,7 @@ Staging agent workers are Graviton (`arm64`); the tool downloads in the Dockerfi
 Each developer supplies their own accounts at runtime.
 
 The image contains Codex and Claude ACP adapters, Rust, Node, Go, Python, Git, GitHub CLI, `via`, `kubectl`, and SQL clients.
+For the `rust-crap-score` engineering skill, it also has `cargo-llvm-cov` 0.8.5 (checksum-pinned release), `knots` 1.16.0 (built from crates.io with its published lockfile), and the toolchain's `llvm-tools-preview` component. The skill rejects other versions.
 For browser tests and the `walkthrough-video` skill, it also contains Chromium's system libraries, ffmpeg, and Piper with two voices in `/opt/walkthrough-video` (`WALKTHROUGH_CACHE`).
 Each Playwright version needs its own browser build, so the image has no browser. Install the one that matches the repository's Playwright at runtime, for example `npx playwright install chromium` in frontend-turbo's `packages/e2e`.
 Buzz selects the runtime, model, persona, and arguments for each session.
