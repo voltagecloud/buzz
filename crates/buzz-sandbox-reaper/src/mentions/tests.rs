@@ -6,6 +6,7 @@ mod gateway;
 mod live_relay;
 mod relay;
 mod revoked;
+mod shared_denial;
 mod shared_live;
 mod workflow;
 

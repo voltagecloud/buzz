@@ -401,7 +401,12 @@ async fn drain(
         let pending = journal.state.pending.as_mut().ok_or(Error::Storage)?;
         // Persist the attempt before any external effect; a crash consumes it.
         if pending.attempts >= MAX_ATTEMPTS {
-            pending.notice = Some(failure_notice(identity, &pending.event, "retry_exhausted")?);
+            pending.notice = Some(failure_notice(
+                identity,
+                &pending.event,
+                "retry_exhausted",
+                None,
+            )?);
             tokio::time::timeout(IO_TIMEOUT, journal.save())
                 .await
                 .map_err(|_| Error::Deadline)??;
@@ -470,7 +475,12 @@ async fn drain(
                     | "gateway_not_member"
             ) || pending.attempts >= MAX_ATTEMPTS
             {
-                pending.notice = Some(failure_notice(identity, &event, code)?);
+                pending.notice = Some(failure_notice(
+                    identity,
+                    &event,
+                    code,
+                    result["error"].as_str(),
+                )?);
             } else {
                 pending.retry_at = Timestamp::now().as_secs() + 5 * u64::from(pending.attempts);
             }
@@ -538,7 +548,12 @@ async fn flush_notices(identity: &Identity, journal: &mut Journal) -> Result<(),
     Ok(())
 }
 
-fn failure_notice(identity: &Identity, event: &Event, code: &str) -> Result<Event, Error> {
+fn failure_notice(
+    identity: &Identity,
+    event: &Event,
+    code: &str,
+    reason: Option<&str>,
+) -> Result<Event, Error> {
     let (channel, root) = conversation(identity, event)?;
     let text = match code {
         // An owner or live-gateway mention gets `session_ended` only when the
@@ -558,6 +573,12 @@ fn failure_notice(identity: &Identity, event: &Event, code: &str) -> Result<Even
         "gateway_not_delegated" => "This gateway key is not currently delegated by my owner, so I did not start. Ask my owner to check `buzz gateway list`.",
         "shared_task_retry" => "Current sharing authorization is unavailable. Mention me again to retry; this request has not been allowed to run.",
         _ => "Agent startup could not be confirmed. Mention me again to retry.",
+    };
+    // Only permanent shared-task denials carry fixed, credential-free reasons.
+    // Other manager errors may contain internal details and keep their notices.
+    let text = match (code, reason.filter(|reason| !reason.trim().is_empty())) {
+        ("shared_task_denied", Some(reason)) => format!("Shared task refused: {reason}"),
+        _ => text.to_owned(),
     };
     let tags = [
         vec!["h", &channel],
@@ -656,3 +677,7 @@ async fn channel_launch_allowed(
         Err(Error::Capacity)
     }).await.map_err(|_| Error::Deadline)?
 }
+
+#[cfg(test)]
+#[path = "tests/failure_notice.rs"]
+mod failure_notice_tests;
