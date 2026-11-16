@@ -69,6 +69,14 @@ pub(crate) const FRESH_COMMAND: &str = "/fresh";
 /// The relay operations the bridge needs. Production uses the buzz-cli
 /// client; tests use an in-memory fake.
 pub(crate) trait BridgeRelay: Send + Sync + 'static {
+    /// Replace the channels covered by the live thread subscription.
+    fn set_channels(&self, _channels: Vec<uuid::Uuid>) {}
+
+    /// Return the authenticated relay identity used to verify membership rosters.
+    fn relay_identity(&self) -> impl Future<Output = Result<nostr::PublicKey, CliError>> + Send {
+        async { Err(CliError::Other("relay identity unavailable".into())) }
+    }
+
     /// Query signed stored events; failures must propagate.
     fn query(&self, _filter: Value) -> impl Future<Output = Result<Vec<Event>, CliError>> + Send {
         async { Err(CliError::Other("history queries unavailable".into())) }
@@ -78,6 +86,7 @@ pub(crate) trait BridgeRelay: Send + Sync + 'static {
     /// when `thread_root` is `None`, otherwise a reply in that thread.
     fn prepare_prompt(
         &self,
+        channel: uuid::Uuid,
         content: String,
         thread_root: Option<String>,
     ) -> impl Future<Output = Result<Event, CliError>> + Send;
@@ -85,6 +94,7 @@ pub(crate) trait BridgeRelay: Send + Sync + 'static {
     /// Prepare bounded image content; relays without upload support refuse it.
     fn prepare_content(
         &self,
+        channel: uuid::Uuid,
         prompt: Prompt,
         thread_root: Option<String>,
     ) -> impl Future<Output = Result<Event, CliError>> + Send {
@@ -92,7 +102,7 @@ pub(crate) trait BridgeRelay: Send + Sync + 'static {
             if !prompt.images.is_empty() || !prompt.media.is_empty() {
                 return Err(CliError::Other("image upload unavailable".into()));
             }
-            self.prepare_prompt(prompt.text, thread_root).await
+            self.prepare_prompt(channel, prompt.text, thread_root).await
         }
     }
 
@@ -232,6 +242,8 @@ impl Drop for PrepareTask {
 }
 
 struct Session {
+    /// Posting and replay channel, taken from the loaded root or new-session default.
+    channel: uuid::Uuid,
     id: String,
     /// Changes on replay installation, fencing pending presentation lookups.
     replay_epoch: u64,
@@ -359,6 +371,7 @@ where
         timing,
         sessions: HashMap::new(),
         history_ops: 0,
+        memberships: Arc::new(history::Memberships::default()),
         loading: HashMap::new(),
         history_live: Vec::new(),
         history_live_bytes: 0,
@@ -392,6 +405,7 @@ struct Bridge<R> {
     timing: Timing,
     sessions: HashMap<String, Session>,
     history_ops: usize,
+    memberships: Arc<history::Memberships>,
     loading: HashMap<String, HistoryLoad>,
     history_live: Vec<Event>,
     history_live_bytes: usize,
@@ -408,6 +422,17 @@ fn stdout_closed() -> CliError {
 }
 
 impl<R: BridgeRelay> Bridge<R> {
+    fn sync_channels(&self) {
+        let mut channels: Vec<_> = self
+            .sessions
+            .values()
+            .map(|session| session.channel)
+            .collect();
+        channels.sort_unstable();
+        channels.dedup();
+        self.relay.set_channels(channels);
+    }
+
     async fn run(
         &mut self,
         in_rx: &mut mpsc::Receiver<StdinMsg>,
@@ -415,6 +440,7 @@ impl<R: BridgeRelay> Bridge<R> {
         ops_rx: &mut mpsc::Receiver<Op>,
     ) -> Result<(), CliError> {
         loop {
+            self.sync_channels();
             let deadline = self.next_deadline();
             let sleep_until = deadline.unwrap_or_else(Instant::now);
             tokio::select! {
@@ -539,6 +565,7 @@ impl<R: BridgeRelay> Bridge<R> {
         self.sessions.insert(
             session_id.clone(),
             Session {
+                channel: self.scope.channel,
                 id: session_id.clone(),
                 replay_epoch: 0,
                 root: None,
@@ -621,10 +648,10 @@ impl<R: BridgeRelay> Bridge<R> {
         session_id: &str,
         text: Prompt,
     ) -> Result<(), CliError> {
-        let channel = self.scope.channel;
         let Some(session) = self.sessions.get_mut(session_id) else {
             return Ok(());
         };
+        let channel = session.channel;
         let command = parse_recovery(&text.text);
         let body = match command {
             Some((_, rest)) if !rest.is_empty() || !text.images.is_empty() => Some(Prompt {
@@ -643,17 +670,20 @@ impl<R: BridgeRelay> Bridge<R> {
         session.ended = None;
         let posted = match command {
             Recovery::SameThread => body.clone(),
-            Recovery::NewThread => match session.root.take() {
-                Some(old_root) => Prompt {
-                    text: format!(
-                        "{}\n\nPrevious thread (its agent session ended): {}",
-                        body.text,
-                        message_link(channel, &old_root)
-                    ),
-                    ..body.clone()
-                },
-                None => body.clone(),
-            },
+            Recovery::NewThread => {
+                session.channel = self.scope.channel;
+                match session.root.take() {
+                    Some(old_root) => Prompt {
+                        text: format!(
+                            "{}\n\nPrevious thread (its agent session ended): {}",
+                            body.text,
+                            message_link(channel, &old_root)
+                        ),
+                        ..body.clone()
+                    },
+                    None => body.clone(),
+                }
+            }
         };
         self.send(wire::session_update(
             session_id,
@@ -670,7 +700,13 @@ impl<R: BridgeRelay> Bridge<R> {
         let session = self.sessions.get(session_id);
         let root = session.and_then(|s| s.root.as_deref()).unwrap_or_default();
         let reason = session.and_then(|s| s.ended.as_deref()).unwrap_or_default();
-        let notice = ended_notice(reason, &message_link(self.scope.channel, root));
+        let notice = ended_notice(
+            reason,
+            &message_link(
+                session.map(|s| s.channel).unwrap_or(self.scope.channel),
+                root,
+            ),
+        );
         self.send(wire::session_update(
             session_id,
             wire::agent_text_chunk(&notice),
@@ -682,7 +718,6 @@ impl<R: BridgeRelay> Bridge<R> {
         ))
         .await
     }
-
     /// Start a prompt that posts `posted`; `user_text` is what a later
     /// `/recover` or `/fresh` resends.
     fn begin_prompt(&mut self, id: Value, session_id: &str, posted: Prompt, user_text: Prompt) {
@@ -739,6 +774,7 @@ impl<R: BridgeRelay> Bridge<R> {
             return;
         };
         let root = session.root.clone();
+        let channel = session.channel;
         let Some(pending) = session.pending.as_mut() else {
             return;
         };
@@ -757,7 +793,7 @@ impl<R: BridgeRelay> Bridge<R> {
                     tokio::time::sleep(delay).await;
                     tokio::time::timeout(
                         Duration::from_secs(120),
-                        relay.prepare_content(prompt, root),
+                        relay.prepare_content(channel, prompt, root),
                     )
                     .await
                     .unwrap_or_else(|_| {
@@ -806,7 +842,13 @@ impl<R: BridgeRelay> Bridge<R> {
             request_id: request_id.clone(),
             deadline: Instant::now() + self.timing.cancel_wait,
         });
-        let frame = match frames::cancel_turn_frame(&self.scope, &request_id) {
+        let frame = match frames::cancel_turn_frame(
+            &Scope {
+                channel: session.channel,
+                ..self.scope.clone()
+            },
+            &request_id,
+        ) {
             Ok(frame) => frame,
             Err(e) => return self.fail(session_id, &cancel_failed(&e)).await,
         };
@@ -1025,7 +1067,16 @@ impl<R: BridgeRelay> Bridge<R> {
             match frames::decode_telemetry(&self.scope, &event) {
                 Ok(events) => {
                     for observer_event in events {
-                        self.on_signal(frames::signal_of(observer_event)).await?;
+                        if self.accepts_telemetry(&observer_event) {
+                            if let Some(channel) = observer_event
+                                .channel_id
+                                .as_deref()
+                                .and_then(|channel| channel.parse().ok())
+                            {
+                                self.on_signal(frames::signal_of(observer_event), channel)
+                                    .await?;
+                            }
+                        }
                     }
                 }
                 // Control frames and other agents' telemetry are expected noise.
@@ -1061,20 +1112,48 @@ impl<R: BridgeRelay> Bridge<R> {
         Ok(())
     }
 
+    fn accepts_telemetry(&self, event: &frames::ObserverEvent) -> bool {
+        let signal = frames::signal_of(event.clone());
+        self.sessions.values().any(|session| {
+            let Some(pending) = session.pending.as_ref() else {
+                return false;
+            };
+            let owns = match &signal {
+                Signal::TurnStarted { triggering, .. } => pending
+                    .event_id
+                    .as_ref()
+                    .is_some_and(|id| triggering.contains(id)),
+                Signal::CancelResult { request_id, .. } => pending
+                    .cancel
+                    .as_ref()
+                    .is_some_and(|cancel| &cancel.request_id == request_id),
+                _ => event
+                    .turn_id
+                    .as_deref()
+                    .is_some_and(|turn| pending.turn_id.as_deref() == Some(turn)),
+            };
+            owns && event
+                .channel_id
+                .as_deref()
+                .and_then(|channel| channel.parse().ok())
+                == Some(session.channel)
+        })
+    }
     /// Find the session whose current prompt is running `turn_id`.
-    fn session_for_turn(&self, turn_id: &str) -> Option<String> {
+    fn session_for_turn(&self, turn_id: &str, channel: uuid::Uuid) -> Option<String> {
         self.sessions
             .values()
             .find(|s| {
-                s.pending
-                    .as_ref()
-                    .and_then(|p| p.turn_id.as_deref())
-                    .is_some_and(|t| t == turn_id)
+                s.channel == channel
+                    && s.pending
+                        .as_ref()
+                        .and_then(|p| p.turn_id.as_deref())
+                        .is_some_and(|t| t == turn_id)
             })
             .map(|s| s.id.clone())
     }
 
-    async fn on_signal(&mut self, signal: Signal) -> Result<(), CliError> {
+    async fn on_signal(&mut self, signal: Signal, channel: uuid::Uuid) -> Result<(), CliError> {
         match signal {
             Signal::TurnStarted {
                 turn_id,
@@ -1082,7 +1161,7 @@ impl<R: BridgeRelay> Bridge<R> {
             } => {
                 // Bind the turn to the prompt it answers. Turns for other
                 // prompts or threads stay unbound and their frames are dropped.
-                for session in self.sessions.values_mut() {
+                for session in self.sessions.values_mut().filter(|s| s.channel == channel) {
                     if let Some(pending) = session.pending.as_mut() {
                         let answers_prompt = pending
                             .event_id
@@ -1099,7 +1178,7 @@ impl<R: BridgeRelay> Bridge<R> {
             Signal::CancelResult { request_id, status } => {
                 let target = self.sessions.values().find_map(|s| {
                     let cancel = s.pending.as_ref()?.cancel.as_ref()?;
-                    (cancel.request_id == request_id).then(|| s.id.clone())
+                    (s.channel == channel && cancel.request_id == request_id).then(|| s.id.clone())
                 });
                 let Some(session_id) = target else {
                     return Ok(());
@@ -1112,7 +1191,7 @@ impl<R: BridgeRelay> Bridge<R> {
                 self.finish(&session_id, "cancelled").await
             }
             Signal::TurnCompleted { turn_id } => {
-                let Some(session_id) = self.session_for_turn(&turn_id) else {
+                let Some(session_id) = self.session_for_turn(&turn_id, channel) else {
                     return Ok(());
                 };
                 let stop_reason = self
@@ -1130,7 +1209,7 @@ impl<R: BridgeRelay> Bridge<R> {
                 self.finish(&session_id, &stop_reason).await
             }
             Signal::Liveness { turn_id } => {
-                self.touch_turn(&turn_id, true);
+                self.touch_turn(&turn_id, channel, true);
                 Ok(())
             }
             Signal::StopReason {
@@ -1138,17 +1217,17 @@ impl<R: BridgeRelay> Bridge<R> {
                 reason,
                 usage,
             } => {
-                if let Some(pending) = self.touch_turn(&turn_id, false) {
+                if let Some(pending) = self.touch_turn(&turn_id, channel, false) {
                     pending.stop_reason = Some(reason);
                     pending.usage = usage;
                 }
                 Ok(())
             }
             Signal::Update { turn_id, update } => {
-                let Some(session_id) = self.session_for_turn(&turn_id) else {
+                let Some(session_id) = self.session_for_turn(&turn_id, channel) else {
                     return Ok(());
                 };
-                self.touch_turn(&turn_id, false);
+                self.touch_turn(&turn_id, channel, false);
                 if update.get("sessionUpdate").and_then(Value::as_str)
                     == Some("agent_message_chunk")
                 {
@@ -1171,11 +1250,17 @@ impl<R: BridgeRelay> Bridge<R> {
 
     /// Record activity on `turn_id`. Liveness frames arm the silence timeout;
     /// any later frame of the turn extends it.
-    fn touch_turn(&mut self, turn_id: &str, liveness: bool) -> Option<&mut PendingPrompt> {
+    fn touch_turn(
+        &mut self,
+        turn_id: &str,
+        channel: uuid::Uuid,
+        liveness: bool,
+    ) -> Option<&mut PendingPrompt> {
         let silence = self.timing.turn_silence;
         let pending = self
             .sessions
             .values_mut()
+            .filter(|s| s.channel == channel)
             .filter_map(|s| s.pending.as_mut())
             .find(|p| p.turn_id.as_deref() == Some(turn_id))?;
         if liveness || pending.silence_deadline.is_some() {
@@ -1185,24 +1270,13 @@ impl<R: BridgeRelay> Bridge<R> {
     }
 
     async fn on_thread_message(&mut self, event: &Event) -> Result<(), CliError> {
-        let channel = self.scope.channel.to_string();
-        if event
-            .tags
-            .iter()
-            .find(|t| t.as_slice().first().map(String::as_str) == Some("h"))
-            .and_then(|t| t.as_slice().get(1))
-            != Some(&channel)
-        {
-            return Ok(());
-        }
         let Some((root, _)) = buzz_core::nip10::parse_thread_markers(&event.tags).resolve() else {
             return Ok(());
         };
-        let Some(session) = self
-            .sessions
-            .values()
-            .find(|s| s.root.as_deref() == Some(root.as_str()))
-        else {
+        let Some(session) = self.sessions.values().find(|s| {
+            s.root.as_deref() == Some(root.as_str())
+                && history::event_channel(event) == Some(s.channel)
+        }) else {
             return Ok(());
         };
         if session.own_events.contains(&event.id) {

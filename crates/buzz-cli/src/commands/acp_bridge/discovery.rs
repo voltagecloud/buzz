@@ -44,7 +44,7 @@ impl Position {
 fn participation_filters(scope: &Scope) -> Vec<Value> {
     vec![
         mention_filter(scope),
-        json!({"kinds":[9],"#h":[scope.channel.to_string()],"authors":[scope.agent.to_hex()],"limit":QUERY_PAGE,"consistency":"strong"}),
+        json!({"kinds":[9],"authors":[scope.agent.to_hex()],"limit":QUERY_PAGE,"consistency":"strong"}),
     ]
 }
 
@@ -87,6 +87,9 @@ async fn represented_before<R: BridgeRelay>(
     }
     let mut filters = participation_filters(scope);
     for filter in &mut filters {
+        filter["#h"] = json!([event_channel(root)
+            .ok_or_else(|| problem("thread has no channel"))?
+            .to_string()]);
         filter["#e"] = json!([root.id.to_hex()]);
         filter["since"] = json!(before.time);
     }
@@ -101,7 +104,11 @@ async fn represented_before<R: BridgeRelay>(
             if !before.contains(event) {
                 return Ok(Some(false));
             }
-            if scoped(scope, event) && involves(scope, event) && thread_id(event) == Some(root.id) {
+            if scoped(scope, event)
+                && event_channel(event) == event_channel(root)
+                && involves(scope, event)
+                && thread_id(event) == Some(root.id)
+            {
                 return Ok(Some(true));
             }
         }
@@ -146,6 +153,7 @@ pub(super) async fn history_list<R: BridgeRelay>(
     relay: &R,
     scope: &Scope,
     params: &Value,
+    memberships: &Memberships,
 ) -> Result<Value, CliError> {
     // A filter that is not an absolute path matches no session.
     let only = params
@@ -171,6 +179,8 @@ pub(super) async fn history_list<R: BridgeRelay>(
         relay,
         remaining: MAX_QUERIES,
     };
+    let mut membership_reads = 0;
+    let mut members = HashMap::new();
     let mut roots: HashMap<EventId, Option<Event>> = HashMap::new();
     let mut seen = HashSet::new();
     let mut sessions = Vec::new();
@@ -198,7 +208,7 @@ pub(super) async fn history_list<R: BridgeRelay>(
         // A root present later in the same batch does not need an HTTP read.
         missing.retain(|id| !roots.contains_key(id));
         if !missing.is_empty() {
-            let filter = json!({"kinds":[9],"#h":[scope.channel.to_string()],"ids":missing.iter().map(|id|id.to_hex()).collect::<Vec<_>>(),"limit":missing.len(),"consistency":"strong"});
+            let filter = json!({"kinds":[9],"ids":missing.iter().map(|id|id.to_hex()).collect::<Vec<_>>(),"limit":missing.len(),"consistency":"strong"});
             let Some(found) = reads.query(filter).await? else {
                 return budget_response(sessions, next);
             };
@@ -218,6 +228,31 @@ pub(super) async fn history_list<R: BridgeRelay>(
             if scoped(scope, &event) && involves(scope, &event) {
                 if let Some(id) = thread_id(&event) {
                     if let Some(Some(root)) = roots.get(&id) {
+                        let channel =
+                            event_channel(root).ok_or_else(|| problem("thread has no channel"))?;
+                        if event_channel(&event) != Some(channel) {
+                            next = Some(cursor(&event));
+                            continue;
+                        }
+                        let member = if let Some(member) = members
+                            .get(&channel)
+                            .copied()
+                            .or_else(|| memberships.cached(channel))
+                        {
+                            member
+                        } else {
+                            if membership_reads == 32 || reads.remaining == 0 {
+                                return budget_response(sessions, next);
+                            }
+                            reads.remaining -= 1;
+                            membership_reads += 1;
+                            memberships.read(relay, scope, channel).await?
+                        };
+                        members.insert(channel, member);
+                        if !member {
+                            next = Some(cursor(&event));
+                            continue;
+                        }
                         if seen.insert(id) {
                             if let Some(before) = &before {
                                 let Some(represented) =

@@ -58,7 +58,7 @@ const STOP_REASONS: &[&str] = &[
     "cancelled",
 ];
 
-/// Identity and channel a bridge accepts frames for.
+/// Bridge identity and the default channel for new sessions.
 #[derive(Clone)]
 pub(crate) struct Scope {
     /// The bridge signer: posts prompts, decrypts telemetry, signs control frames.
@@ -67,7 +67,7 @@ pub(crate) struct Scope {
     pub owner: PublicKey,
     /// The driven agent.
     pub agent: PublicKey,
-    /// The channel the bridge posts in.
+    /// The default channel for newly created sessions.
     pub channel: Uuid,
     /// The daemon's home directory, which holds the Paseo projects
     /// (see [`super::projects`]).
@@ -159,10 +159,6 @@ pub(crate) fn decode_telemetry(
     } else {
         events.push(outer);
     }
-    events.retain(|event| match event.channel_id.as_deref() {
-        None => true,
-        Some(channel) => channel.parse::<Uuid>().ok() == Some(scope.channel),
-    });
     Ok(events)
 }
 

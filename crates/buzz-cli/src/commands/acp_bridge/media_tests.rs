@@ -131,6 +131,8 @@ async fn acp_image_uses_signed_blossom_imeta_and_agent_authenticated_download() 
             axum::serve(listener, router).await.unwrap();
         });
         let relay = Arc::new(super::super::ClientRelay {
+            identity: tokio::sync::OnceCell::new(),
+            channels: tokio::sync::watch::channel(std::collections::BTreeMap::new()).0,
             client: crate::client::BuzzClient::new(url.clone(), ids.signer.clone(), None, None)
                 .unwrap(),
             scope: ids.scope(),
@@ -190,6 +192,7 @@ async fn acp_image_uses_signed_blossom_imeta_and_agent_authenticated_download() 
             // image is linked once.
             let resent = super::super::bridge::BridgeRelay::prepare_content(
                 resender.as_ref(),
+                ids.channel,
                 super::super::prompt::Prompt {
                     text: "inspect this screenshot".into(),
                     images: Vec::new(),

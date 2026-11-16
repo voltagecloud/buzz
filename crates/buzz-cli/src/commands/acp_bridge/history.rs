@@ -1,8 +1,12 @@
-//! Durable ACP session discovery and replay. The live channel subscription
-//! overlaps every history query; replayed ids suppress its queued duplicates.
+//! Durable ACP session discovery and replay across readable channels.
+//! Per-session live subscriptions replay an overlap; event ids suppress duplicates.
 
 use super::*;
 use nostr::PublicKey;
+
+#[path = "memberships.rs"]
+mod memberships;
+pub(super) use memberships::Memberships;
 
 #[path = "discovery.rs"]
 mod discovery;
@@ -60,10 +64,21 @@ fn has_tag(event: &Event, name: &str, value: &str) -> bool {
     })
 }
 
-fn scoped(scope: &Scope, event: &Event) -> bool {
-    event.kind.as_u16() == 9
-        && event.verify().is_ok()
-        && has_tag(event, "h", &scope.channel.to_string())
+pub(super) fn event_channel(event: &Event) -> Option<uuid::Uuid> {
+    let mut tags = event
+        .tags
+        .iter()
+        .map(nostr::Tag::as_slice)
+        .filter(|tag| tag.first().map(String::as_str) == Some("h"));
+    let tag = tags.next()?;
+    if tags.next().is_some() || tag.len() != 2 {
+        return None;
+    }
+    tag[1].parse().ok()
+}
+
+fn scoped(_scope: &Scope, event: &Event) -> bool {
+    event.kind.as_u16() == 9 && event.verify().is_ok() && event_channel(event).is_some()
 }
 
 fn root_for(scope: &Scope, event: &Event) -> bool {
@@ -86,7 +101,7 @@ fn authors(scope: &Scope) -> Vec<PublicKey> {
 }
 
 fn mention_filter(scope: &Scope) -> Value {
-    json!({"kinds": [9], "#h": [scope.channel.to_string()], "#p": [scope.agent.to_hex()], "limit": QUERY_PAGE, "consistency":"strong"})
+    json!({"kinds": [9], "#p": [scope.agent.to_hex()], "limit": QUERY_PAGE, "consistency":"strong"})
 }
 
 fn alias_filter(scope: &Scope) -> Value {
@@ -119,6 +134,7 @@ impl<R: BridgeRelay> Bridge<R> {
                 .await;
         }
         self.history_ops += 1;
+        let memberships = Arc::clone(&self.memberships);
         let (relay, scope, params, ops) = (
             Arc::clone(&self.relay),
             self.scope.clone(),
@@ -128,7 +144,7 @@ impl<R: BridgeRelay> Bridge<R> {
         tokio::spawn(async move {
             let result = tokio::time::timeout(
                 HISTORY_TIMEOUT,
-                history_list(relay.as_ref(), &scope, &params),
+                history_list(relay.as_ref(), &scope, &params, &memberships),
             )
             .await
             .unwrap_or_else(|_| Err(problem("session listing timed out; retry")));
@@ -210,7 +226,8 @@ impl<R: BridgeRelay> Bridge<R> {
         );
         tokio::spawn(async move {
             let replay = async {
-                let events = load_events(relay.as_ref(), &scope, &raw).await?;
+                let mut scope = scope.clone();
+                let events = load_events(relay.as_ref(), &mut scope, &raw).await?;
                 let labels = names
                     .resolve(
                         relay.as_ref(),
@@ -308,7 +325,7 @@ impl<R: BridgeRelay> Bridge<R> {
                     .await
             }
         };
-        let Some((root_id, project)) = events
+        let Some((root_id, project, channel)) = events
             .iter()
             .find(|event| root_for(&self.scope, event))
             .map(|event| {
@@ -316,7 +333,7 @@ impl<R: BridgeRelay> Bridge<R> {
                 // `/fresh` records it on the new root.
                 let project =
                     projects::project_of_root(event, &authors(&self.scope)).or(cwd_project);
-                (event.id.to_hex(), project)
+                (event.id.to_hex(), project, event_channel(event))
             })
         else {
             return self
@@ -325,6 +342,11 @@ impl<R: BridgeRelay> Bridge<R> {
                     wire::INTERNAL_ERROR,
                     "session history is missing a valid thread root; retry",
                 )
+                .await;
+        };
+        let Some(channel) = channel else {
+            return self
+                .respond_error(id, wire::INVALID_PARAMS, "thread has no channel")
                 .await;
         };
         if !events.iter().any(|event| involves(&self.scope, event)) {
@@ -365,6 +387,7 @@ impl<R: BridgeRelay> Bridge<R> {
         self.sessions
             .entry(raw.to_owned())
             .or_insert_with(|| Session {
+                channel,
                 id: raw.to_owned(),
                 replay_epoch: last_used,
                 root: Some(root_id.clone()),
@@ -383,7 +406,10 @@ impl<R: BridgeRelay> Bridge<R> {
             session.last_used = last_used;
             session.replay_epoch = last_used;
             session.root = Some(root_id);
+            session.channel = channel;
         }
+        // Install coverage before replay output can block this loop.
+        self.sync_channels();
         let mut replayed: HashSet<EventId> = events.iter().map(|event| event.id).collect();
         let root = self
             .sessions
@@ -394,6 +420,7 @@ impl<R: BridgeRelay> Bridge<R> {
             .iter()
             .filter(|event| {
                 scoped(&self.scope, event)
+                    && event_channel(event) == Some(channel)
                     && buzz_core::nip10::parse_thread_markers(&event.tags)
                         .resolve()
                         .is_some_and(|(thread, _)| Some(thread.as_str()) == root)
@@ -422,10 +449,19 @@ impl<R: BridgeRelay> Bridge<R> {
 
 async fn load_events<R: BridgeRelay>(
     relay: &R,
-    scope: &Scope,
+    scope: &mut Scope,
     session_id: &str,
 ) -> Result<Vec<Event>, CliError> {
     let root_event = resolve_root(relay, scope, session_id).await?;
+    scope.channel = event_channel(&root_event).ok_or_else(|| problem("thread has no channel"))?;
+    if !Memberships::default()
+        .read(relay, scope, scope.channel)
+        .await?
+    {
+        return Err(problem(
+            "owner is not a posting member of the thread channel",
+        ));
+    }
     let root = root_event.id;
     let mut replay_bytes = root_event.content.len();
     let mut events = vec![root_event];
@@ -448,6 +484,7 @@ async fn load_events<R: BridgeRelay>(
         }
         for event in page {
             if scoped(scope, &event)
+                && event_channel(&event) == Some(scope.channel)
                 && buzz_core::nip10::parse_thread_markers(&event.tags)
                     .resolve()
                     .is_some_and(|(id, _)| id == root.to_hex())
@@ -482,12 +519,15 @@ async fn resolve_root<R: BridgeRelay>(
     session_id: &str,
 ) -> Result<Event, CliError> {
     if let Ok(id) = EventId::from_hex(session_id) {
-        return relay.query(json!({"kinds":[9], "#h":[scope.channel.to_string()], "ids":[id.to_hex()], "limit":1, "consistency":"strong"})).await?
-            .into_iter().find(|event| event.id == id && root_for(scope,event))
-            .ok_or_else(||problem("session is not a thread for this channel and agent"));
+        return relay
+            .query(json!({"kinds":[9], "ids":[id.to_hex()], "limit":1, "consistency":"strong"}))
+            .await?
+            .into_iter()
+            .find(|event| event.id == id && root_for(scope, event))
+            .ok_or_else(|| problem("session is not a thread for this channel and agent"));
     }
     // Kind 9 has no SQL d_tag column: the relay applies #d after LIMIT.
-    // Authors, channel and the single #p are SQL predicates, so scan those
+    // Authors and the single #p are SQL predicates, so scan those
     // bounded candidates and validate the signed alias here instead.
     let alias = format!("buzz-acp:{session_id}");
     let mut filter = alias_filter(scope);

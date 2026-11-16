@@ -25,6 +25,7 @@ mod tests;
 #[path = "relay_stream_tests.rs"]
 mod relay_stream_tests;
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -121,14 +122,18 @@ pub(crate) async fn run(
     };
 
     let (relay_tx, relay_rx) = mpsc::channel(RELAY_QUEUE);
+    let (channels_tx, channels_rx) = tokio::sync::watch::channel(BTreeMap::new());
     let subscription = tokio::spawn(run_subscription(
         to_ws_url(client.relay_url()),
         scope.clone(),
         client.auth_tag().cloned(),
         relay_tx,
+        channels_rx,
     ));
     let relay = Arc::new(ClientRelay {
         client,
+        identity: tokio::sync::OnceCell::new(),
+        channels: channels_tx,
         scope: scope.clone(),
     });
     let result = bridge::run_bridge(
@@ -144,13 +149,45 @@ pub(crate) async fn run(
     result
 }
 
+/// Keep each channel's coverage boundary even if stdout blocks the consumer.
+fn update_channels(current: &mut BTreeMap<Uuid, u64>, channels: &[Uuid]) -> bool {
+    let prior = current.clone();
+    current.retain(|channel, _| channels.contains(channel));
+    for channel in channels {
+        current
+            .entry(*channel)
+            .or_insert_with(|| now_secs().saturating_sub(RECONNECT_OVERLAP_SECS));
+    }
+    *current != prior
+}
+
 /// [`BridgeRelay`] over the buzz-cli relay client.
 struct ClientRelay {
     client: BuzzClient,
     scope: Scope,
+    identity: tokio::sync::OnceCell<PublicKey>,
+    channels: tokio::sync::watch::Sender<BTreeMap<Uuid, u64>>,
 }
 
 impl BridgeRelay for ClientRelay {
+    fn set_channels(&self, channels: Vec<Uuid>) {
+        self.channels
+            .send_if_modified(|current| update_channels(current, &channels));
+    }
+
+    async fn relay_identity(&self) -> Result<PublicKey, CliError> {
+        self.identity
+            .get_or_try_init(|| async {
+                let info: serde_json::Value =
+                    serde_json::from_str(&self.client.get_public("/").await?)
+                        .map_err(|e| CliError::Other(format!("invalid relay info: {e}")))?;
+                PublicKey::from_hex(info["self"].as_str().unwrap_or_default())
+                    .map_err(|e| CliError::Other(format!("relay identity unavailable: {e}")))
+            })
+            .await
+            .copied()
+    }
+
     async fn query(&self, filter: serde_json::Value) -> Result<Vec<Event>, CliError> {
         let raw = match filter.as_array() {
             Some(filters) => self.client.query_multi(filters).await?,
@@ -162,12 +199,13 @@ impl BridgeRelay for ClientRelay {
 
     async fn prepare_prompt(
         &self,
+        channel: uuid::Uuid,
         content: String,
         thread_root: Option<String>,
     ) -> Result<Event, CliError> {
         let params = SendMessageParams {
             paseo_transcript: None,
-            channel_id: self.scope.channel.to_string(),
+            channel_id: channel.to_string(),
             content,
             kind: Some(9),
             reply_to: thread_root,
@@ -180,6 +218,7 @@ impl BridgeRelay for ClientRelay {
 
     async fn prepare_content(
         &self,
+        channel: uuid::Uuid,
         mut prompt: prompt::Prompt,
         thread_root: Option<String>,
     ) -> Result<Event, CliError> {
@@ -229,7 +268,9 @@ impl BridgeRelay for ClientRelay {
                 .media
                 .push(crate::client::build_imeta_tag(&descriptor));
         }
-        let event = self.prepare_prompt(prompt.text, thread_root).await?;
+        let event = self
+            .prepare_prompt(channel, prompt.text, thread_root)
+            .await?;
         let mut tags = event.tags.to_vec();
         for media in prompt.media {
             tags.push(Tag::parse(media).map_err(|error| CliError::Other(error.to_string()))?);
@@ -274,10 +315,23 @@ async fn run_subscription(
     scope: Scope,
     auth_tag: Option<Tag>,
     tx: mpsc::Sender<RelayInbound>,
+    channels: tokio::sync::watch::Receiver<BTreeMap<Uuid, u64>>,
 ) {
     supervise(tx, rand::random::<f64>, move |since, tx| {
         let (url, scope, auth_tag) = (url.clone(), scope.clone(), auth_tag.clone());
-        async move { stream_once(&url, &scope, auth_tag.as_ref(), since, &tx, DEADLINES).await }
+        let channels = channels.clone();
+        async move {
+            stream_channels(
+                &url,
+                &scope,
+                auth_tag.as_ref(),
+                since,
+                &tx,
+                DEADLINES,
+                channels,
+            )
+            .await
+        }
     })
     .await;
 }
@@ -358,6 +412,7 @@ pub(crate) struct Failure {
     pub live_event: bool,
 }
 
+#[cfg(test)]
 async fn stream_once(
     url: &str,
     scope: &Scope,
@@ -365,6 +420,19 @@ async fn stream_once(
     since: u64,
     tx: &mpsc::Sender<RelayInbound>,
     deadlines: Deadlines,
+) -> Stream {
+    let (_hold, channels) = tokio::sync::watch::channel(BTreeMap::from([(scope.channel, since)]));
+    stream_channels(url, scope, auth_tag, since, tx, deadlines, channels).await
+}
+
+async fn stream_channels(
+    url: &str,
+    scope: &Scope,
+    auth_tag: Option<&Tag>,
+    since: u64,
+    tx: &mpsc::Sender<RelayInbound>,
+    deadlines: Deadlines,
+    mut channels: tokio::sync::watch::Receiver<BTreeMap<Uuid, u64>>,
 ) -> Stream {
     let mut live_at = None;
     let mut live_event = false;
@@ -390,39 +458,87 @@ async fn stream_once(
             )
         }
     };
-    let requests = [
-        json!([
+    let current = channels.borrow_and_update().clone();
+    let mut subscriptions = BTreeMap::new();
+    let mut pending_eose = BTreeSet::from([TELEMETRY_SUB.to_owned()]);
+    if let Err(error) = conn
+        .send_raw(&json!([
             "REQ",
             TELEMETRY_SUB,
             telemetry_filter(&scope.signer, &scope.agent)
-        ]),
-        json!(["REQ", THREAD_SUB, thread_filter(scope.channel, since)]),
-    ];
-    for request in &requests {
-        if let Err(e) = conn.send_raw(request).await {
-            return failed(e.to_string(), None, false);
+        ]))
+        .await
+    {
+        return failed(error.to_string(), None, false);
+    }
+    for channel in current.keys() {
+        let id = format!("{THREAD_SUB}:{}", Uuid::new_v4());
+        let request = json!(["REQ", id, thread_filter(&[*channel], since)]);
+        if let Err(error) = conn.send_raw(&request).await {
+            return failed(error.to_string(), None, false);
         }
+        pending_eose.insert(id.clone());
+        subscriptions.insert(*channel, id);
     }
 
-    let mut pending_eose = vec![TELEMETRY_SUB, THREAD_SUB];
-    let catch_up_by = Instant::now() + deadlines.catch_up;
+    let mut catch_up_by = Instant::now() + deadlines.catch_up;
     loop {
-        let next = conn.next_event(IDLE_READ);
-        let next = if pending_eose.is_empty() {
-            next.await
+        let deadline = if pending_eose.is_empty() {
+            Instant::now() + IDLE_READ
         } else {
-            match tokio::time::timeout_at(catch_up_by, next).await {
-                Ok(next) => next,
-                Err(_) => {
-                    return failed(
-                        format!(
-                            "relay subscriptions did not catch up within {}s",
-                            deadlines.catch_up.as_secs()
-                        ),
-                        live_at,
-                        live_event,
-                    )
+            catch_up_by
+        };
+        let next = tokio::select! {
+            changed = channels.changed() => {
+                if changed.is_err() { return Stream::ReceiverGone; }
+                let current = channels.borrow_and_update().clone();
+                // Keep retained channels subscribed without replaying their old
+                // replies. Only added channels need history/live overlap.
+                let removed: Vec<_> = subscriptions.keys().filter(|channel| !current.contains_key(channel)).copied().collect();
+                for channel in removed {
+                    if let Some(id) = subscriptions.remove(&channel) {
+                        pending_eose.remove(&id);
+                        if let Err(error) = conn.send_raw(&json!(["CLOSE", id])).await {
+                            return failed(error.to_string(), live_at, live_event);
+                        }
+                    }
                 }
+                let mut added = false;
+                for (channel, boundary) in current {
+                    if subscriptions.contains_key(&channel) { continue; }
+                    // Fresh IDs fence EOSE and CLOSED from retired subscriptions.
+                    let id = format!("{THREAD_SUB}:{}", Uuid::new_v4());
+                    if let Err(error) = conn.send_raw(&json!(["REQ", id, thread_filter(&[channel], boundary)])).await {
+                        return failed(error.to_string(), live_at, live_event);
+                    }
+                    pending_eose.insert(id.clone());
+                    subscriptions.insert(channel, id);
+                    added = true;
+                }
+                if added {
+                    live_at = None;
+                    live_event = false;
+                    catch_up_by = Instant::now() + deadlines.catch_up;
+                    if tx.send(RelayInbound::Down).await.is_err() { return Stream::ReceiverGone; }
+                } else if pending_eose.is_empty() {
+                    live_at = Some(Instant::now());
+                    if tx.send(RelayInbound::Live).await.is_err() { return Stream::ReceiverGone; }
+                }
+                continue;
+            }
+            result = tokio::time::timeout_at(deadline, conn.next_event(IDLE_READ)) => result,
+        };
+        let next = match next {
+            Ok(next) => next,
+            Err(_) => {
+                return failed(
+                    format!(
+                        "relay subscriptions did not catch up within {}s",
+                        deadlines.catch_up.as_secs()
+                    ),
+                    live_at,
+                    live_event,
+                )
             }
         };
         let message = match next {
@@ -451,9 +567,7 @@ async fn stream_once(
                 }
             }
             RelayMessage::Eose { subscription_id } => {
-                let before = pending_eose.len();
-                pending_eose.retain(|sub| *sub != subscription_id);
-                if before > 0 && pending_eose.is_empty() {
+                if pending_eose.remove(&subscription_id) && pending_eose.is_empty() {
                     live_at = Some(Instant::now());
                     if tx.send(RelayInbound::Live).await.is_err() {
                         return Stream::ReceiverGone;
@@ -463,7 +577,9 @@ async fn stream_once(
             RelayMessage::Closed {
                 subscription_id,
                 message,
-            } if subscription_id == TELEMETRY_SUB || subscription_id == THREAD_SUB => {
+            } if subscription_id == TELEMETRY_SUB
+                || subscriptions.values().any(|id| *id == subscription_id) =>
+            {
                 return failed(
                     format!("relay closed subscription {subscription_id}: {message}"),
                     live_at,
@@ -488,13 +604,13 @@ fn telemetry_filter(signer: &Keys, agent: &PublicKey) -> serde_json::Value {
 }
 
 /// Channel messages; the bridge keeps the ones in its sessions' threads.
-fn thread_filter(channel: Uuid, since: u64) -> serde_json::Value {
+fn thread_filter(channels: &[Uuid], since: u64) -> serde_json::Value {
     json!({
         "kinds": [
             buzz_core::kind::KIND_STREAM_MESSAGE,
             buzz_core::kind::KIND_STREAM_MESSAGE_V2,
         ],
-        "#h": [channel.to_string()],
+        "#h": channels.iter().map(Uuid::to_string).collect::<Vec<_>>(),
         "since": since,
     })
 }
