@@ -369,12 +369,20 @@ docker exec "$NAME" node -e '
 changes=$(docker diff "$NAME")
 [ -z "$changes" ] || fail "writes outside tmpfs: $changes"
 
-# Runtime package installers, toolchains, scanners and Codex are absent.
+# Analysis tools work; package installers, toolchains, scanners and Codex are absent.
 docker exec "$NAME" sh -c '
-  for command in codex npm npx yarn corepack apt apt-get dpkg cargo rustc gcc cc make cmake python3 pip gitleaks; do
+  set -eu
+  for command in codex npm npx yarn corepack apt apt-get dpkg cargo rustc gcc cc make cmake pip pip3 gitleaks; do
     if command -v "$command" >/dev/null 2>&1; then echo "unexpected runtime tool: $command" >&2; exit 1; fi
   done
-  command -v git >/dev/null && command -v node >/dev/null && command -v via >/dev/null
+  for command in git node via jq python3 sqlite3 xxd file tree unzip zstd less fdfind fd yq column hexdump; do
+    command -v "$command" >/dev/null || { echo "missing runtime tool: $command" >&2; exit 1; }
+  done
+  [ "$(readlink /usr/local/bin/fd)" = /usr/bin/fdfind ]
+  printf "%s\n" "{\"value\":42}" | jq -e ".value == 42" >/dev/null
+  printf "value: 42\n" | yq -e ".value == 42" >/dev/null
+  python3 -c "import json, sqlite3; assert json.loads(\"{\\\"value\\\":42}\")[\"value\"] == 42"
+  [ "$(sqlite3 :memory: "select 42;")" = 42 ]
 ' || fail "runtime tool inventory"
 # Packaging does not enroll services or inherit the Sandbox profile.
 docker exec "$NAME" via version | grep -qx 'via 0.6.1' || fail "via version"

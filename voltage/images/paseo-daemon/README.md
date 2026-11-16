@@ -62,6 +62,9 @@ Provider tool restrictions reduce mistakes; they are not a security boundary onc
 The container uses a read-only root filesystem, an unprivileged UID, dropped capabilities, and a one-CPU limit.
 It carries no package managers, compilers, build/test tools, or scanners.
 Node remains necessary for the upstream daemon and plugin runtime.
+Analysis tools include jq, Python 3, sqlite3, xxd, file, tree, unzip, zstd, less, fd, column, and hexdump.
+`fd` links to Debian's `fdfind`. Debian's [yq package](https://packages.debian.org/bookworm/yq) uses jq filters through Python; it is not mikefarah/yq.
+Python supports standard-library analysis; the image adds no pip or user-installed Python packages.
 Never install packages or execute repository scripts here.
 
 ## via client and enrollment prerequisite
