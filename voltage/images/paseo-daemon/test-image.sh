@@ -139,7 +139,7 @@ refuses "GITHUB_READ_TOKEN must be a fine-grained GitHub token" -e GITHUB_READ_T
 cat >"$stubs/claude" <<'STUB'
 #!/bin/sh
 case "$*" in
-  *--version*) echo "2.1.246 (Claude Code)"; exit 0 ;;
+  *--version*) echo "2.1.325 (Claude Code)"; exit 0 ;;
   *"auth status"*) echo '{"loggedIn":true}'; exit 0 ;;
 esac
 # Metadata generation also invokes Claude. Keep only the real assistant launch.
@@ -203,8 +203,8 @@ status=$(wait_running "$NAME")
 [ "$(jq -r .listen <<<"$status")" = 127.0.0.1:6767 ] || fail "listener is not loopback: $status"
 jq -e '.relay | .enabled and .useTls and .publicUseTls and .endpoint == "relay.invalid:443"' <<<"$status" >/dev/null ||
   fail "relay settings: $status"
-# The image's own claude is the Claude Code binary bundled with the daemon.
-docker exec -e PATH=/usr/local/bin:/usr/bin:/bin "$NAME" claude --version | grep -q '(Claude Code)' ||
+# Check the real executable, bypassing the launch stub.
+docker exec -e PATH=/usr/local/bin:/usr/bin:/bin "$NAME" claude --version | grep -qx '2.1.325 (Claude Code)' ||
   fail "the image claude is not Claude Code"
 
 # The PA and the Buzz agent are offered; the other bundled providers are not.

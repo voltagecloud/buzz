@@ -1,7 +1,7 @@
 # Paseo personal daemon
 
 One developer's headless Paseo daemon stays available while their laptop is closed.
-The image uses unmodified Paseo 0.15.3 and its bundled Claude Code 2.1.246 runtime.
+The image uses unmodified Paseo 0.15.3 with Claude Code 2.1.325 from the developer image’s shared runtime lockfile.
 It adds the Buzz CLI, a configuration wrapper, read-only Git helpers, a turn recorder, and a gateway profile plugin.
 Codex stays disabled pending its shell and credential review.
 

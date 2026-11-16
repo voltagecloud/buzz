@@ -147,6 +147,8 @@ jobs:
               - 'crates/**'
               - 'examples/**'
               - 'voltage/images/paseo-daemon/**'
+              - 'voltage/images/buzz-agent/package.json'
+              - 'voltage/images/buzz-agent/package-lock.json'
               - '.github/workflows/voltage-agent-images.yml'
             relay:
               - 'Dockerfile'
