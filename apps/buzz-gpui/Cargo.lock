@@ -1305,11 +1305,13 @@ name = "buzz-sdk"
 version = "0.1.0"
 dependencies = [
  "buzz-core",
+ "chrono",
  "nostr 0.44.8",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
