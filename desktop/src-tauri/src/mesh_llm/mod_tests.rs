@@ -1,10 +1,10 @@
 //! Unit tests for `mesh_llm/mod.rs` private helpers (kept in a sibling file so
 //! `mod.rs` stays under the 500-line budget; `#[path]`-included from there).
-use super::find_progressish_reason;
+use super::{find_progressish_reason, EmbeddedNodeHandle};
 use serde_json::json;
 
 fn pending_client_runtime(
-    task: tokio::task::JoinHandle<anyhow::Result<mesh_llm_sdk::EmbeddedNodeHandle>>,
+    task: tokio::task::JoinHandle<anyhow::Result<EmbeddedNodeHandle>>,
 ) -> super::DesktopMeshRuntime {
     let request = super::StartMeshNodeRequest {
         mode: super::MeshNodeMode::Client,
@@ -32,9 +32,8 @@ fn pending_client_runtime(
 
 #[tokio::test]
 async fn pending_client_status_does_not_wait_for_management_timeout() {
-    let task = tokio::spawn(async {
-        std::future::pending::<anyhow::Result<mesh_llm_sdk::EmbeddedNodeHandle>>().await
-    });
+    let task =
+        tokio::spawn(async { std::future::pending::<anyhow::Result<EmbeddedNodeHandle>>().await });
     let runtime = pending_client_runtime(task);
 
     let status = tokio::time::timeout(std::time::Duration::from_secs(1), runtime.status())

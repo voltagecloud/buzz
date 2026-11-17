@@ -26,7 +26,10 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use mesh_llm_host_runtime::crypto::{save_keystore, OwnerKeypair};
-use mesh_llm_sdk::{client, serve, MeshDiscoveryMode, TrustPolicy};
+use mesh_llm_host_runtime::sdk::{
+    start_embedded_node, EmbeddedMeshDiscoveryMode as MeshDiscoveryMode, EmbeddedMeshNodeConfig,
+    EmbeddedTrustPolicy as TrustPolicy,
+};
 
 const DEFAULT_MODEL: &str = "jc-builds/SmolLM2-135M-Instruct-Q4_K_M-GGUF:Q4_K_M";
 
@@ -75,7 +78,8 @@ async fn role_serve() -> anyhow::Result<()> {
         .map(str::to_string)
         .collect();
 
-    let cfg = serve::EmbeddedServeConfig::builder()
+    let cfg = EmbeddedMeshNodeConfig::builder()
+        .serve()
         .model(&model)
         .api_port(SERVE_API_PORT)
         .console_port(SERVE_CONSOLE_PORT)
@@ -92,7 +96,7 @@ async fn role_serve() -> anyhow::Result<()> {
         // the first connection attempt.
         .signed_join_tokens(true)
         .build();
-    let node = serve::start(cfg).await?;
+    let node = start_embedded_node(cfg).await?;
     let invite = node
         .invite_token()
         .map(str::to_string)
@@ -122,7 +126,8 @@ async fn role_client() -> anyhow::Result<()> {
     let console_port: u16 = env("MESH_CONSOLE_PORT")?.parse()?;
     let window_secs: u64 = env("MESH_WINDOW_SECS")?.parse()?;
 
-    let cfg = client::EmbeddedClientConfig::builder()
+    let cfg = EmbeddedMeshNodeConfig::builder()
+        .client()
         .api_port(api_port)
         .console_port(console_port)
         .publish(false)
@@ -137,7 +142,7 @@ async fn role_client() -> anyhow::Result<()> {
         .owner_key(owner_key)
         .owner_required(true)
         .build();
-    let node = client::start(cfg).await?;
+    let node = start_embedded_node(cfg).await?;
     let http = reqwest::Client::new();
     let base = node.api_base_url().to_string();
     let seen = wait_for_model(&http, &base, Duration::from_secs(window_secs)).await?;
