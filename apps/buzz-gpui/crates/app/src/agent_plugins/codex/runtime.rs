@@ -712,6 +712,7 @@ impl CodexRuntime {
             entries.retain(|pubkey, _| pubkeys.contains(pubkey));
             gone
         };
+        let mut stops = Vec::new();
         for entry in gone {
             entry.abort.abort(ABORTED);
             locked(&self.inner.views).remove(&entry.pubkey);
@@ -719,7 +720,7 @@ impl CodexRuntime {
                 .get(&entry.spawn.host())
                 .cloned();
             if let Some(server) = server {
-                self.stop(server, entry);
+                stops.push((server, entry));
             }
         }
         let mut hosts: Vec<usize> = locked(&self.inner.entries)
@@ -741,6 +742,11 @@ impl CodexRuntime {
             servers.retain(|host, _| hosts.contains(host));
             idle
         };
+        // Idle servers are unregistered above, so a stop that sees its
+        // server missing can tell the server closed.
+        for (server, entry) in stops {
+            self.stop(server, entry);
+        }
         for server in idle {
             drop(server.rpc.close());
         }

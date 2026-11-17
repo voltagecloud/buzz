@@ -974,6 +974,7 @@ mod tests {
             historical: false,
             kind: "batch".into(),
             channel_ids: Vec::new(),
+            events: super::super::request::events(&plaintext),
         })
     }
 

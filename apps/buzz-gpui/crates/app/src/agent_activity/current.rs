@@ -721,6 +721,7 @@ mod tests {
             historical: false,
             kind: plaintext["kind"].as_str().unwrap_or("unknown").into(),
             channel_ids: vec!["c1".into()],
+            events: super::super::request::events(&plaintext),
         })
     }
 

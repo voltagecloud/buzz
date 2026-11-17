@@ -84,6 +84,39 @@ pub struct Record {
     pub kind: String,
     /// The channels the envelope and its batch children name.
     pub channel_ids: Vec<String>,
+    /// What request selection reads, parsed from `plaintext` on arrival
+    /// so views never parse it again.
+    pub events: Vec<request::Event>,
+}
+
+impl Record {
+    /// A record of `frame`, whose plaintext parsed as `raw`. Everything
+    /// views select by is read from `raw` here, once.
+    fn new(frame: Frame, raw: &Value, received_at: u64, historical: bool) -> Self {
+        let mut channel_ids: Vec<String> = Vec::new();
+        let mut values = vec![raw];
+        if raw.get("kind").and_then(Value::as_str) == Some("batch") {
+            values.extend(children(raw));
+        }
+        for value in values {
+            if let Some(channel) = text(value.get("channelId"))
+                && !channel_ids.iter().any(|c| c == channel)
+            {
+                channel_ids.push(channel.to_string());
+            }
+        }
+        Self {
+            id: frame.id,
+            agent: frame.agent,
+            created_at: frame.created_at,
+            plaintext: frame.plaintext.into(),
+            received_at,
+            historical,
+            kind: text(raw.get("kind")).unwrap_or("unknown").to_string(),
+            channel_ids,
+            events: request::events(raw),
+        }
+    }
 }
 
 /// Whether the live feed is receiving (`Snapshot.status`).
@@ -210,9 +243,12 @@ pub struct HistoryRead {
 
 /// A short non-empty string (`text` in activity.ts).
 pub(crate) fn text(value: Option<&Value>) -> Option<&str> {
-    value
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty() && s.chars().count() <= 256)
+    value.and_then(Value::as_str).filter(|s| short(s))
+}
+
+/// Non-empty and at most 256 characters.
+fn short(value: &str) -> bool {
+    !value.is_empty() && value.chars().count() <= 256
 }
 
 /// The envelope's children: a batch's events, or the envelope itself.
@@ -438,30 +474,8 @@ impl Activity {
             // A live copy replaces the saved one.
             self.records.remove(index);
         }
-        let mut channel_ids: Vec<String> = Vec::new();
-        let mut values = vec![raw];
-        if raw.get("kind").and_then(Value::as_str) == Some("batch") {
-            values.extend(children(raw));
-        }
-        for value in values {
-            if let Some(channel) = text(value.get("channelId"))
-                && !channel_ids.iter().any(|c| c == channel)
-            {
-                channel_ids.push(channel.to_string());
-            }
-        }
-        let kind = text(raw.get("kind")).unwrap_or("unknown").to_string();
         let size = frame.plaintext.len();
-        let record = Arc::new(Record {
-            id: frame.id,
-            agent: frame.agent,
-            created_at: frame.created_at,
-            plaintext: frame.plaintext.into(),
-            received_at,
-            historical,
-            kind,
-            channel_ids,
-        });
+        let record = Arc::new(Record::new(frame, raw, received_at, historical));
         let at = self
             .records
             .partition_point(|r| r.received_at <= record.received_at);
@@ -714,29 +728,12 @@ impl Activity {
 fn requested(records: &[Arc<Record>]) -> Vec<(String, String)> {
     let mut pairs: Vec<(String, String)> = Vec::new();
     for record in records.iter().filter(|r| !r.historical) {
-        if record.kind != "turn_started" && record.kind != "batch" {
-            continue;
-        }
-        let Ok(raw) = serde_json::from_str::<Value>(&record.plaintext) else {
-            continue;
-        };
-        let mut values = vec![&raw];
-        if record.kind == "batch" {
-            values.extend(children(&raw));
-        }
-        for value in values {
-            if value.get("kind").and_then(Value::as_str) != Some("turn_started") {
+        for event in &record.events {
+            if event.kind != "turn_started" || !short(&event.channel) {
                 continue;
             }
-            let Some(channel) = text(value.get("channelId")) else {
-                continue;
-            };
-            let ids = value
-                .get("payload")
-                .and_then(|p| p.get("triggeringEventIds"))
-                .and_then(Value::as_array);
-            for id in ids.into_iter().flatten().filter_map(Value::as_str) {
-                let pair = (channel.to_string(), id.to_string());
+            for id in &event.triggers {
+                let pair = (event.channel.clone(), id.clone());
                 if hex64(id) && !pairs.contains(&pair) {
                     pairs.push(pair);
                 }

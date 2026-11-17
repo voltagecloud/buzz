@@ -41,6 +41,7 @@ fn snapshot(events: Vec<Value>, state: TurnState, evidence: u64) -> Snapshot {
             historical: false,
             kind: "batch".into(),
             channel_ids: vec!["c1".into()],
+            events: crate::agent_activity::request::events(&plaintext),
         })]
         .into(),
         turns: vec![ActivityTurn {
