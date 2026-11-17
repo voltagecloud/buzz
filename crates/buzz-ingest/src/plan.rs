@@ -3,6 +3,7 @@
 use crate::{normalize::Occurrence, relay::Relay};
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
+use buzz_core::kind::KIND_INTEGRATION_RECORD;
 use nostr::{Event, EventBuilder, Kind, Tag, Timestamp};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -46,7 +47,7 @@ fn validate(relay: &Relay, channel: Uuid, plan: &Plan) -> Result<()> {
 }
 
 async fn read(relay: &Relay, channel: Uuid, coordinate: &str) -> Result<Option<Plan>> {
-    let records=relay.query(json!({"kinds":[buzz_core::kind::KIND_INTEGRATION_RECORD],"authors":[relay.keys.public_key().to_hex()],"#d":[coordinate],"#h":[channel.to_string()],"limit":2})).await?;
+    let records=relay.query(json!({"kinds":[KIND_INTEGRATION_RECORD],"authors":[relay.keys.public_key().to_hex()],"#d":[coordinate],"#h":[channel.to_string()],"limit":2})).await?;
     if records.len() > 1 {
         bail!("ambiguous integration record");
     }
@@ -55,7 +56,7 @@ async fn read(relay: &Relay, channel: Uuid, coordinate: &str) -> Result<Option<P
     };
     if record.verify().is_err()
         || record.pubkey != relay.keys.public_key()
-        || record.kind.as_u16() != 30623
+        || record.kind.as_u16() != KIND_INTEGRATION_RECORD as u16
         || value(record, "d") != Some(coordinate)
         || value(record, "h") != Some(channel.to_string().as_str())
         || record.content.len() > MAX_PLAN * 2
@@ -95,7 +96,7 @@ async fn save(relay: &Relay, channel: Uuid, coordinate: &str, plan: &Plan) -> Re
             })
             .cloned(),
     );
-    let event = EventBuilder::new(Kind::Custom(30623), body)
+    let event = EventBuilder::new(Kind::Custom(KIND_INTEGRATION_RECORD as u16), body)
         .tags(tags)
         .sign_with_keys(&relay.keys)?;
     relay.submit(&event).await
@@ -246,7 +247,7 @@ pub(crate) async fn linear_channel(
     config: &crate::config::Config,
 ) -> Result<Option<Uuid>> {
     let coordinate = format!("route:linear:issue:{issue}");
-    let records=relay.query(json!({"kinds":[30623],"authors":[relay.keys.public_key().to_hex()],"#d":[coordinate],"limit":2})).await?;
+    let records=relay.query(json!({"kinds":[KIND_INTEGRATION_RECORD],"authors":[relay.keys.public_key().to_hex()],"#d":[coordinate],"limit":2})).await?;
     if records.len() > 1 {
         bail!("ambiguous Linear issue route");
     }

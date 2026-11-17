@@ -2,7 +2,7 @@
 //! publishers (such as `buzz-ingest`) and consumers (the workflow engine).
 //!
 //! An integration event is an ordinary channel event (a kind:9 message, or a
-//! kind:30623 [`crate::kind::KIND_INTEGRATION_RECORD`]) that mirrors an
+//! kind:30624 [`crate::kind::KIND_INTEGRATION_RECORD`]) that mirrors an
 //! occurrence in an external system: a Linear issue comment, a GitHub check
 //! run, a Slack message. Its typed metadata lives in `ext-*` tags:
 //!
@@ -63,7 +63,7 @@ pub const TAG_REVIEW_STATE: &str = "ext-review-state";
 /// Provider channel id (Slack channel).
 pub const TAG_CHANNEL: &str = "ext-channel";
 
-/// On a kind:30623 record: the id of the kind:9 message that renders it.
+/// On a kind:30624 record: the id of the kind:9 message that renders it.
 ///
 /// Deliberately not an `e` tag. The record is written before its message
 /// (so a retry can never orphan a message), and an `e` tag would make the

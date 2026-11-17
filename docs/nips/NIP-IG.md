@@ -8,7 +8,14 @@ thread-counter rules. The relay contains no provider-specific webhook handlers.
 | --- | --- |
 | Kind 9 root | A stable external thread anchor with `h`, `ext-source`, and `ext-thread`. It has no `ext-action`. |
 | Kind 9 reply | One occurrence, with both NIP-10 root and reply references to the anchor, plus typed `ext-*` metadata. |
-| Kind 30623 | Parameterized replaceable write-ahead plan. `d` identifies the journal coordinate; `h` scopes access; `message` names the planned kind 9 event. |
+| Kind 30624 | Parameterized replaceable write-ahead plan. `d` identifies the journal coordinate; `h` scopes access; `message` names the planned kind 9 event. |
+
+Kind 30624 is a Buzz-specific addressable kind (`30000 <= n < 40000`). Before
+it was assigned, the upstream nostr NIPs kind table (`nostr-protocol/nips`
+`README.md` at `bec0fc89e75645e77a06d145598246efca844457`) assigned only
+`30617` and `30618` in `30610`–`30629`. The nostrbook.dev registry had no
+entry for `30624`. `crates/buzz-core/src/kind.rs` already used `30620`–`30622`,
+and the team agent status proposal uses `30623`.
 
 A record's content is standard-base64 JSON:
 

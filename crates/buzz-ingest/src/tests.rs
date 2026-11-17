@@ -87,7 +87,7 @@ async fn query(
     }
     let mut events = Vec::new();
     for event in store.events.values() {
-        if event.kind.as_u16() == 30623
+        if event.kind.as_u16() == buzz_core::kind::KIND_INTEGRATION_RECORD as u16
             && tag(event, "d").is_some_and(|d| store.heads.get(d) != Some(&event.id.to_hex()))
         {
             continue;

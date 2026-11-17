@@ -551,7 +551,7 @@ pub const KIND_TEAM_AGENT_STATUS: u32 = 30623;
 /// occurrence in the channel. The record content holds a bounded base64
 /// write-ahead plan; ordinary message searches select kind 9. Requires an `h` tag. See
 /// `docs/nips/NIP-IG.md`.
-pub const KIND_INTEGRATION_RECORD: u32 = 30623;
+pub const KIND_INTEGRATION_RECORD: u32 = 30624;
 
 /// Lower bound of the NIP-33 parameterized replaceable range (30000–39999).
 pub const PARAM_REPLACEABLE_KIND_MIN: u32 = 30000;
@@ -1012,7 +1012,7 @@ const _: () = assert!(is_parameterized_replaceable(KIND_WORKFLOW_DEF)); // 30620
 const _: () = assert!(is_parameterized_replaceable(KIND_EVENT_REMINDER)); // 30300 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_DM_VISIBILITY)); // 30622 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_PROJECT)); // 30621 ∈ 30000–39999
-const _: () = assert!(is_parameterized_replaceable(KIND_INTEGRATION_RECORD)); // 30623 ∈ 30000–39999
+const _: () = assert!(is_parameterized_replaceable(KIND_INTEGRATION_RECORD)); // 30624 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_THREAD_SUMMARY)); // 39005 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_WINDOW_BOUNDS)); // 39006 ∈ 30000–39999
 
