@@ -325,7 +325,7 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
     }
     qb.push("events WHERE community_id = ");
     qb.push_bind(*query.community.as_uuid());
-    qb.push(" AND deleted_at IS NULL AND search_tsv @@ ");
+    qb.push(" AND deleted_at IS NULL AND kind <> 30623 AND search_tsv @@ ");
     qb.push_bind(&tsquery);
     qb.push("::tsquery");
 

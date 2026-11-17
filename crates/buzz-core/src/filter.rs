@@ -106,6 +106,16 @@ pub fn notice_visible(visible: Option<&[String]>, event: &nostr::Event) -> bool 
 }
 
 fn filter_match_one(f: &Filter, ev: &StoredEvent) -> bool {
+    // Team status is opt-in structured state, never an ordinary message feed.
+    if crate::kind::event_kind_u32(&ev.event) == crate::kind::KIND_TEAM_AGENT_STATUS
+        && !f.kinds.as_ref().is_some_and(|ks| {
+            ks.iter()
+                .any(|k| k.as_u16() as u32 == crate::kind::KIND_TEAM_AGENT_STATUS)
+        })
+        && !f.ids.as_ref().is_some_and(|ids| ids.contains(&ev.event.id))
+    {
+        return false;
+    }
     // A membership notice's `#t` is its channel type, matched by the notice
     // rule above instead of the plain tag match below.
     let notice = is_membership_notice(&ev.event);

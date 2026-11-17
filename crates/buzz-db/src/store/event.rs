@@ -42,6 +42,8 @@ pub const ARTIFACT_KINDS: [i32; 2] = [
 /// Optional filters for [`query_events`].
 #[derive(Debug, Clone)]
 pub struct EventQuery {
+    /// Authenticated reader for explicit team-status queries; absent hides statuses.
+    pub team_status_reader: Option<Vec<u8>>,
     /// Server-resolved community scope.
     pub community_id: CommunityId,
     /// Restrict results to this channel.
@@ -165,6 +167,7 @@ impl EventQuery {
             channel_ids_include_global: true,
             max_limit: None,
             shared_gated_reader: None,
+            team_status_reader: None,
             notice_channel_types: None,
         }
     }
@@ -675,6 +678,7 @@ fn build_query_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
         qb.push(format!(" AND NOT ({table}.kind = 45010 AND NOT EXISTS (SELECT 1 FROM artifact_heads ah WHERE ah.community_id={table}.community_id AND ah.event_id={table}.id))"));
     }
     push_notice_visibility(&mut qb, col_prefix, q);
+    super::team_status::push_visibility(&mut qb, col_prefix, q);
 
     if let Some(ch) = q.channel_id {
         qb.push(format!(" AND {col_prefix}channel_id = "))
@@ -998,7 +1002,12 @@ fn push_exact_tag_match(
         .push_bind(name.to_owned())
         .push(" AND tag->>1 = ANY(")
         .push_bind(values.to_vec())
-        .push(")))");
+        .push(")");
+    if name == "p" {
+        // Match the core filter and mention index: workflow ownership is not a mention.
+        qb.push(format!(" AND NOT (coalesce(tag->>3 = 'owner', false) AND {col_prefix}tags @> '[[\"buzz:workflow\",\"true\"]]'::jsonb)"));
+    }
+    qb.push("))");
 }
 
 /// Whether `q` carries a [`EventQuery::tag_values`] match. Such a query runs
@@ -1237,6 +1246,7 @@ fn count_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
         qb.push(format!(" AND NOT ({table}.kind = 45010 AND NOT EXISTS (SELECT 1 FROM artifact_heads ah WHERE ah.community_id={table}.community_id AND ah.event_id={table}.id))"));
     }
     push_notice_visibility(&mut qb, col_prefix, q);
+    super::team_status::push_visibility(&mut qb, col_prefix, q);
 
     if let Some(ch) = q.channel_id {
         qb.push(format!(" AND {col_prefix}channel_id = "))
@@ -1762,7 +1772,7 @@ pub(crate) async fn get_event_by_id_with_operation(
     let mut connection = crate::observability::acquire_writer(pool, operation).await?;
     let row = sqlx::query(
         "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id \
-         FROM events WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1",
+         FROM events WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL AND kind <> 30623 ORDER BY created_at DESC LIMIT 1",
     )
     .bind(community_id.as_uuid())
     .bind(id_bytes)
@@ -1901,7 +1911,7 @@ pub(crate) async fn get_events_by_ids_on(
          FROM events WHERE community_id = ",
     );
     qb.push_bind(community_id.as_uuid());
-    qb.push(" AND deleted_at IS NULL AND id IN (");
+    qb.push(" AND deleted_at IS NULL AND kind <> 30623 AND id IN (");
     let mut sep = qb.separated(", ");
     for id in ids {
         sep.push_bind(id.to_vec());
@@ -2445,6 +2455,9 @@ impl Db {
         path: &'static str,
         q: &EventQuery,
     ) -> Result<Vec<StoredEvent>> {
+        if super::team_status::requires_writer(q) {
+            return self.query_events(q).await;
+        }
         if let Some(answer) = crate::event::answer_without_db(q) {
             return answer;
         }
@@ -2510,6 +2523,9 @@ impl Db {
         path: &'static str,
         q: &EventQuery,
     ) -> Result<Vec<StoredEvent>> {
+        if super::team_status::requires_writer(q) {
+            return self.query_events(q).await;
+        }
         if let Some(answer) = crate::event::answer_without_db(q) {
             return answer;
         }
@@ -2579,6 +2595,9 @@ impl Db {
     /// the error to the accepted budget `B`.
     #[datastore_span(name = "count_events_routed", system = "postgresql")]
     pub async fn count_events_routed(&self, path: &'static str, q: &EventQuery) -> Result<i64> {
+        if super::team_status::requires_writer(q) {
+            return self.count_events(q).await;
+        }
         match self
             .route_read(
                 path,

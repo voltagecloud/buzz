@@ -487,6 +487,7 @@ pub(crate) async fn handle_req_consistent(
                 };
                 let mut params =
                     filter_to_query_params(filter, per_filter_channel, conn.tenant.community());
+                params.team_status_reader = Some(pubkey_bytes.clone());
                 params.before_id = before_ids.get(idx).cloned().flatten();
                 apply_channel_scope_to_query(
                     &mut params,
@@ -1114,12 +1115,14 @@ async fn handle_search_req(
 /// Resolves accessible channels for the given pubkey and builds the query.
 pub async fn build_event_query_from_filter(
     filter: &Filter,
-    _pubkey_bytes: &[u8],
+    pubkey_bytes: &[u8],
     _state: &AppState,
     community: buzz_core::tenant::CommunityId,
 ) -> EventQuery {
     let channel_id = extract_channel_id_from_filter(filter);
-    filter_to_query_params(filter, channel_id, community)
+    let mut query = filter_to_query_params(filter, channel_id, community);
+    query.team_status_reader = Some(pubkey_bytes.to_vec());
+    query
 }
 
 /// Maximum SQL candidate rows a non-pushable COUNT filter may inspect before
@@ -1309,13 +1312,23 @@ fn filter_to_query_params(
     // queries where >500 events for other recipients would otherwise push
     // the caller's events past the LIMIT before post-filtering.
     let p_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
-    let p_tag_hex = filter.generic_tags.get(&p_tag).and_then(|values| {
-        if values.len() == 1 {
-            values.iter().next().map(|v| v.to_string())
-        } else {
-            None
-        }
-    });
+    let status_kind = buzz_core::kind::KIND_TEAM_AGENT_STATUS as i32;
+    let status_filter = kinds.as_ref().is_some_and(|ks| ks.contains(&status_kind))
+        || (ids.is_some()
+            && kinds
+                .as_ref()
+                .is_none_or(|ks| ks.is_empty() || ks.contains(&status_kind)));
+    let p_tag_hex = filter
+        .generic_tags
+        .get(&p_tag)
+        .filter(|_| !status_filter)
+        .and_then(|values| {
+            if values.len() == 1 {
+                values.iter().next().map(|v| v.to_string())
+            } else {
+                None
+            }
+        });
 
     // Push single-value #d tag into SQL via the d_tag column (NIP-33).
     // Critical for parameterized replaceable lookups (authors + kinds + #d)
@@ -1361,7 +1374,12 @@ fn filter_to_query_params(
         .filter(|values| !values.is_empty())
         .map(|values| values.iter().map(|v| v.to_string()).collect());
 
-    let tag_values = group_state_tag_values(filter);
+    let mut tag_values = group_state_tag_values(filter);
+    if status_filter {
+        if let Some(values) = filter.generic_tags.get(&p_tag) {
+            tag_values.push(("p".into(), values.iter().cloned().collect()));
+        }
+    }
     // NIP-CL: a membership notice's `#t` is its channel type. SQL keeps only
     // the types this filter may see; a filter without `#t` sees legacy types.
     let notice_channel_types = buzz_core::filter::notice_channel_types(filter);
