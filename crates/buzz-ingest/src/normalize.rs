@@ -120,7 +120,12 @@ pub(crate) fn github(
             bail!("check run has more than four pull requests");
         }
         for pr in prs.into_iter().flatten() {
-            if let Some(number) = pr["number"].as_u64() {
+            // Targets publish concurrently, so each thread appears once.
+            if let Some(number) = pr["number"].as_u64().filter(|number| {
+                !targets
+                    .iter()
+                    .any(|(thread, _, _)| *thread == format!("pr:{number}"))
+            }) {
                 targets.push((
                     format!("pr:{number}"),
                     format!("{repo}#{number}"),

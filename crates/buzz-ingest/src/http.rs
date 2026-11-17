@@ -199,7 +199,6 @@ async fn process(app: &App, source: usize, secret: &str, request: Request) -> Re
             )?;
         }
     }
-    charge(app, source).await?;
     let payload: Value =
         serde_json::from_slice(&body).map_err(|_| (StatusCode::BAD_REQUEST, "invalid JSON"))?;
     if source == 1 {
@@ -212,6 +211,9 @@ async fn process(app: &App, source: usize, secret: &str, request: Request) -> Re
             return Err((StatusCode::UNAUTHORIZED, "stale webhook"));
         }
     }
+    // Charge only fresh authenticated deliveries, so neither unsigned requests
+    // nor replays of a captured stale Linear body use up a provider's budget.
+    charge(app, source).await?;
     if source == 2 {
         if payload.get("type").and_then(Value::as_str) == Some("url_verification") {
             let challenge = payload
@@ -292,15 +294,20 @@ async fn process(app: &App, source: usize, secret: &str, request: Request) -> Re
         .acquire()
         .await
         .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "ingestion closing; retry"))?;
-    for item in &items {
-        plan::publish(&app.relay, item, &body_hash)
-            .await
-            .map_err(|_| {
-                (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "relay write incomplete; retry delivery",
-                )
-            })?;
-    }
+    // Each occurrence of one delivery is a distinct thread with its own
+    // journal coordinates, so they publish concurrently. A retry then replays
+    // finished targets alongside the remaining ones, not ahead of them.
+    futures_util::future::try_join_all(
+        items
+            .iter()
+            .map(|item| plan::publish(&app.relay, item, &body_hash)),
+    )
+    .await
+    .map_err(|_| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "relay write incomplete; retry delivery",
+        )
+    })?;
     Ok(json!({"accepted":true,"occurrences":items.len(),"ignored":items.is_empty()}))
 }

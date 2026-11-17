@@ -77,11 +77,13 @@ replay the stored plan. No background retry silently acknowledges failed work.
 
 Bodies are limited to 1 MiB and must arrive within one second. Up to 32
 requests can be admitted at once; excess requests receive 429. Each provider
-accepts 20 authenticated deliveries per second, so unsigned requests cannot use up
-a provider's budget. One delivery publishes at a time, and admitted requests wait
-within the four-second deadline. Unsigned requests still occupy an admission slot
-while their body is read, so the ingress must enforce per-client request limits. A
-retried delivery skips its completed occurrences after two relay reads each. Message bodies retain
+accepts 20 fresh authenticated deliveries per second, so unsigned or stale
+requests cannot use up a provider's budget. One delivery publishes at a time, and
+admitted requests wait within the four-second deadline. Its occurrences, such as
+the pull requests of one check run, publish concurrently, and a retry finishes each
+completed occurrence after two relay reads. Unsigned requests still occupy an
+admission slot while their body is read, so the ingress must enforce per-client
+request limits. Message bodies retain
 at most 6000 UTF-8 bytes. Payloads exceeding 16 labels are refused, so workflow metadata is never silently
 truncated. Other metadata has separate bounds.
 

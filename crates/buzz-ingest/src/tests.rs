@@ -34,6 +34,7 @@ struct Store {
     lose_root_response: bool,
     submissions: Vec<Event>,
     queries: usize,
+    delay_ms: u64,
 }
 type Shared = Arc<Mutex<Store>>;
 fn tag<'a>(event: &'a Event, name: &str) -> Option<&'a str> {
@@ -69,6 +70,8 @@ async fn query(
     body: Bytes,
 ) -> (StatusCode, Json<Value>) {
     auth(&headers, &body);
+    let delay = store.lock().unwrap().delay_ms;
+    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
     let filters: Value = serde_json::from_slice(&body).unwrap();
     let filter = &filters[0];
     assert_eq!(filter["consistency"], "strong");
@@ -127,6 +130,8 @@ async fn submit(
     body: Bytes,
 ) -> (StatusCode, Json<Value>) {
     auth(&headers, &body);
+    let delay = store.lock().unwrap().delay_ms;
+    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
     let event: Event = serde_json::from_slice(&body).unwrap();
     event.verify().unwrap();
     let mut store = store.lock().unwrap();
@@ -625,6 +630,71 @@ async fn github_retries_preserve_plans_and_do_not_duplicate_threads_or_effects()
             .count(),
         4
     );
+    // A completed delivery ID reused for a different payload is refused, not
+    // acknowledged as the earlier occurrence.
+    let prior = messages(&store).len();
+    let mut conflicting = fan_out.clone();
+    conflicting["check_run"]["output"]["summary"] = json!("A different result");
+    assert_eq!(
+        request(
+            &restarted,
+            "github",
+            &conflicting,
+            "check-fan-out",
+            false,
+            0,
+            "check_run"
+        )
+        .await
+        .0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(messages(&store).len(), prior);
+    // With 150 ms per relay request, publishing four targets one after another
+    // overruns the four-second deadline on every retry. Concurrent targets
+    // finish within it.
+    store.lock().unwrap().delay_ms = 150;
+    let mut slow = fan_out.clone();
+    slow["check_run"]["id"] = json!(90);
+    assert_eq!(
+        request(
+            &restarted,
+            "github",
+            &slow,
+            "check-slow-relay",
+            false,
+            0,
+            "check_run"
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    store.lock().unwrap().delay_ms = 0;
+    assert_eq!(
+        messages(&store)
+            .iter()
+            .filter(|event| tag(event, "ext-id") == Some("90"))
+            .count(),
+        4
+    );
+    // Targets publish concurrently, so a pull request listed twice is one
+    // occurrence rather than two writers racing on one thread.
+    let mut repeated = fan_out.clone();
+    repeated["check_run"]["id"] = json!(91);
+    repeated["check_run"]["pull_requests"] = json!([{"number":7},{"number":7}]);
+    let (status, body) = request(
+        &restarted,
+        "github",
+        &repeated,
+        "check-repeated-pr",
+        false,
+        0,
+        "check_run",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["occurrences"], 1);
     let mut too_many = payload.clone();
     too_many["pull_request"]["labels"] = json!((0..17)
         .map(|i| json!({"name":format!("label-{i}")}))
@@ -810,6 +880,41 @@ async fn authenticated_ci_bursts_preserve_every_delivery() {
             StatusCode::UNAUTHORIZED
         );
     }
+    // Replays of a captured, signed but stale Linear body are refused without
+    // using up the Linear budget.
+    let now_ms = nostr::Timestamp::now().as_secs() * 1000;
+    let mut linear_issue = json!({"type":"Issue","action":"create","webhookTimestamp":now_ms - 600_000,"url":"https://linear.app/issue/ENG-1","data":{"id":"budget-issue","identifier":"ENG-1","teamId":"TEAM","title":"Budget"}});
+    for _ in 0..25 {
+        assert_eq!(
+            request(
+                &router,
+                "linear",
+                &linear_issue,
+                "stale-replay",
+                false,
+                0,
+                ""
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    linear_issue["webhookTimestamp"] = json!(now_ms);
+    assert_eq!(
+        request(
+            &router,
+            "linear",
+            &linear_issue,
+            "fresh-issue",
+            false,
+            0,
+            ""
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
     // A stalled unsigned upload releases its admission slot after one second.
     let stalled = axum::http::Request::builder()
         .method("POST")
@@ -846,7 +951,13 @@ async fn authenticated_ci_bursts_preserve_every_delivery() {
     while let Some(outcome) = tasks.join_next().await {
         assert_eq!(outcome.unwrap(), StatusCode::OK);
     }
-    assert_eq!(messages(&store).len(), 10);
+    assert_eq!(
+        messages(&store)
+            .iter()
+            .filter(|event| tag(event, "ext-source") == Some("github"))
+            .count(),
+        10
+    );
     server.abort();
 }
 
