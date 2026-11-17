@@ -38,13 +38,18 @@ fn check_labels(value: &Value) -> Result<()> {
     }
     Ok(())
 }
+/// Consumers join repeated label tags with commas, so a comma inside one
+/// name would read as a separate label, such as `agent`.
+fn label(name: &str) -> String {
+    short(name, 256).replace(',', " ")
+}
 fn labels(v: &Value) -> Vec<(String, String)> {
     v.as_array()
         .into_iter()
         .flatten()
         .take(16)
         .filter_map(|label| label.get("name").and_then(Value::as_str))
-        .map(|name| ("labels".into(), short(name, 256)))
+        .map(|name| ("labels".into(), label(name)))
         .collect()
 }
 fn base(
@@ -207,7 +212,7 @@ pub(crate) fn github(
         if inferred == "pull_request" && action == "labeled" {
             let name = text(payload, "/label/name");
             if !name.is_empty() {
-                item.fields.push(("added-labels".into(), short(name, 256)));
+                item.fields.push(("added-labels".into(), label(name)));
             }
         }
         for (field, pointer) in [("state", "/state"), ("conclusion", "/conclusion")] {
@@ -317,7 +322,7 @@ pub(crate) fn linear(
                     .filter(|name| !name.is_empty())
                     .or_else(|| config.linear_labels.get(id).map(String::as_str))
                     .unwrap_or(id);
-                (id.to_owned(), short(name, 256))
+                (id.to_owned(), label(name))
             })
             .collect()
     } else {
@@ -326,12 +331,7 @@ pub(crate) fn linear(
             .into_iter()
             .flatten()
             .take(16)
-            .map(|label| {
-                (
-                    text(label, "/id").to_owned(),
-                    short(text(label, "/name"), 256),
-                )
-            })
+            .map(|entry| (text(entry, "/id").to_owned(), label(text(entry, "/name"))))
             .collect()
     };
     let mut fields: Vec<_> = label_entries

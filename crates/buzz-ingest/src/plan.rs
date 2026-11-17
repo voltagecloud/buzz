@@ -209,7 +209,16 @@ pub(crate) async fn publish(relay: &Relay, item: &Occurrence, body_hash: &str) -
             return Ok(());
         }
     }
-    let route = (item.source == "linear").then(|| format!("route:linear:{}", item.thread));
+    let b = read(relay, item.channel, &fingerprint).await?;
+    for plan in a.iter().chain(b.iter()) {
+        if plan.payload_sha256.as_deref() != Some(body_hash) {
+            bail!("delivery identity conflicts with saved payload");
+        }
+    }
+    // This payload reconciled the issue route before its fingerprint plan was
+    // saved. A replay under a new delivery ID must not undo a later redirect.
+    let route =
+        (item.source == "linear" && b.is_none()).then(|| format!("route:linear:{}", item.thread));
     let mut root = match read(relay, item.channel, &root_coord).await? {
         Some(plan) => plan,
         None => Plan {
@@ -246,12 +255,6 @@ pub(crate) async fn publish(relay: &Relay, item: &Occurrence, body_hash: &str) -
             != Some(root.event.id)
         {
             save(relay, item.channel, route, &root).await?;
-        }
-    }
-    let b = read(relay, item.channel, &fingerprint).await?;
-    for plan in a.iter().chain(b.iter()) {
-        if plan.payload_sha256.as_deref() != Some(body_hash) {
-            bail!("delivery identity conflicts with saved payload");
         }
     }
     let mut plan = match (a, b) {

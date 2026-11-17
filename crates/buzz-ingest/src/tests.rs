@@ -841,6 +841,29 @@ async fn linear_and_slack_only_publish_authenticated_mapped_public_work() {
     assert!(messages(&store)
         .iter()
         .any(|event| tag(event, "h") == Some("0b6c1f0e-2a7d-4c1e-9f3a-5d2b8e4c7a11")));
+    // Consumers join repeated label tags with commas. A label name that
+    // contains a comma must not read as a separate `agent` label.
+    let mut comma = labeled.clone();
+    comma["data"]["labelIds"] = json!(["LABEL-CSV"]);
+    comma["data"]["labels"] = json!([{"id":"LABEL-CSV","name":"triage,agent"}]);
+    assert_eq!(
+        request(&router, "linear", &comma, "linear-comma", false, 0, "")
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let added = messages(&store)
+        .iter()
+        .map(|event| buzz_core::integration::ext_fields(&event.tags))
+        .find_map(|fields| {
+            fields
+                .get("added_labels")
+                .filter(|labels| labels.contains("triage"))
+                .cloned()
+        })
+        .unwrap();
+    assert_eq!(added, "triage agent");
+    assert!(!format!(",{added},").contains(",agent,"));
     server.abort();
 }
 
@@ -851,6 +874,17 @@ fn endpoints_and_provider_mappings_fail_closed() {
     cfg.relay_url = "http://public.example".into();
     assert!(cfg.validate().is_err());
     cfg.relay_url = "https://buzz.voltage.cloud".into();
+    // An absent Linear team, project, or webhook ID must not match a mapping.
+    for field in 0..3 {
+        let mut empty_key = cfg.clone();
+        match field {
+            0 => &mut empty_key.linear_teams,
+            1 => &mut empty_key.linear_projects,
+            _ => &mut empty_key.linear_webhooks,
+        }
+        .insert(String::new(), CHANNEL.parse().unwrap());
+        assert!(empty_key.validate().is_err());
+    }
     cfg.slack_channels
         .insert("T123/GPRIVATE".into(), CHANNEL.parse().unwrap());
     assert!(cfg.validate().is_err());
@@ -1066,6 +1100,79 @@ async fn linear_current_mapping_overrides_saved_issue_route() {
     );
     assert_eq!(
         channel_of("Follows the hook").as_deref(),
+        Some("0b6c1f0e-2a7d-4c1e-9f3a-5d2b8e4c7a11")
+    );
+    // A replay of the published team update under a new delivery ID adds no
+    // message and must not move the route back from the later redirect.
+    let published = messages(&store).len();
+    assert_eq!(
+        request(&router, "linear", &returned, "route-replay", false, 0, "")
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(messages(&store).len(), published);
+    assert_eq!(
+        request(
+            &router,
+            "linear",
+            &unmapped("unmapped-3", "Still follows the hook"),
+            "route-unmapped-3",
+            false,
+            0,
+            ""
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        channel_of("Still follows the hook").as_deref(),
+        Some("0b6c1f0e-2a7d-4c1e-9f3a-5d2b8e4c7a11")
+    );
+    // The issue returns to its team. An unmapped comment that arrives while a
+    // redirect holds the plan writer must follow that redirect, not the team
+    // route it replaces.
+    let mut team_again = returned.clone();
+    team_again["data"]["title"] = json!("Team again");
+    assert_eq!(
+        request(&router, "linear", &team_again, "route-team", false, 0, "")
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let mut redirect = comment.clone();
+    redirect["data"]["id"] = json!("overlap-redirect");
+    redirect["data"]["body"] = json!("Overlapping redirect");
+    let overlapping = unmapped("overlap-comment", "Follows the overlapping redirect");
+    let queries = {
+        let mut store = store.lock().unwrap();
+        store.delay_ms = 80;
+        store.queries
+    };
+    let send = |payload: Value, id: &'static str| {
+        let router = router.clone();
+        tokio::spawn(async move {
+            request(&router, "linear", &payload, id, false, 0, "")
+                .await
+                .0
+        })
+    };
+    let redirecting = send(redirect, "route-overlap-hook");
+    // The redirect reads the relay only after it holds the plan writer.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while store.lock().unwrap().queries == queries {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let following = send(overlapping, "route-overlap-comment");
+    assert_eq!(redirecting.await.unwrap(), StatusCode::OK);
+    assert_eq!(following.await.unwrap(), StatusCode::OK);
+    store.lock().unwrap().delay_ms = 0;
+    assert_eq!(
+        channel_of("Follows the overlapping redirect").as_deref(),
         Some("0b6c1f0e-2a7d-4c1e-9f3a-5d2b8e4c7a11")
     );
     server.abort();

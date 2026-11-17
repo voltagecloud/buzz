@@ -20,12 +20,14 @@ container=$(docker run -d --read-only --cap-drop ALL --security-opt no-new-privi
   -e BUZZ_INGEST_PRIVATE_KEY=1111111111111111111111111111111111111111111111111111111111111111 \
   -e BUZZ_INGEST_GITHUB_SECRET=synthetic-image-test "$image")
 address=$(docker port "$container" 5010/tcp)
+# Bound every request, so a stalled connection cannot hold the job.
+probe() { curl --connect-timeout 2 --max-time 10 "$@"; }
 for attempt in {1..40}; do
-  if curl -fsS "http://$address/health" >/dev/null; then break; fi
+  if probe -fsS "http://$address/health" >/dev/null; then break; fi
   sleep 0.2
 done
-[[ $(curl -s -o /dev/null -w '%{http_code}' "http://$address/health") = 200 ]]
-[[ $(curl -s -o /dev/null -w '%{http_code}' "http://$address/ready") = 503 ]]
-[[ $(curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' \
+[[ $(probe -s -o /dev/null -w '%{http_code}' "http://$address/health") = 200 ]]
+[[ $(probe -s -o /dev/null -w '%{http_code}' "http://$address/ready") = 503 ]]
+[[ $(probe -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' \
   -d '{}' "http://$address/ingest/github") = 401 ]]
 echo 'buzz-ingest image: hardened startup, health, readiness and signature refusal passed'

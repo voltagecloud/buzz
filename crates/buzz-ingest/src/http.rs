@@ -230,6 +230,15 @@ async fn process(app: &App, source: usize, secret: &str, request: Request) -> Re
         1 => header(&parts.headers, "linear-delivery")?,
         _ => slack_delivery.ok_or((StatusCode::BAD_REQUEST, "missing Slack event_id"))?,
     })?;
+    // Authenticate before waiting for the single plan writer, then hold it
+    // from the saved-route read through publication. An overlapping delivery
+    // can otherwise redirect the issue after an unmapped comment has read its
+    // old route. The outer deadline bounds this wait and the publication.
+    let _pipeline = app
+        .pipeline
+        .acquire()
+        .await
+        .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "ingestion closing; retry"))?;
     let items = match source {
         0 => normalize::github(
             &app.config,
@@ -287,13 +296,6 @@ async fn process(app: &App, source: usize, secret: &str, request: Request) -> Re
     let identity = serde_json::to_vec(&identity_payload)
         .map_err(|_| (StatusCode::BAD_REQUEST, "invalid payload identity"))?;
     let body_hash = hex::encode(Sha256::digest(identity));
-    // Authenticate and normalize before waiting for the single plan writer.
-    // The outer deadline bounds both this wait and the complete publication.
-    let _pipeline = app
-        .pipeline
-        .acquire()
-        .await
-        .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "ingestion closing; retry"))?;
     // Each occurrence of one delivery is a distinct thread with its own
     // journal coordinates, so they publish concurrently. A retry then replays
     // finished targets alongside the remaining ones, not ahead of them.

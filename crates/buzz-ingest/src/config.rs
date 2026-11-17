@@ -36,6 +36,18 @@ impl Config {
         if count == 0 || count > 256 {
             bail!("configure between 1 and 256 provider mappings");
         }
+        // A payload without a team, project, or webhook ID reads as "", so an
+        // empty key would route unmapped activity to that channel.
+        if [
+            &self.linear_teams,
+            &self.linear_projects,
+            &self.linear_webhooks,
+        ]
+        .iter()
+        .any(|mappings| mappings.keys().any(String::is_empty))
+        {
+            bail!("Linear mapping keys must not be empty");
+        }
         if self.linear_labels.len() > 256
             || self.linear_labels.iter().any(|(id, name)| {
                 id.is_empty() || id.len() > 256 || name.is_empty() || name.len() > 256

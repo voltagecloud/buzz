@@ -57,6 +57,8 @@ Occurrences include `ext-source`, `ext-action`, `ext-id`, `ext-url`, `ext-actor`
 
 Repeated `ext-labels` / `ext-added-labels` tags describe individual labels.
 Consumers fold dashes to underscores and join repeated fields with commas.
+Publishers replace each comma in a label name with a space, so a joined label
+field always splits back into the original labels.
 These fields are publisher-controlled data, not relay attestations.
 
 `integration_event` workflows require an explicit, nonempty `authors` allowlist
