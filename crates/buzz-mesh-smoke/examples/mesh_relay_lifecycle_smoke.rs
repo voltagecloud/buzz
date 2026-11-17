@@ -61,7 +61,10 @@ use std::time::{Duration, Instant};
 use buzz_test_client::BuzzTestClient;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use mesh_llm_host_runtime::crypto::{load_keystore, save_keystore, OwnerKeypair};
-use mesh_llm_sdk::{client, serve, MeshDiscoveryMode, TrustPolicy};
+use mesh_llm_host_runtime::sdk::{
+    start_embedded_node, EmbeddedMeshDiscoveryMode as MeshDiscoveryMode, EmbeddedMeshNodeConfig,
+    EmbeddedTrustPolicy as TrustPolicy,
+};
 use nostr::{Alphabet, Event, EventBuilder, Filter, Keys, Kind, SingleLetterTag, Tag};
 use sha2::{Digest, Sha256};
 
@@ -434,11 +437,12 @@ async fn role_serve() -> anyhow::Result<()> {
     }
     let allowlist: Vec<String> = expected_owners.iter().cloned().collect();
     println!("ALLOWLIST:{}", allowlist.join(","));
-    // The upcoming serve::start() blocks through a possibly multi-minute model
+    // The upcoming start_embedded_node() blocks through a possibly multi-minute model
     // download; an idle relay socket gets closed under it. Reconnect after.
     let _ = relay.disconnect().await;
 
-    let cfg = serve::EmbeddedServeConfig::builder()
+    let cfg = EmbeddedMeshNodeConfig::builder()
+        .serve()
         .model(&model)
         .api_port(SERVE_API_PORT)
         .console_port(SERVE_CONSOLE_PORT)
@@ -454,7 +458,7 @@ async fn role_serve() -> anyhow::Result<()> {
         .trust_policy(TrustPolicy::Allowlist)
         .trust_owners(allowlist)
         .build();
-    let node = serve::start(cfg).await?;
+    let node = start_embedded_node(cfg).await?;
     let endpoint = node
         .invite_token()
         .map(str::to_string)
@@ -530,7 +534,8 @@ async fn role_client() -> anyhow::Result<()> {
     };
     println!("TARGET_FOUND");
 
-    let cfg = client::EmbeddedClientConfig::builder()
+    let cfg = EmbeddedMeshNodeConfig::builder()
+        .client()
         .api_port(CLIENT_API_PORT)
         .console_port(CLIENT_CONSOLE_PORT)
         .publish(false)
@@ -543,7 +548,7 @@ async fn role_client() -> anyhow::Result<()> {
         .trust_policy(TrustPolicy::Allowlist)
         .trust_owners(allowlist)
         .build();
-    let node = client::start(cfg).await?;
+    let node = start_embedded_node(cfg).await?;
     // The relay-discovered endpoint is the dial target — the same
     // `dial_endpoint_addr` step the desktop's join watcher performs. The
     // desktop's watcher retries every 15s (a first QUIC dial can time out
@@ -641,7 +646,8 @@ async fn role_stranger() -> anyhow::Result<()> {
     // so the decisive probe is routed inference, cross-checked against the
     // trusted client's post-attack inference by the orchestrator.
     init_native_runtime().await?;
-    let cfg = client::EmbeddedClientConfig::builder()
+    let cfg = EmbeddedMeshNodeConfig::builder()
+        .client()
         .api_port(STRANGER_API_PORT)
         .console_port(STRANGER_CONSOLE_PORT)
         .publish(false)
@@ -652,7 +658,7 @@ async fn role_stranger() -> anyhow::Result<()> {
         .owner_key(env("MESH_OWNER_KEY")?)
         .owner_required(true)
         .build();
-    let node = client::start(cfg).await?;
+    let node = start_embedded_node(cfg).await?;
     let _ = node.join_token(&leaked_endpoint).await;
 
     let http = reqwest::Client::new();

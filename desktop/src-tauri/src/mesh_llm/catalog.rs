@@ -7,7 +7,8 @@
 
 use serde::Serialize;
 
-use mesh_llm_client::models::catalog::{parse_size_gb, MODEL_CATALOG};
+use mesh_llm_client::models::catalog::MODEL_CATALOG;
+use mesh_llm_host_runtime::models::catalog::parse_size_gb;
 use mesh_llm_node::models::{default_huggingface_cache_dir, scan_installed_models};
 use mesh_llm_system::hardware;
 use mesh_llm_system::vram::{format_rated_capacity, rated_capacity_gb};

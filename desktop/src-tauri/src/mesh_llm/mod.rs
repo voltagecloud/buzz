@@ -38,7 +38,10 @@ use transport_policy::{iroh_relay_mode, sdk_iroh_relay_config, validate_advertis
 #[cfg(test)]
 use transport_policy::{iroh_relay_mode_from, IrohRelayMode};
 
-use mesh_llm_sdk::{client, serve, EmbeddedNodeHandle, MeshDiscoveryMode, TrustPolicy};
+use mesh_llm_host_runtime::sdk::{
+    start_embedded_node, EmbeddedMeshDiscoveryMode as MeshDiscoveryMode, EmbeddedMeshNodeConfig,
+    EmbeddedMeshNodeHandle as EmbeddedNodeHandle, EmbeddedTrustPolicy as TrustPolicy,
+};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -267,7 +270,7 @@ enum DesktopMeshHandle {
         task: tokio::task::JoinHandle<anyhow::Result<EmbeddedNodeHandle>>,
         queued_join_tokens: Vec<String>,
     },
-    Ready(EmbeddedNodeHandle),
+    Ready(Box<EmbeddedNodeHandle>),
     Failed(String),
 }
 
@@ -312,7 +315,7 @@ pub const MESH_WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
 
 /// Pre-download the model (with byte progress through the output sink)
 /// before the node starts. Without this the download happens *inside*
-/// `serve::start()` where the UI can only show a frozen "starting…" state.
+/// `start_embedded_node()` where the UI can only show a frozen "starting…" state.
 /// Already-installed models return immediately from the cache scan.
 async fn model_is_installed(model: &str) -> bool {
     let model_owned = model.replace("@main", "");
@@ -347,7 +350,7 @@ impl DesktopMeshRuntime {
         let model_name = model_id.clone();
         // Serve mode downloads weights before the node starts so byte
         // progress reaches the UI through the output sink; inside
-        // serve::start() the download is invisible.
+        // start_embedded_node() the download is invisible.
         if request.mode == MeshNodeMode::Serve {
             if let Some(model) = model_id.as_deref() {
                 ensure_model_downloaded(model).await?;
@@ -360,7 +363,8 @@ impl DesktopMeshRuntime {
                 let model = model_id
                     .clone()
                     .ok_or_else(|| anyhow::anyhow!("modelId is required for serve mode"))?;
-                let mut builder = serve::EmbeddedServeConfig::builder()
+                let mut builder = EmbeddedMeshNodeConfig::builder()
+                    .serve()
                     .model(model)
                     .api_port(api_port)
                     .console_port(console_port)
@@ -398,10 +402,11 @@ impl DesktopMeshRuntime {
                         .trust_policy(TrustPolicy::Allowlist)
                         .trust_owners(owners);
                 }
-                DesktopMeshHandle::Ready(serve::start(builder.build()).await?)
+                DesktopMeshHandle::Ready(Box::new(start_embedded_node(builder.build()).await?))
             }
             MeshNodeMode::Client => {
-                let mut builder = client::EmbeddedClientConfig::builder()
+                let mut builder = EmbeddedMeshNodeConfig::builder()
+                    .client()
                     .api_port(api_port)
                     .console_port(console_port)
                     // Same no-leak invariants as serve mode above.
@@ -432,7 +437,7 @@ impl DesktopMeshRuntime {
                 }
                 let config = builder.build();
                 DesktopMeshHandle::Starting {
-                    task: tokio::spawn(async move { client::start(config).await }),
+                    task: tokio::spawn(async move { start_embedded_node(config).await }),
                     queued_join_tokens: Vec::new(),
                 }
             }
@@ -502,7 +507,7 @@ impl DesktopMeshRuntime {
                         );
                     }
                 }
-                DesktopMeshHandle::Ready(ready)
+                DesktopMeshHandle::Ready(Box::new(ready))
             }
             Ok(Err(error)) => {
                 DesktopMeshHandle::Failed(format!("embedded mesh client startup failed: {error:#}"))
@@ -659,7 +664,7 @@ impl DesktopMeshRuntime {
 
     fn status_from_sdk(
         &self,
-        status: mesh_llm_sdk::EmbeddedNodeStatus,
+        status: mesh_llm_host_runtime::sdk::EmbeddedMeshNodeStatus,
     ) -> anyhow::Result<MeshNodeStatus> {
         let health = health_from_payload(&status.payload);
         let state = node_state_from_payload(self.mode, &health, &status.payload);
