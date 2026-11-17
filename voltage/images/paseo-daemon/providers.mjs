@@ -17,7 +17,7 @@ function provider({ label, agent: pubkey, channel }, owner) {
     extends: "acp",
     label,
     command: ["buzz", "acp-bridge", "--agent", pubkey, ...(channel === undefined ? [] : ["--channel", channel]), "--owner", owner],
-    env: { PASEO_PASSWORD: "", CLAUDE_CODE_OAUTH_TOKEN: "", CODEX_ACCESS_TOKEN: "", GITHUB_READ_TOKEN: "", github_read_token: "" },
+    env: { PASEO_PASSWORD: "", CLAUDE_CODE_OAUTH_TOKEN: "", CODEX_ACCESS_TOKEN: "", GITHUB_READ_TOKEN: "", GH_TOKEN: "", github_read_token: "" },
     options: {
       supportsMcpServers: false,
       clientCapabilities: { terminal: false, fs: { readTextFile: false, writeTextFile: false } },

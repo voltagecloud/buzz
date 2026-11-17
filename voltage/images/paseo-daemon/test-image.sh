@@ -115,8 +115,12 @@ status=$(wait_running "$NAME-pa-off")
 docker rm -f "$NAME-pa-off" >/dev/null
 
 # Explicit empty scope preserves anonymous mode without a GitHub token.
-docker run -d --name "$NAME-optional" "${HARDENED[@]}" "${BASE_ENV[@]}" -e GITHUB_READ_TOKEN= -e GITHUB_READ_TOKEN_REPOSITORIES='[]' "$IMAGE" >/dev/null
+docker run -d --name "$NAME-optional" "${HARDENED[@]}" "${BASE_ENV[@]}" -e GITHUB_READ_TOKEN= -e GITHUB_READ_TOKEN_REPOSITORIES='[]' -e GH_TOKEN=ghp_synthetic_inherited "$IMAGE" >/dev/null
 wait_running "$NAME-optional" >/dev/null
+docker exec "$NAME-optional" node -e '
+  const environment = require("node:fs").readFileSync("/proc/1/environ", "utf8").split("\0");
+  if (environment.some((entry) => entry.startsWith("GH_TOKEN="))) process.exit(1);
+' || fail "daemon retained an inherited GH_TOKEN without a Paseo read token"
 docker rm -f "$NAME-optional" >/dev/null
 
 # Every optional-missing combination starts without a model or remote provider.
@@ -298,6 +302,7 @@ claude_env=$(docker exec "$NAME" cat /tmp/claude.env 2>&1)
 grep -qx "CLAUDE_CODE_OAUTH_TOKEN=$TOKEN" <<<"$claude_env" || fail "the PA has no model token"
 grep -qx "BUZZ_PRIVATE_KEY=$PRIVATE_KEY" <<<"$claude_env" || fail "the PA has no BUZZ_PRIVATE_KEY"
 grep -qx "GITHUB_READ_TOKEN=$GIT_TOKEN" <<<"$claude_env" || fail "the PA has no narrow GitHub read token"
+grep -qx "GH_TOKEN=$GIT_TOKEN" <<<"$claude_env" || fail "Paseo discovery has no narrow GitHub read token"
 ! grep -qF -e "$PASSWORD" -e "$SECRET_KEY" <<<"$claude_env" || fail "the PA received the Paseo password or keypair"
 claude_args=$(docker exec "$NAME" cat /tmp/claude.args)
 disallowed=$(grep -A1 -x -- --disallowedTools <<<"$claude_args" | tail -1)

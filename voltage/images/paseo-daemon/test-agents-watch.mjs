@@ -21,6 +21,7 @@ for (const [row, agents, message] of [
 }
 assert.throws(() => buzzProviders([brokkr], "", []), /OWNER is required/);
 const built = buzzProviders([brokkr], owner, ["claude"]);
+assert.equal(built.brokkr.env.GH_TOKEN, "", "the Buzz bridge must not inherit the discovery credential");
 assert.deepEqual(built.brokkr.command, ["buzz", "acp-bridge", "--agent", brokkr.agent, "--channel", brokkr.channel, "--owner", owner]);
 assert.deepEqual(built.brokkr.models, [{ id: "buzz", label: "Brokkr", isDefault: true }]);
 
