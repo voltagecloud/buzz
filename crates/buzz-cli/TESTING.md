@@ -269,6 +269,27 @@ echo "diff content" | buzz messages send-diff \
   --pr 42 | jq .
 ```
 
+### Generic attachment round trip
+
+With `CHANNEL_ID` set to a test channel, run the rebuilt CLI:
+
+```bash
+FIXTURE=crates/buzz-cli/tests/fixtures/bitgo-events-test.jsonl
+buzz messages send --channel "$CHANNEL_ID" --content "JSONL attachment test" --file "$FIXTURE"
+buzz messages get --channel "$CHANNEL_ID" --limit 1
+# Expect [bitgo-events-test.jsonl](URL) and an imeta m application/octet-stream entry.
+# Copy URL from that message:
+buzz media get "$URL" --output /tmp/bitgo-events-downloaded.jsonl
+cmp "$FIXTURE" /tmp/bitgo-events-downloaded.jsonl
+# Expect exit 0: byte-identical content.
+buzz upload file --file "$FIXTURE"
+# Expect type: application/octet-stream in the JSON descriptor.
+```
+
+Generic files have a 100 MiB client cap. Known blocked MIME types, audio,
+unsupported images/video, and `.svg` filenames fail before uploading.
+Parquet currently uses `application/octet-stream`: `infer` 0.19 has no Parquet matcher.
+
 ### 6.5 Reactions
 
 ```bash

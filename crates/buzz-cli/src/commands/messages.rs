@@ -663,8 +663,27 @@ pub(crate) async fn prepare_message(
         media_tags.push(crate::client::build_imeta_tag(&desc));
         if desc.mime_type.starts_with("video/") {
             media_content.push_str("\n![video](");
-        } else {
+        } else if desc.mime_type.starts_with("image/") {
             media_content.push_str("\n![image](");
+        } else {
+            let filename = std::path::Path::new(file_path)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy();
+            // Keep the original name when the relay stores opaque files as .bin.
+            // Escape Markdown syntax so filenames cannot inject links or images.
+            media_content.push_str("\n[");
+            for ch in filename.chars() {
+                if matches!(ch, '\\' | '[' | ']' | '<' | '>' | '`' | '*' | '_' | '!') {
+                    media_content.push('\\');
+                }
+                if ch == '\n' || ch == '\r' {
+                    media_content.push(' ');
+                } else {
+                    media_content.push(ch);
+                }
+            }
+            media_content.push_str("](");
         }
         media_content.push_str(&desc.url);
         media_content.push(')');
