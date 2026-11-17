@@ -57,7 +57,8 @@ pub enum TriggerDef {
         #[serde(default)]
         filter: Option<String>,
     },
-    /// Fires on signed integration messages from explicitly trusted publishers.
+    /// Fires on signed integration occurrence replies from explicitly trusted
+    /// publishers.
     IntegrationEvent {
         /// Provider identifier carried in the event's `ext-source` tag.
         source: String,

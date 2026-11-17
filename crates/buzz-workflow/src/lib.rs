@@ -987,9 +987,11 @@ async fn should_fire_workflow(
     {
         // Source tags are signer-controlled. Only a named publisher may drive
         // this workflow; a channel member cannot spoof an integration source.
-        if !authors
-            .iter()
-            .any(|author| author.eq_ignore_ascii_case(&trigger_ctx.author))
+        // Only occurrence replies match (NIP-IG); thread anchors never do.
+        if !trigger_ctx.is_reply
+            || !authors
+                .iter()
+                .any(|author| author.eq_ignore_ascii_case(&trigger_ctx.author))
             || trigger_ctx.webhook_fields.get("source") != Some(source)
             || trigger_ctx
                 .webhook_fields

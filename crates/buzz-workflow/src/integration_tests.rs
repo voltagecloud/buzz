@@ -25,29 +25,51 @@ steps:
         publisher.public_key().to_hex()
     );
     let (def, _) = schema::parse_yaml(&yaml).unwrap();
-    let make = |keys: &Keys, source: &str, action: &str, labels: &str| {
+    // Occurrences are NIP-10 replies to their external thread anchor.
+    let anchor = "ab".repeat(32);
+    let make = |keys: &Keys, source: &str, action: &str, labels: &str, reply: bool| {
+        let mut tags = vec![
+            Tag::parse(["ext-source", source]).unwrap(),
+            Tag::parse(["ext-action", action]).unwrap(),
+            Tag::parse(["ext-labels", labels]).unwrap(),
+            Tag::parse(["ext-url", "https://linear.app/team/issue/ABC-1"]).unwrap(),
+            Tag::parse(["ext-author", "spoof"]).unwrap(),
+        ];
+        if reply {
+            tags.push(Tag::parse(["e", &anchor, "", "root"]).unwrap());
+            tags.push(Tag::parse(["e", &anchor, "", "reply"]).unwrap());
+        }
         let event = EventBuilder::new(Kind::Custom(9), "Issue changed")
-            .tags([
-                Tag::parse(["ext-source", source]).unwrap(),
-                Tag::parse(["ext-action", action]).unwrap(),
-                Tag::parse(["ext-labels", labels]).unwrap(),
-                Tag::parse(["ext-url", "https://linear.app/team/issue/ABC-1"]).unwrap(),
-                Tag::parse(["ext-author", "spoof"]).unwrap(),
-            ])
+            .tags(tags)
             .sign_with_keys(keys)
             .unwrap();
         buzz_core::StoredEvent::new(event, Some(Uuid::new_v4()))
     };
-    for (keys, source, action, labels, expected) in [
-        (&publisher, "linear", "issue.update", "agent,bug", true),
-        (&other, "linear", "issue.update", "agent", false),
-        (&publisher, "github", "issue.update", "agent", false),
-        (&publisher, "linear", "issue.create", "agent", false),
-        (&publisher, "linear", "", "agent", false),
-        (&publisher, "", "issue.update", "agent", false),
-        (&publisher, "linear", "issue.update", "bug", false),
+    for (keys, source, action, labels, reply, expected) in [
+        (
+            &publisher,
+            "linear",
+            "issue.update",
+            "agent,bug",
+            true,
+            true,
+        ),
+        (
+            &publisher,
+            "linear",
+            "issue.update",
+            "agent,bug",
+            false,
+            false,
+        ),
+        (&other, "linear", "issue.update", "agent", true, false),
+        (&publisher, "github", "issue.update", "agent", true, false),
+        (&publisher, "linear", "issue.create", "agent", true, false),
+        (&publisher, "linear", "", "agent", true, false),
+        (&publisher, "", "issue.update", "agent", true, false),
+        (&publisher, "linear", "issue.update", "bug", true, false),
     ] {
-        let stored = make(keys, source, action, labels);
+        let stored = make(keys, source, action, labels, reply);
         let ctx = build_trigger_context(&stored);
         assert_eq!(ctx.author, keys.public_key().to_hex());
         assert_eq!(ctx.message_id, stored.event.id.to_hex());
@@ -59,7 +81,7 @@ steps:
         assert_eq!(
             should_fire_workflow(&def, &ctx, Uuid::new_v4()).await,
             expected,
-            "{source}/{action} by {} with {labels}",
+            "{source}/{action} by {} with {labels}, reply: {reply}",
             ctx.author
         );
         assert_eq!(
@@ -82,7 +104,7 @@ steps:
         authors[0] = authors[0].to_uppercase();
     }
     for (action, expected) in [("", false), ("issue.create", true)] {
-        let stored = make(&publisher, "linear", action, "agent");
+        let stored = make(&publisher, "linear", action, "agent", true);
         assert_eq!(
             should_fire_workflow(&any_action, &build_trigger_context(&stored), Uuid::new_v4())
                 .await,
