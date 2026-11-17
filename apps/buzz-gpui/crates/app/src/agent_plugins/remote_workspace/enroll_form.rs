@@ -403,7 +403,9 @@ fn registration_notice(registration: &Registration, c: &Colors) -> Div {
                 .child(div().text_label_sm().child("Add your agents' signing key to GitHub"))
                 .child(div().text_body_sm().text_color(c.text_subtle).child(format!(
                     "Until you add it, your agents' commits are signed but show as Unverified. \
-                     The app could not add it for you: {reason}."
+                     The app could not add it for you: {reason}. Enrolling again keeps this key \
+                     and does not add it to GitHub, so add it now or select Replace the signing \
+                     key when you enroll again."
                 )))
                 .child(div().text_body_sm().child(
                     "1. On GitHub, open Settings → SSH and GPG keys and press New SSH key. \

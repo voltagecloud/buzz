@@ -305,11 +305,11 @@ fn a_gh_failure_says_what_to_do() {
     for (stderr, hint) in [
         (
             "HTTP 404: This API operation needs the \"admin:ssh_signing_key\" scope.",
-            "gh auth refresh -h github.com -s admin:ssh_signing_key",
+            "gh auth refresh -h github.com -s admin:ssh_signing_key, then enroll again with Replace the signing key selected",
         ),
         (
             "To get started with GitHub CLI, please run:  gh auth login",
-            "gh auth login",
+            "gh auth login -s admin:ssh_signing_key, then enroll again with Replace the signing key selected",
         ),
         (
             "HTTP 422: key is already in use",
