@@ -1,14 +1,46 @@
 # Paseo personal daemon
 
 One developer's headless Paseo daemon stays available while their laptop is closed.
-The image uses unmodified Paseo 0.15.3 with Claude Code 2.1.325 from the developer image’s shared runtime lockfile.
+The image uses unmodified Paseo 0.15.3 with Claude Code 2.1.325 and Codex CLI 0.169.0 from the shared runtime lockfile.
 It adds the Buzz and via CLIs, a configuration wrapper, read-only Git helpers, a turn recorder, and a gateway profile plugin.
-Codex stays disabled pending its shell and credential review.
+Each enrolled subscription enables its personal assistant independently. Both providers can remain available together.
+
+| Credential | Paseo provider |
+| --- | --- |
+| `CLAUDE_CODE_OAUTH_TOKEN` | Personal assistant (Claude) |
+| `CODEX_ACCESS_TOKEN` | Personal assistant (ChatGPT) |
+
+To switch subscriptions, start a new conversation and select the other personal assistant in the provider picker.
+Native conversation histories belong to their respective harnesses. Both assistants use the same owner-scoped relay memory and Buzz delegation tools.
+Hosted deployments retain Claude and Codex history in the persistent home; their backup policy covers both harnesses.
+An existing enrolled Codex access token is reused. An OpenAI Platform API key does not enable this subscription provider.
+To add a token, run `buzz paseo setup --update`, enter the Codex access token, and leave existing credentials blank.
+After a credential change, an operator must restart the daemon to reload its Secret.
+
+### Codex sandbox prerequisite
+
+Codex runs with read-only filesystem access, disabled command networking, and user-reviewed approvals.
+Network operations and changes outside that sandbox require approval. Implementation work still belongs in Buzz sandboxes.
+Image-owned requirements prevent full-access mode and deny reads of credential files and process environments.
+Codex shell processes receive no gateway, Git, model, or pairing credentials.
+Its scoped `buzz_read` tool provides authenticated reads and code fetches through the existing CLIs.
+The `buzz_write` tool requires user approval for each message, workflow change, or relay-memory write, with exact text supplied inline.
+
+Codex uses bubblewrap, which needs unprivileged user namespaces. The default container syscall filter blocks those operations.
+The image supplies a capability-free OCI seccomp profile derived from [Moby's pinned default](https://github.com/moby/profiles/blob/f862455628f78f84c937e967e4a03902fb1dee11/seccomp/default.json).
+The build verifies its checksum, evaluates capability and architecture conditions, and adds only bubblewrap's namespace operations.
+The container must remain non-root, with all capabilities dropped and privilege escalation disabled.
+Mount operations remain unavailable in the host user namespace.
+
+Before starting hosted daemons, install `/etc/paseo-buzz/seccomp.json` as kubelet's `paseo-codex.json` Localhost profile on each daemon node.
+Use an operator-controlled node installer for new autoscaler nodes; never grant the assistant a host filesystem mount.
+Keep the namespace's restricted Pod policy. Select the Localhost profile only for the daemon container; backup and restore helpers retain RuntimeDefault.
+The bundled profile requires Linux 4.8 or newer and supports the image's amd64 and arm64 architectures.
 
 ```mermaid
 flowchart LR
   Client[Paseo client] <-->|WSS encrypted frames| Relay[Paseo relay /ws]
-  Relay <--> Daemon[Personal daemon: Claude and code reads]
+  Relay <--> Daemon[Personal daemon: Claude or ChatGPT and code reads]
   GitHub[Token-permitted GitHub repositories] -->|read-only partial clone and fetch| Daemon
   Daemon <-->|WSS signed messages| Buzz[Buzz relay]
   Buzz <--> Sandbox[Sandbox: writes, builds, tests and pushes]
@@ -223,7 +255,8 @@ No parked feature is required.
 | `BUZZ_PRIVATE_KEY` | Required gateway signing key. Never the owner or sandbox key. |
 | `BUZZ_PASEO_OWNER` | Owner public key; required with remote providers. Missing disables relay memory. |
 | `BUZZ_PASEO_AGENTS` | Optional JSON array above. Missing or `[]` enables no remote providers. |
-| `CLAUDE_CODE_OAUTH_TOKEN` | Optional Claude credential. Missing starts without a native assistant. |
+| `CLAUDE_CODE_OAUTH_TOKEN` | Optional Claude subscription credential. Enables the Claude personal assistant. |
+| `CODEX_ACCESS_TOKEN` | Optional ChatGPT workspace Codex access token. Enables the ChatGPT personal assistant. |
 | `GITHUB_READ_TOKEN` | Optional fine-grained `github_pat_...` credential. Missing permits anonymous public clone/fetch with an empty manifest; a non-empty manifest fails startup. |
 | `GITHUB_READ_TOKEN_REPOSITORIES` | Nonsecret startup prefetch manifest of `owner/repository` paths cloned and registered as projects; default `[]`, at most 64 entries and 16,384 bytes. Other token-permitted repos remain readable on demand. |
 | `BUZZ_RELAY_URL` | Default `wss://buzz.voltage.cloud`; WSS only. |
@@ -239,7 +272,7 @@ No parked feature is required.
 | `DISABLE_AUTOUPDATER`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | Defaults `1`. |
 
 Malformed present values refuse startup with exit code 64, without printing secrets.
-`CODEX_ACCESS_TOKEN` is removed from the environment and never enables a provider.
+Without either model token, the daemon still offers its enrolled Buzz remote providers.
 The obsolete host-tools switch has no effect; terminals stay disabled.
 Pairing links use `https://app.paseo.sh` even when the daemon's local web UI is disabled.
 Desktop, mobile, and web clients use the relay endpoint embedded in the offer.
@@ -301,7 +334,7 @@ Visual client interaction remains part of the human acceptance test.
 | Accepted assistant transcript messages | Buzz recording channel | New assistant session reads the latest 20 records for context. |
 | Assistant memory (rules, preferences, lessons) | NIP-AE engrams on the Buzz relay, written by the gateway key for the owner | New assistant session reads `core` and follows its `[[mem/…]]` links. |
 | Unsent transcript intents and dead letters | Pod-local `$PASEO_HOME/buzz-recording` | Lost on pod replacement. |
-| Native Claude sessions | Pod-local home | Start a new native assistant session. No v1 restore. |
+| Native Claude and Codex sessions | Daemon home | Continue when the hosting environment retains the home; restore supported history from its backup on volume loss. |
 | Paseo's agent list and project registry | Pod-local `$PASEO_HOME` | Rebuilt at startup: prefetch manifest repositories and `~/buzz` as projects, restored remote-agent conversations as agents. |
 | Branch views | Pod-local `$HOME/code/<owner>/<repository>@<branch>` | `paseo-code view` again on demand. |
 | Git checkout | Pod-local `$HOME/code` | Partial clone again on demand. |
@@ -330,7 +363,7 @@ The gateway key's limited, revocable delegation and the read-only token are the 
 
 ## Recorder bounds and loss
 
-The directory plugin records every developer prompt and assistant message in one ordinary Buzz thread per native Claude session.
+The directory plugin records every developer prompt and assistant message in one ordinary Buzz thread per native Claude or Codex session.
 It uses before/after-turn hooks and projected timeline reads; complete assistant messages publish when the turn ends.
 No tool calls, names, statuses, outputs, or reasoning enter the transcript.
 Remote providers already write to Buzz and are excluded.
@@ -391,6 +424,9 @@ node voltage/images/paseo-daemon/test-restore.mjs
 ```
 
 The image contract uses synthetic credentials, no network, a read-only root, UID 1000, and dropped capabilities.
+On AppArmor-enabled Docker hosts, the test loads a temporary, container-specific policy that permits bubblewrap's namespace operations and removes it during cleanup.
+This requires `apparmor_parser` and permission to load a policy on the Docker host, through passwordless `sudo` when necessary.
+The host's default policy stays unchanged; the test retains seccomp and all container restrictions.
 It checks identity, TLS refusal, Claude-only selection, tool policy, runtime inventory, recorder loading, and bounded retries.
 Separate runtime evidence covers same-Secret replacement and real relay session list/load.
 A developer must still perform the staging acceptance steps in the shared runbook.

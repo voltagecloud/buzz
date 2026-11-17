@@ -1,0 +1,23 @@
+# Shell processes receive no credentials. Authenticated operations use the
+# scoped MCP bridge; every write requires a separate user approval.
+[shell_environment_policy]
+inherit = "all"
+ignore_default_excludes = true
+include_only = [
+  "HOME", "PATH", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "USER",
+]
+
+[features]
+shell_snapshot = false
+
+[mcp_servers.buzz]
+command = "/usr/local/bin/node"
+args = ["/usr/local/lib/paseo-buzz/tools.mjs"]
+env_vars = ["BUZZ_RELAY_URL", "BUZZ_PRIVATE_KEY", "BUZZ_PASEO_OWNER", "BUZZ_AUTH_TAG", "GITHUB_READ_TOKEN", "GITHUB_READ_TOKEN_REPOSITORIES"]
+default_tools_approval_mode = "prompt"
+
+[mcp_servers.buzz.tools.buzz_read]
+approval_mode = "approve"
+
+[mcp_servers.buzz.tools.buzz_write]
+approval_mode = "prompt"

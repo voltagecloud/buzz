@@ -14,23 +14,49 @@ if [ -z "$IMAGE" ]; then
 fi
 
 NAME="paseo-daemon-test-$$"
+docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
+  -v "$(cd "$(dirname "$0")" && pwd):/tmp/seccomp-tests:ro" --entrypoint node "$IMAGE" \
+  /tmp/seccomp-tests/test-seccomp.mjs
 containers=("$NAME" "$NAME-pa-off" "$NAME-optional" "$NAME-replacement" "$NAME-shutdown-slow")
 stubs=$(mktemp -d)
 # GitHub runners and the daemon use different UIDs. The read-only bind mount
 # must be traversable by the container rather than inheriting mktemp's 0700.
 chmod 0755 "$stubs"
+apparmor=()
+apparmor_loaded=false
 cleanup() {
   docker rm -f "${containers[@]}" >/dev/null 2>&1 || true
   docker run --rm --network none --user 0:0 --entrypoint sh -v "$stubs/records:/records" "$IMAGE" -c 'rm -rf /records/slow-home' >/dev/null 2>&1 || true
+  if [ "$apparmor_loaded" = true ]; then
+    "${apparmor[@]}" -R "$stubs/apparmor" || return 1
+  fi
   rm -rf "$stubs"
 }
 trap cleanup EXIT
 [ -z "${KEEP:-}" ] || trap - EXIT
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+monotonic_ms() { node -e 'console.log(Number(process.hrtime.bigint() / 1000000n))'; }
 
 # shellcheck disable=SC2054 # the tmpfs options are comma-separated
-HARDENED=(--network none --cpus 1 --memory 1g --read-only --cap-drop ALL --security-opt no-new-privileges --user 1000:1000
+docker run --rm --network none --entrypoint cat "$IMAGE" /etc/paseo-buzz/seccomp.json >"$stubs/seccomp.json"
+HARDENED=(--network none --cpus 1 --memory 1g --read-only --cap-drop ALL --security-opt no-new-privileges --security-opt "seccomp=$stubs/seccomp.json" --user 1000:1000
   --tmpfs /home/paseo:uid=1000,gid=1000,mode=0700 --tmpfs /tmp)
+# Docker's default AppArmor policy denies every mount, including bubblewrap's
+# unprivileged namespace. Load a uniquely named test-only policy on that host;
+# keep AppArmor enforced and leave the host's docker-default policy untouched.
+if docker info --format '{{json .SecurityOptions}}' | jq -e 'any(startswith("name=apparmor"))' >/dev/null; then
+  apparmor=(apparmor_parser)
+  if [ "$(id -u)" -ne 0 ]; then apparmor=(sudo -n apparmor_parser); fi
+  sed "s/paseo-daemon-test/$NAME/g" "$(dirname "$0")/test-apparmor" >"$stubs/apparmor"
+  "${apparmor[@]}" -r -W "$stubs/apparmor"
+  apparmor_loaded=true
+  HARDENED+=(--security-opt "apparmor=$NAME")
+fi
+docker run --rm --init "${HARDENED[@]}" \
+  -v "$(cd "$(dirname "$0")" && pwd)/test-tools-cli.mjs:/usr/local/bin/buzz:ro" \
+  -v "$(cd "$(dirname "$0")" && pwd)/test-tools-cli.mjs:/tmp/mcp-bin/git:ro" \
+  -v "$(cd "$(dirname "$0")" && pwd)/test-tools.mjs:/tmp/test-tools.mjs:ro" \
+  --entrypoint node "$IMAGE" /tmp/test-tools.mjs
 KEYPAIR=$(docker run --rm --network none --entrypoint node "$IMAGE" -e '
   const nacl = require("/usr/local/lib/node_modules/@getpaseo/relay/node_modules/tweetnacl");
   const pair = nacl.box.keyPair();
@@ -42,12 +68,13 @@ SECRET_KEY=$(jq -r .secretKeyB64 <<<"$KEYPAIR")
 PASSWORD="test-password-$RANDOM$RANDOM"
 PRIVATE_KEY=$(printf '%064x' 1)
 TOKEN="sk-ant-oat01-test-$RANDOM$RANDOM"
+CODEX_TOKEN="at-test-$RANDOM$RANDOM"
 GIT_TOKEN="github_pat_test_$RANDOM$RANDOM"
 AGENT=$(printf 'a%.0s' {1..64})
 MANAGER=$(printf 'b%.0s' {1..64})
 OWNER=$(printf 'c%.0s' {1..64})
 CHANNEL=6f1c1b2e-3d4a-4b5c-8d9e-0f1a2b3c4d5e
-SECRETS=(-e "$PASSWORD" -e "$SECRET_KEY" -e "$PRIVATE_KEY" -e "$TOKEN" -e "$GIT_TOKEN")
+SECRETS=(-e "$PASSWORD" -e "$SECRET_KEY" -e "$PRIVATE_KEY" -e "$TOKEN" -e "$CODEX_TOKEN" -e "$GIT_TOKEN")
 BASE_ENV=(
   -e PASEO_PASSWORD="$PASSWORD"
   -e PASEO_SERVER_ID=srv_paseodaemontest
@@ -58,7 +85,7 @@ BASE_ENV=(
   -e BUZZ_PASEO_OWNER="$OWNER"
   -e BUZZ_PASEO_AGENTS='[{"id":"brokkr","label":"Brokkr","agent":"'"$AGENT"'","channel":"'"$CHANNEL"'"}]'
 )
-ENV=("${BASE_ENV[@]}" -e BUZZ_PASEO_RECORD_CHANNEL="$CHANNEL" -e GITHUB_READ_TOKEN="$GIT_TOKEN" -e GITHUB_READ_TOKEN_REPOSITORIES='["fixture/private"]' -e CLAUDE_CODE_OAUTH_TOKEN="$TOKEN" -e BUZZ_MANAGER_PUBKEY="$MANAGER" -e BUZZ_MANAGER_CHANNEL="$CHANNEL")
+ENV=("${BASE_ENV[@]}" -e BUZZ_PASEO_RECORD_CHANNEL="$CHANNEL" -e GITHUB_READ_TOKEN="$GIT_TOKEN" -e GITHUB_READ_TOKEN_REPOSITORIES='["fixture/private"]' -e CLAUDE_CODE_OAUTH_TOKEN="$TOKEN" -e CODEX_ACCESS_TOKEN="$CODEX_TOKEN" -e BUZZ_MANAGER_PUBKEY="$MANAGER" -e BUZZ_MANAGER_CHANNEL="$CHANNEL")
 
 # The wrapper refuses unsafe or malformed settings before the daemon starts.
 refuses() {
@@ -131,12 +158,13 @@ for agents in missing '[]'; do
   [ "$(jq '.providers | length' <<<"$optional_status")" = 0 ] || fail "optional providers: $optional_status"
   docker rm -f "$NAME-optional" >/dev/null
 done
-# Codex remains disabled even when a token is accidentally supplied.
+# A Codex-only enrollment enables ChatGPT without requiring a Claude token.
 docker run -d --name "$NAME-optional" "${HARDENED[@]}" "${BASE_ENV[@]}" -e CODEX_ACCESS_TOKEN=at-test-token "$IMAGE" >/dev/null
 optional_status=$(wait_running "$NAME-optional")
-[ "$(jq -c '[.providers[].provider]' <<<"$optional_status")" = '["brokkr"]' ] || fail "Codex was enabled: $optional_status"
+[ "$(jq -c '[.providers[].provider] | sort' <<<"$optional_status")" = '["brokkr","codex"]' ] || fail "Codex-only providers: $optional_status"
 docker rm -f "$NAME-optional" >/dev/null
 refuses "GITHUB_READ_TOKEN must be a fine-grained GitHub token" -e GITHUB_READ_TOKEN=gho-broad-token
+refuses "CODEX_ACCESS_TOKEN must be a Codex access token" -e CODEX_ACCESS_TOKEN=sk-api-key
 
 # Stubs record how the daemon launches the PA and the bridge. They sit first
 # on PATH, so the daemon resolves them in place of the image binaries.
@@ -216,11 +244,13 @@ jq -e '.relay | .enabled and .useTls and .publicUseTls and .endpoint == "relay.i
 # Check the real executable, bypassing the launch stub.
 docker exec -e PATH=/usr/local/bin:/usr/bin:/bin "$NAME" claude --version | grep -qx '2.1.325 (Claude Code)' ||
   fail "the image claude is not Claude Code"
+docker exec "$NAME" codex --version | grep -qx 'codex-cli 0.169.0' || fail "Codex version"
+docker exec -i "$NAME" python3 - <"$(dirname "$0")/test-codex.py" || fail "native Codex sandbox contract"
 
 # The PA and the Buzz agent are offered; the other bundled providers are not.
-[ "$(jq -c '[.providers[].provider] | sort' <<<"$status")" = '["brokkr","claude"]' ] || fail "enabled providers: $status"
+[ "$(jq -c '[.providers[].provider] | sort' <<<"$status")" = '["brokkr","claude","codex"]' ] || fail "enabled providers: $status"
 docker exec "$NAME" paseo provider ls --json |
-  jq -e '(map(select(.enabled == "Enabled")) | map(.provider) | sort) == ["brokkr", "claude"] and (map(.provider) | index("codex"))' >/dev/null ||
+  jq -e '(map(select(.enabled == "Enabled")) | map(.provider) | sort) == ["brokkr", "claude", "codex"]' >/dev/null ||
   fail "provider list: $(docker exec "$NAME" paseo provider ls --json)"
 
 # Real startup creates separate, empty routing roots even for a shared source.
@@ -374,13 +404,13 @@ docker exec "$NAME" node -e '
 changes=$(docker diff "$NAME")
 [ -z "$changes" ] || fail "writes outside tmpfs: $changes"
 
-# Analysis tools work; package installers, toolchains, scanners and Codex are absent.
+# Native runtimes and analysis tools work; installers and toolchains are absent.
 docker exec "$NAME" sh -c '
   set -eu
-  for command in codex npm npx yarn corepack apt apt-get dpkg cargo rustc gcc cc make cmake pip pip3 gitleaks; do
+  for command in npm npx yarn corepack apt apt-get dpkg cargo rustc gcc cc make cmake pip pip3 gitleaks; do
     if command -v "$command" >/dev/null 2>&1; then echo "unexpected runtime tool: $command" >&2; exit 1; fi
   done
-  for command in git node via jq python3 sqlite3 xxd file tree unzip zstd less fdfind fd yq column hexdump; do
+  for command in codex bwrap git node via jq python3 sqlite3 xxd file tree unzip zstd less fdfind fd yq column hexdump; do
     command -v "$command" >/dev/null || { echo "missing runtime tool: $command" >&2; exit 1; }
   done
   [ "$(readlink /usr/local/bin/fd)" = /usr/bin/fdfind ]
@@ -437,7 +467,10 @@ docker exec "$NAME" rm /home/paseo/.config/paseo/via.toml
 docker exec "$NAME" node -e '
   const fs = require("node:fs");
   const config = JSON.parse(fs.readFileSync("/home/paseo/.paseo/config.json"));
-  if (config.daemon.terminalProfiles || config.agents.providers.codex.enabled) process.exit(1);
+  if (config.daemon.terminalProfiles || !config.agents.providers.codex.enabled) process.exit(1);
+  const codex = config.agents.providers.codex;
+  if (codex.options.approval_policy !== "on-request" || codex.options.sandbox_mode !== "read-only") process.exit(1);
+  if (codex.env.CLAUDE_CODE_OAUTH_TOKEN !== "" || config.agents.providers.claude.env.CODEX_ACCESS_TOKEN !== "") process.exit(1);
   const allow = config.agents.providers.claude.options.settings.permissions.allow;
   if (allow.includes("Bash(buzz:*)") || allow.some((rule) => /workflows (create|update|trigger)/.test(rule))) process.exit(1);
   for (const verb of ["list", "delete"]) if (!allow.includes(`Bash(buzz workflows ${verb}:*)`)) process.exit(1);
@@ -446,7 +479,7 @@ docker exec "$NAME" node -e '
   // Memory reads run unprompted; every memory write needs approval.
   for (const verb of ["ls", "get", "hash"]) if (!allow.includes(`Bash(buzz mem ${verb}:*)`)) process.exit(1);
   if (allow.some((rule) => /mem (set|patch|rm)/.test(rule))) process.exit(1);
-' || fail "deferred terminal profile or Codex is enabled, a Buzz provider lacks its preselected model, or the memory allowlist is wrong"
+' || fail "native assistant policy, remote model selection, or memory allowlist is wrong"
 
 # The bundled plugin compiles and starts in the unmodified daemon.
 docker exec "$NAME" paseo plugin ls --json >"$stubs/plugins.json"
@@ -456,6 +489,7 @@ for _ in $(seq 1 20); do [ -s "$stubs/records/turn-profile" ] && break; sleep 0.
 grep -qx "Owner (Paseo)" "$stubs/records/turn-profile" || fail "gateway profile name was not published"
 node "$(dirname "$0")/test-profile.mjs"
 node "$(dirname "$0")/test-recorder.mjs"
+BUZZ_RECORDER_TEST_PROVIDER=codex node "$(dirname "$0")/test-recorder.mjs"
 node "$(dirname "$0")/test-code.mjs"
 node "$(dirname "$0")/test-workspaces.mjs"
 node "$(dirname "$0")/test-agents-watch.mjs"
@@ -491,9 +525,10 @@ docker exec "$NAME" node -e '
       metadata: { session: id, entry: id, role: "developer", part: 1, parts: 1, sequence: 1, created_at: 100 } }] }));
 '
 # Recording was enabled at startup through this test-specific channel.
-started=$SECONDS
+started=$(monotonic_ms)
 docker stop --time 30 "$NAME" >/dev/null
-[ $((SECONDS - started)) -lt 25 ] || fail "shutdown exceeded the recorder grace budget"
+elapsed=$(( $(monotonic_ms) - started ))
+[ "$elapsed" -lt 25000 ] || fail "shutdown exceeded the recorder grace budget (${elapsed}ms)"
 grep -qx "final shutdown turn" "$stubs/records/turn" || fail "SIGTERM did not flush the durable turn"
 docker rm "$NAME" >/dev/null
 
@@ -513,9 +548,10 @@ docker exec "$NAME-shutdown-slow" node -e '
     messages: [{ content: "unacknowledged slow turn", seqEnd: 1, role: "developer", part: 1, parts: 1, entry: id,
       metadata: { session: id, entry: id, role: "developer", part: 1, parts: 1, sequence: 1, created_at: 100 } }] }));
 '
-started=$SECONDS
+started=$(monotonic_ms)
 docker stop --time 10 "$NAME-shutdown-slow" >/dev/null
-[ $((SECONDS - started)) -lt 8 ] || fail "slow publisher exceeded bounded shutdown"
+elapsed=$(( $(monotonic_ms) - started ))
+[ "$elapsed" -lt 8000 ] || fail "slow publisher exceeded bounded shutdown (${elapsed}ms)"
 [ ! -e "$stubs/records/slow-ack" ] || fail "slow publisher survived shutdown"
 docker run --rm --network none --user 0:0 --entrypoint sh -v "$stubs/records:/records:ro" "$IMAGE" \
   -c 'test -f /records/slow-home/buzz-recording/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd.json' || fail "slow publisher lost unacknowledged intent"

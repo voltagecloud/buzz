@@ -1,0 +1,14 @@
+# The personal daemon reviews and delegates; sandbox agents implement changes.
+# Keep these requirements in the read-only image, outside the assistant's home.
+allowed_approval_policies = ["on-request"]
+allowed_approvals_reviewers = ["user"]
+allowed_sandbox_modes = ["read-only"]
+
+[permissions.filesystem]
+deny_read = [
+  "/proc", "/sys", "/run",
+  "~/.paseo", "~/.claude", "~/.config",
+  "~/.codex/auth.json", "~/.codex/config.toml",
+  "~/.codex/shell_snapshots",
+  "~/.git-credentials", "~/.ssh",
+]

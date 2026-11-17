@@ -100,8 +100,8 @@ pub(super) async fn run(
             )
             .await?,
         )
-    } else if !has_model(stored, "claude_oauth_token") {
-        // The daemon's assistant receives only the subscription token.
+    } else if !has_model(stored, "claude_oauth_token") && !has_model(stored, "codex_access_token") {
+        // Either enrolled subscription can power a native personal assistant.
         profile::assistant_token(prompt, base.clone(), has_model(stored, "anthropic_api_key"))?
     } else {
         None

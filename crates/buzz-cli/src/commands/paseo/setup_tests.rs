@@ -270,6 +270,16 @@ async fn setup_onboards_a_new_developer_then_renews_and_fills_gaps() {
     assert_eq!(fake.lock().unwrap().enrolls.len(), 1);
     assert_eq!(fake.lock().unwrap().grants.len(), 2);
 
+    // A Codex-only profile also reruns silently, without demanding Claude.
+    fake.lock().unwrap().profile = json!({"models": ["codex_access_token"]});
+    let mut codex_only = Script::default();
+    let rerun = run(&client, &manager, &mut codex_only, options(&api))
+        .await
+        .unwrap();
+    assert_eq!(rerun.report["enrolled"], false);
+    assert!(codex_only.notes.is_empty());
+    assert_eq!(fake.lock().unwrap().enrolls.len(), 1);
+
     // 3. A stored profile without a Claude subscription token (an API key
     // does not reach the assistant): setup asks for one, says it replaces
     // the API key, and enrolls only that, keeping everything else stored.

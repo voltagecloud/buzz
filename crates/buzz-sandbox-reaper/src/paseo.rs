@@ -5,7 +5,7 @@
 //!
 //! The daemon has less access than the developer's Sandboxes: it reads only
 //! this Secret, never the profile, and the Secret holds only the pairing, the
-//! developer's registered agents, one model token and the reserved gateway
+//! developer's registered agents, native assistant tokens and the reserved gateway
 //! key. Nothing here logs a value, and no failure label quotes one.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -85,7 +85,10 @@ fn valid_git_read_token(token: &str) -> bool {
 
 /// The profile's model tokens the daemon's own agent may use, by the
 /// variable it reads. No other profile credential reaches the daemon.
-const MODEL_TOKENS: &[(&str, &str)] = &[("claude_oauth_token", "CLAUDE_CODE_OAUTH_TOKEN")];
+const MODEL_TOKENS: &[(&str, &str)] = &[
+    ("claude_oauth_token", "CLAUDE_CODE_OAUTH_TOKEN"),
+    ("codex_access_token", "CODEX_ACCESS_TOKEN"),
+];
 /// Provider IDs the daemon image defines itself; an agent never takes one.
 const RESERVED_IDS: &[&str] = &[
     "acp",

@@ -84,6 +84,10 @@ voltage/
 # runtime pins. The other files in voltage/images/paseo-daemon (tests, docs)
 # stay out of the context.
 !voltage/images/paseo-daemon/entrypoint.sh
+!voltage/images/paseo-daemon/codex-requirements.toml
+!voltage/images/paseo-daemon/codex-config.toml
+!voltage/images/paseo-daemon/seccomp.mjs
+!voltage/images/paseo-daemon/tools.mjs
 !voltage/images/paseo-daemon/via.sh
 !voltage/images/paseo-daemon/assistant.md
 !voltage/images/paseo-daemon/code.mjs
@@ -95,6 +99,6 @@ voltage/
 !voltage/images/paseo-daemon/recorder/**
 !voltage/images/paseo-daemon/profile/**
 
-# Shared, integrity-locked Claude Code runtime.
+# Shared, integrity-locked native assistant runtimes.
 !voltage/images/buzz-agent/package.json
 !voltage/images/buzz-agent/package-lock.json

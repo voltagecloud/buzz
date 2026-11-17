@@ -254,12 +254,19 @@ export function createRecorder({ directory, channel, send = publish, retryMs = 1
               // Ordinary clients sort by integer created_at. Give each part a
               // distinct wall-clock second, never a future timestamp. This
               // keeps flat replies readable without growing thread depth.
-              const delay = (state.createdAt + 1) * 1000 - Date.now();
-              if (delay > 5000) throw new Error("clock behind transcript cursor; retry retained");
-              if (delay > 0) await wait(new Promise((resolve) => setTimeout(resolve, delay)));
+              const nextAt = (state.createdAt + 1) * 1000;
+              const deadline = performance.now() + 5000;
+              let now = Date.now();
+              while (now < nextAt) {
+                const delay = nextAt - now;
+                if (delay > 5000 || performance.now() >= deadline) throw new Error("clock behind transcript cursor; retry retained");
+                // Timers can wake early; verify the clock before freezing identity.
+                await wait(new Promise((resolve) => setTimeout(resolve, Math.max(1, delay))));
+                now = Date.now();
+              }
               message.metadata = { session: job.session, entry: message.entry, role: message.role,
                 part: message.part, parts: message.parts, sequence: state.sequence + 1,
-                created_at: Math.floor(Date.now() / 1000), ...(state.root ? { root: state.root } : {}) };
+                created_at: Math.floor(now / 1000), ...(state.root ? { root: state.root } : {}) };
               await write(file, job); // Freeze event identity before first send.
             }
             if (stop.signal.aborted) break;
@@ -322,7 +329,7 @@ export function createRecorder({ directory, channel, send = publish, retryMs = 1
   return {
     observe(context) { paseo = context.paseo; schedule(0); },
     capture(payload, context, phase = "after") {
-      if (payload.agent.provider !== "claude") return Promise.resolve();
+      if (!["claude", "codex"].includes(payload.agent.provider)) return Promise.resolve();
       const { id: agentId } = payload.agent; const { turnId } = payload;
       if (typeof agentId !== "string" || !agentId || agentId.length > 256 || typeof turnId !== "string" || !turnId || turnId.length > 256) return Promise.reject(new Error("cannot record a turn without a bounded identity"));
       if (closed) return Promise.reject(new Error("recorder is closed"));

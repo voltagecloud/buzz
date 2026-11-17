@@ -9,7 +9,9 @@ const root = await mkdtemp(path.join(os.tmpdir(), "buzz-recorder-test-"));
 const spool = path.join(root, "spool");
 const channel = "6f1c1b2e-3d4a-4b5c-8d9e-0f1a2b3c4d5e";
 const hex = (value) => createHash("sha256").update(value).digest("hex");
-const payload = { agent: { id: "agent-1", provider: "claude" }, turnId: "turn-1", outcome: { kind: "completed" } };
+const provider = process.env.BUZZ_RECORDER_TEST_PROVIDER ?? "claude";
+assert.ok(["claude", "codex"].includes(provider));
+const payload = { agent: { id: "agent-1", provider }, turnId: "turn-1", outcome: { kind: "completed" } };
 const entries = [
   { seqStart: 1, seqEnd: 1, turnId: "turn-1", item: { type: "user_message", text: "Please ask @brokkr" } },
   { seqStart: 2, seqEnd: 2, turnId: "turn-1", item: { type: "tool_call", name: "SECRET_TOOL", status: "completed", output: "NEVER COPY OUTPUT" } },
@@ -35,6 +37,23 @@ const prepared = async (index, content) => {
       metadata: { session: id, entry: id, role: "developer", part: 1, parts: 1, sequence: 1, created_at: 100 } }] }));
 };
 const ack = async (content, _channel, { metadata }) => hex(JSON.stringify(metadata) + content);
+// Exercise the real persistence path with a timer that wakes one millisecond
+// before the required second. No production clock or test-only seam is added.
+const withEarlyTimer = async (operation) => {
+  const originalNow = Date.now, originalTimeout = globalThis.setTimeout;
+  let now = 1700000000500, early = true;
+  Date.now = () => now;
+  globalThis.setTimeout = (callback, delay, ...args) => {
+    if (delay > 0 && delay <= 1000) {
+      now += early ? delay - 1 : delay;
+      early = false;
+      return originalTimeout(callback, 0, ...args);
+    }
+    return originalTimeout(callback, delay, ...args);
+  };
+  try { return await operation(); }
+  finally { Date.now = originalNow; globalThis.setTimeout = originalTimeout; }
+};
 let recorder;
 try {
   await reset();
@@ -59,28 +78,31 @@ try {
   assert.match(scrub(publicHex, { BUZZ_PRIVATE_KEY: publicHex }), /omitted/);
   const hooks = new Map(); process.env.BUZZ_PASEO_RECORD_CHANNEL = channel; process.env.PASEO_HOME = root;
   const dispose = contribute({ addHook(name, handler) { hooks.set(name, handler); return () => {}; } });
-  const request = { agentId: "synthetic", provider: "claude" };
+  const request = { agentId: "synthetic", provider };
   assert.equal(hooks.get("agent.open.before")({ request }, context), request, "before-hook returns the request, not its envelope");
   assert.ok(hooks.has("agent.turn.before") && hooks.has("agent.turn.after"));
   await dispose(); delete process.env.BUZZ_PASEO_RECORD_CHANNEL;
 
   const sent = [];
-  recorder = createRecorder({ ...options, send: async (...args) => { sent.push({ content: args[0], metadata: structuredClone(args[2].metadata) }); return ack(...args); } });
-  await recorder.capture({ ...payload, agent: { ...payload.agent, provider: "codex" } }, context);
-  assert.equal((await active()).length, 0);
-  available = false; await recorder.capture(payload, context); await recorder.flush();
-  assert.equal((await active()).length, 1, "timeline failure retains intent");
-  available = true; await recorder.flush();
-  assert.deepEqual(sent.map((message) => message.content), ["Please ask @brokkr", "My first answer", "My second answer"]);
-  assert.deepEqual(sent.map((message) => message.metadata.role), ["developer", "assistant", "assistant"]);
-  assert.ok(sent.every((message) => !/SECRET_TOOL|NEVER COPY OUTPUT|OTHER TURN/.test(JSON.stringify(message))));
-  assert.equal(sent[0].metadata.root, undefined);
-  const rootId = await ack(sent[0].content, channel, { metadata: sent[0].metadata });
-  assert.ok(sent.slice(1).every((message) => message.metadata.root === rootId));
-  assert.ok(sent[0].metadata.created_at < sent[1].metadata.created_at && sent[1].metadata.created_at < sent[2].metadata.created_at);
-  await recorder.capture(payload, context); await recorder.flush();
-  assert.equal(sent.length, 3, "duplicate hook cannot duplicate accepted entries");
-  await recorder.close();
+  const rootId = await withEarlyTimer(async () => {
+    recorder = createRecorder({ ...options, send: async (...args) => { sent.push({ content: args[0], metadata: structuredClone(args[2].metadata) }); return ack(...args); } });
+    await recorder.capture({ ...payload, agent: { ...payload.agent, provider: "remote-buzz-agent" } }, context);
+    assert.equal((await active()).length, 0);
+    available = false; await recorder.capture(payload, context); await recorder.flush();
+    assert.equal((await active()).length, 1, "timeline failure retains intent");
+    available = true; await recorder.flush();
+    assert.deepEqual(sent.map((message) => message.content), ["Please ask @brokkr", "My first answer", "My second answer"]);
+    assert.deepEqual(sent.map((message) => message.metadata.role), ["developer", "assistant", "assistant"]);
+    assert.ok(sent.every((message) => !/SECRET_TOOL|NEVER COPY OUTPUT|OTHER TURN/.test(JSON.stringify(message))));
+    assert.equal(sent[0].metadata.root, undefined);
+    const rootId = await ack(sent[0].content, channel, { metadata: sent[0].metadata });
+    assert.ok(sent.slice(1).every((message) => message.metadata.root === rootId));
+    assert.ok(sent[0].metadata.created_at < sent[1].metadata.created_at && sent[1].metadata.created_at < sent[2].metadata.created_at);
+    await recorder.capture(payload, context); await recorder.flush();
+    assert.equal(sent.length, 3, "duplicate hook cannot duplicate accepted entries");
+    await recorder.close();
+    return rootId;
+  });
 
   // A new process continues the same thread, and long multilingual text
   // reassembles byte-for-byte rather than being truncated.
@@ -267,5 +289,5 @@ try {
     try { process.kill(-pids[0], "SIGKILL"); } catch (error) { if (error.code !== "ESRCH") throw error; }
     process.env.PATH = oldPath; delete process.env.PUBLISH_PID_FILE;
   }
-  console.log("PASS: full ordered transcript, no tools, role tags, flat root, UTF8 splitting, restart, stable retries, dead letters, admission and shutdown");
+  console.log(`PASS: ${provider} full ordered transcript, early timers, no tools, role tags, flat root, UTF8 splitting, restart, stable retries, dead letters, admission and shutdown`);
 } finally { await recorder?.close(); await rm(root, { recursive: true, force: true }); }

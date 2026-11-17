@@ -33,8 +33,6 @@ pub(super) fn daemon_env(
 ) -> Result<BTreeMap<String, String>, Failed> {
     let existing = prior.is_some();
     let mut env = prior.unwrap_or_default();
-    // Codex is disabled for the daemon; preserve identity while retiring its old token.
-    env.remove("CODEX_ACCESS_TOKEN");
     if env.keys().any(|key| {
         !PAIRING_FIELDS.iter().any(|(_, name)| name == key)
             && !MODEL_TOKENS.iter().any(|(_, name)| name == key)

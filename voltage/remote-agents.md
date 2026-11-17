@@ -122,7 +122,7 @@ sequenceDiagram
 | ChatGPT refresh token | Dedicated sign-in button | Manager-only Secrets Manager secret | Manager refresh broker |
 | Depot, Grafana, Linear, Argo CD tokens | Nobody: admins keep them in the vault | 1Password Buzz Agents Dev | The Sandbox, through `via` |
 | Paseo pairing: password, server ID, daemon keypair | Nobody: the manager generates it at enroll | Only the Secret `paseo-daemon-<id>` in `buzz-paseo` | Your Paseo daemon |
-| Claude subscription token, for the Paseo daemon | Enroll form (the same token as above) | Profile; copied to the Secret `paseo-daemon-<id>` | Your Paseo daemon's own agent (Claude only) |
+| Claude subscription token and Codex access token, for the Paseo daemon | Enroll form (the same tokens as above) | Profile; copied to the Secret `paseo-daemon-<id>` | Your native personal assistants in Paseo |
 | Paseo GitHub read token: fine-grained, selected repositories, Contents and Pull requests read-only | Enroll form, **Paseo GitHub read token** (optional) | Only the Secret `paseo-daemon-<id>`, never the profile | Your Paseo daemon, to read code |
 
 The app removes the dedicated ChatGPT login cache after enrollment or cancellation. Other enrollment credentials are held in memory only. The profile is encrypted in transit and at rest. Checkpoints never include the credential files the Sandbox writes. If a final checkpoint fails, for example because the secret scan found a token the agent wrote into the repository, the Sandbox stores an unscanned *quarantine* copy in your checkpoint prefix so the work is not lost; **Recover from checkpoint** restores it.
@@ -370,7 +370,7 @@ Entering a Codex access token replaces a stored OpenAI API key, and entering a C
 #### Pair a Paseo app
 
 Follow [Use a Paseo daemon](#use-a-paseo-daemon) for enrollment, pairing, gateway grants, and credential rotation.
-That section defines the core Claude-only daemon and its separate selected-repository Git token.
+That section defines the Claude and ChatGPT personal assistants and their separate read-only Git token.
 
 ### 5. Start a session
 
