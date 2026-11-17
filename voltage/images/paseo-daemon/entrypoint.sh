@@ -281,6 +281,12 @@ EOF
 # lowercase envFrom copies of the GitHub credential.
 [ "$assistant" = claude ] || unset CLAUDE_CODE_OAUTH_TOKEN
 unset CODEX_ACCESS_TOKEN github_read_token
+# Paseo repository discovery uses the same read-only credential as Git.
+if [ -n "${GITHUB_READ_TOKEN:-}" ]; then
+  export GH_TOKEN="$GITHUB_READ_TOKEN"
+else
+  unset GH_TOKEN
+fi
 # Block upstream terminal workers, including paired-client terminal requests.
 rm -rf "$PASEO_HOME/terminal-worker"
 ln -s /opt/paseo-buzz/no-terminal-worker "$PASEO_HOME/terminal-worker"

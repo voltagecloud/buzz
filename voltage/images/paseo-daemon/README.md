@@ -44,6 +44,9 @@ It must cover the same repository set the Buzz agents can read.
 Provision a separate token; never reuse the agents' existing write-capable token.
 Secret data `github_read_token` maps explicitly to `GITHUB_READ_TOKEN` through Terraform's `secretKeyRef`.
 The manager preserves this field; it never copies the sandbox profile's broader GitHub credential.
+The entrypoint also exports this read token as `GH_TOKEN` for Paseo repository discovery.
+Search requires an upstream Paseo release with token-based repository listing; the current 0.15.3 pin does not include it.
+The Git credential helper still requires a repository path.
 Configure `GITHUB_READ_TOKEN_REPOSITORIES` separately as a JSON array of repository names, such as `["your-org/private-repo"]`.
 This nonsecret list is a startup prefetch manifest: these repos get cloned and registered as projects.
 Everything else the token permits is still readable on demand; the manifest is not an access gate.
