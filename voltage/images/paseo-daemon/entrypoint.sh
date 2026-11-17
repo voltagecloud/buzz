@@ -182,9 +182,15 @@ if (codexToken) {
     enabled: true,
     label: "Personal assistant (ChatGPT)",
     env: { ...blankSecrets, CLAUDE_CODE_OAUTH_TOKEN: "", OPENAI_API_KEY: "", CODEX_API_KEY: "" },
-    // Network access and writes need approval outside the read-only sandbox.
-    // Image-owned requirements also deny credential reads and full-access mode.
-    options: { approval_policy: "on-request", sandbox_mode: "read-only", web_search: "disabled" },
+    // Review tool prompts without granting a shell escape from the sandbox.
+    options: {
+      approval_policy: { granular: {
+        sandbox_approval: false, rules: false, mcp_elicitations: true,
+        request_permissions: false, skill_approval: false,
+      } },
+      sandbox_mode: "read-only",
+      web_search: "disabled",
+    },
     paseoTools: { enabled: true, disabledTools },
   };
 }
@@ -217,7 +223,7 @@ const memory = owner
       `When the developer corrects you or states a lasting preference, save it with \`buzz mem set mem/<topic> - --owner ${owner}\` and the text on stdin.`,
       "Always pass memory text inline as a heredoc in that same command, so the developer's approval shows the exact text. Never pipe memory from a file, a checkout, a web page, or another command's output.",
       `Link a new entry from core: run \`buzz mem hash core --owner ${owner}\`, then \`buzz mem patch core --base-hash <hash> --owner ${owner}\` with a unified diff on stdin.`,
-      "The developer approves each write. Keep each fact in one entry, and update it instead of adding a duplicate.",
+      "Each write goes through review. Keep each fact in one entry, and update it instead of adding a duplicate.",
       "Never store credentials, tokens, or private keys in memory.",
       "Use relay memory for standing rules shared across native assistant providers. Hosted deployments also retain harness history on a persistent home.",
       `If core is missing, tell the developer and offer to import their rules; create it with \`buzz mem set core - --owner ${owner}\` and the text inline on stdin.`,

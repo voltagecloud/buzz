@@ -70,17 +70,36 @@ with subprocess.Popen(['codex', 'app-server'], stdin=subprocess.PIPE, stdout=sub
             'clientInfo': {'name': 'paseo', 'version': '0.15.3'}, 'capabilities': {'experimentalApi': True}})
         child.stdin.write(b'{"method":"initialized"}\n')
         child.stdin.flush()
-        policy = {'approval_policy': 'on-request', 'sandbox_mode': 'read-only', 'web_search': 'disabled'}
+        # Read the provider's real startup configuration, including its policy.
+        config = json.loads((Path(os.environ['PASEO_HOME']) / 'config.json').read_text())
+        policy = config['agents']['providers']['codex']['options']
+        approval = policy['approval_policy']['granular']
+        assert approval['sandbox_approval'] is False
+        assert approval['request_permissions'] is False
         started = call(2, 'thread/start', {'cwd': str(home / 'assistant'), 'config': policy})
         assert 'error' not in started, 'native read-only thread creation failed'
-        assert started['result']['approvalPolicy'] == 'on-request'
         assert started['result']['sandbox'] == {'type': 'readOnly', 'networkAccess': False}
         forbidden = call(3, 'thread/start', {'cwd': str(home / 'assistant'), 'config': {
             'approval_policy': 'never', 'sandbox_mode': 'danger-full-access'}})
         if 'error' not in forbidden:
             # Codex can clamp unsupported requests to the managed policy.
-            assert forbidden['result']['approvalPolicy'] == 'on-request'
+            assert forbidden['result']['approvalPolicy'] == started['result']['approvalPolicy']
             assert forbidden['result']['sandbox'] == {'type': 'readOnly', 'networkAccess': False}
+        reviewed = call(4, 'thread/start', {'cwd': str(home / 'assistant'), 'config': policy,
+                                            'approvalsReviewer': 'auto_review', 'ephemeral': True})
+        assert 'error' not in reviewed, 'native Auto-review thread creation failed'
+        assert reviewed['result']['approvalsReviewer'] == 'auto_review'
+        assert reviewed['result']['approvalPolicy'] == started['result']['approvalPolicy']
+        assert reviewed['result']['sandbox'] == started['result']['sandbox']
+        expanded = call(5, 'thread/start', {
+            'cwd': str(home / 'assistant'),
+            'config': {**policy, 'approval_policy': {'granular': {
+                **approval, 'sandbox_approval': True, 'request_permissions': True,
+            }}},
+            'approvalsReviewer': 'auto_review', 'ephemeral': True,
+        })
+        if 'error' not in expanded:
+            assert expanded['result']['approvalPolicy'] == started['result']['approvalPolicy']
     finally:
         os.killpg(child.pid, signal.SIGTERM)
         try:

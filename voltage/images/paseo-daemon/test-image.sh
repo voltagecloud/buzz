@@ -469,7 +469,9 @@ docker exec "$NAME" node -e '
   const config = JSON.parse(fs.readFileSync("/home/paseo/.paseo/config.json"));
   if (config.daemon.terminalProfiles || !config.agents.providers.codex.enabled) process.exit(1);
   const codex = config.agents.providers.codex;
-  if (codex.options.approval_policy !== "on-request" || codex.options.sandbox_mode !== "read-only") process.exit(1);
+  const approval = codex.options.approval_policy?.granular;
+  if (approval?.sandbox_approval !== false || approval?.request_permissions !== false ||
+      approval?.mcp_elicitations !== true || codex.options.sandbox_mode !== "read-only") process.exit(1);
   if (codex.env.CLAUDE_CODE_OAUTH_TOKEN !== "" || config.agents.providers.claude.env.CODEX_ACCESS_TOKEN !== "") process.exit(1);
   const allow = config.agents.providers.claude.options.settings.permissions.allow;
   if (allow.includes("Bash(buzz:*)") || allow.some((rule) => /workflows (create|update|trigger)/.test(rule))) process.exit(1);
