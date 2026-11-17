@@ -24,6 +24,7 @@ use tokio::sync::{Mutex, Semaphore};
 
 const MAX_BODY: usize = 1024 * 1024;
 const DEADLINE: Duration = Duration::from_secs(4);
+const BODY_DEADLINE: Duration = Duration::from_secs(1);
 const RATE: usize = 20;
 const AGE: u64 = 300;
 
@@ -130,22 +131,6 @@ async fn deliver(
     let Ok(_permit) = app.admission.try_acquire() else {
         return (StatusCode::TOO_MANY_REQUESTS, "ingestion busy; retry").into_response();
     };
-    {
-        let mut rates = app.rates.lock().await;
-        let bucket = &mut rates[source];
-        if bucket.start.elapsed() >= Duration::from_secs(1) {
-            bucket.start = Instant::now();
-            bucket.count = 0;
-        }
-        if bucket.count >= RATE {
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                "provider rate exceeded; retry",
-            )
-                .into_response();
-        }
-        bucket.count += 1;
-    }
     let result = tokio::time::timeout(DEADLINE, process(&app, source, secret, request)).await;
     match result {
         Ok(Ok(response)) => Json(response).into_response(),
@@ -158,10 +143,31 @@ async fn deliver(
     }
 }
 
+/// Charge one authenticated delivery to its provider's per-second budget.
+/// Unsigned requests never reach this, so they cannot exhaust the budget.
+async fn charge(app: &App, source: usize) -> Result<()> {
+    let mut rates = app.rates.lock().await;
+    let bucket = &mut rates[source];
+    if bucket.start.elapsed() >= Duration::from_secs(1) {
+        bucket.start = Instant::now();
+        bucket.count = 0;
+    }
+    if bucket.count >= RATE {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            "provider rate exceeded; retry",
+        ));
+    }
+    bucket.count += 1;
+    Ok(())
+}
+
 async fn process(app: &App, source: usize, secret: &str, request: Request) -> Result<Value> {
     let (parts, body) = request.into_parts();
-    let body = to_bytes(body, MAX_BODY)
+    // An unauthenticated sender holds an admission slot only for this read.
+    let body = tokio::time::timeout(BODY_DEADLINE, to_bytes(body, MAX_BODY))
         .await
+        .map_err(|_| (StatusCode::REQUEST_TIMEOUT, "body read deadline reached"))?
         .map_err(|_| (StatusCode::PAYLOAD_TOO_LARGE, "body exceeds 1 MiB"))?;
     let now = nostr::Timestamp::now().as_secs();
     let mut slack_delivery = None;
@@ -193,6 +199,7 @@ async fn process(app: &App, source: usize, secret: &str, request: Request) -> Re
             )?;
         }
     }
+    charge(app, source).await?;
     let payload: Value =
         serde_json::from_slice(&body).map_err(|_| (StatusCode::BAD_REQUEST, "invalid JSON"))?;
     if source == 1 {

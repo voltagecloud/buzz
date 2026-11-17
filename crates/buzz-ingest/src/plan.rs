@@ -77,8 +77,58 @@ async fn read(relay: &Relay, channel: Uuid, coordinate: &str) -> Result<Option<P
     Ok(Some(plan))
 }
 
+/// The current record at `coordinate` in any channel, verified as this
+/// publisher's own. Read errors propagate.
+async fn head(relay: &Relay, coordinate: &str) -> Result<Option<Event>> {
+    let records=relay.query(json!({"kinds":[KIND_INTEGRATION_RECORD],"authors":[relay.keys.public_key().to_hex()],"#d":[coordinate],"limit":2})).await?;
+    if records.len() > 1 {
+        bail!("ambiguous integration record");
+    }
+    let Some(record) = records.into_iter().next() else {
+        return Ok(None);
+    };
+    if record.verify().is_err()
+        || record.pubkey != relay.keys.public_key()
+        || record.kind.as_u16() != KIND_INTEGRATION_RECORD as u16
+        || value(&record, "d") != Some(coordinate)
+    {
+        bail!("invalid integration record");
+    }
+    Ok(Some(record))
+}
+
 async fn save(relay: &Relay, channel: Uuid, coordinate: &str, plan: &Plan) -> Result<()> {
     validate(relay, channel, plan)?;
+    let event = record(relay, channel, coordinate, plan, Timestamp::now())?;
+    if relay.submit(&event).await? {
+        return Ok(());
+    }
+    // The relay keeps the newest record per coordinate, breaks same-second
+    // ties by lowest ID, and reports a losing write as a duplicate. The plan
+    // or route being saved now must win, so supersede the current head.
+    let Some(current) = head(relay, coordinate).await? else {
+        bail!("integration record is missing after its write");
+    };
+    if current.id == event.id {
+        return Ok(());
+    }
+    let next = Timestamp::from(current.created_at.as_secs().saturating_add(1));
+    if !relay
+        .submit(&record(relay, channel, coordinate, plan, next)?)
+        .await?
+    {
+        bail!("integration record did not replace its head");
+    }
+    Ok(())
+}
+
+fn record(
+    relay: &Relay,
+    channel: Uuid,
+    coordinate: &str,
+    plan: &Plan,
+    created_at: Timestamp,
+) -> Result<Event> {
     let body = STANDARD.encode(serde_json::to_vec(plan)?);
     let mut tags = vec![
         tag("d", coordinate)?,
@@ -96,10 +146,12 @@ async fn save(relay: &Relay, channel: Uuid, coordinate: &str, plan: &Plan) -> Re
             })
             .cloned(),
     );
-    let event = EventBuilder::new(Kind::Custom(KIND_INTEGRATION_RECORD as u16), body)
-        .tags(tags)
-        .sign_with_keys(&relay.keys)?;
-    relay.submit(&event).await
+    Ok(
+        EventBuilder::new(Kind::Custom(KIND_INTEGRATION_RECORD as u16), body)
+            .tags(tags)
+            .custom_created_at(created_at)
+            .sign_with_keys(&relay.keys)?,
+    )
 }
 
 async fn exists(relay: &Relay, channel: Uuid, event: &Event) -> Result<bool> {
@@ -144,6 +196,20 @@ pub(crate) async fn publish(relay: &Relay, item: &Occurrence, body_hash: &str) -
         item.source, item.channel, item.thread
     )));
     let root_coord = format!("thread:{scope}");
+    let delivery = format!("delivery:{scope}:{}", item.delivery);
+    let fingerprint = format!("fingerprint:{scope}:{body_hash}");
+    let a = read(relay, item.channel, &delivery).await?;
+    // A retried batch replays its completed occurrences first. Finish each in
+    // two reads so later occurrences still fit within the delivery deadline.
+    // The reply is submitted only after its anchor and both plans exist.
+    if let Some(done) = &a {
+        if done.payload_sha256.as_deref() == Some(body_hash)
+            && exists(relay, item.channel, &done.event).await?
+        {
+            return Ok(());
+        }
+    }
+    let route = (item.source == "linear").then(|| format!("route:linear:{}", item.thread));
     let mut root = match read(relay, item.channel, &root_coord).await? {
         Some(plan) => plan,
         None => Plan {
@@ -167,20 +233,21 @@ pub(crate) async fn publish(relay: &Relay, item: &Occurrence, body_hash: &str) -
             freshen(relay, &mut root)?;
         }
         save(relay, item.channel, &root_coord, &root).await?;
-        if item.source == "linear" {
-            save(
-                relay,
-                item.channel,
-                &format!("route:linear:{}", item.thread),
-                &root,
-            )
-            .await?;
+        if let Some(route) = &route {
+            save(relay, item.channel, route, &root).await?;
         }
         relay.submit(&root.event).await?;
+    } else if let Some(route) = &route {
+        // Current explicit routing can return an issue to a channel whose
+        // anchor already exists. Unmapped comments must follow it there.
+        if read(relay, item.channel, route)
+            .await?
+            .map(|plan| plan.event.id)
+            != Some(root.event.id)
+        {
+            save(relay, item.channel, route, &root).await?;
+        }
     }
-    let delivery = format!("delivery:{scope}:{}", item.delivery);
-    let fingerprint = format!("fingerprint:{scope}:{body_hash}");
-    let a = read(relay, item.channel, &delivery).await?;
     let b = read(relay, item.channel, &fingerprint).await?;
     for plan in a.iter().chain(b.iter()) {
         if plan.payload_sha256.as_deref() != Some(body_hash) {
@@ -246,21 +313,10 @@ pub(crate) async fn linear_channel(
     issue: &str,
     config: &crate::config::Config,
 ) -> Result<Option<Uuid>> {
-    let coordinate = format!("route:linear:issue:{issue}");
-    let records=relay.query(json!({"kinds":[KIND_INTEGRATION_RECORD],"authors":[relay.keys.public_key().to_hex()],"#d":[coordinate],"limit":2})).await?;
-    if records.len() > 1 {
-        bail!("ambiguous Linear issue route");
-    }
-    let Some(record) = records.first() else {
+    let Some(record) = head(relay, &format!("route:linear:issue:{issue}")).await? else {
         return Ok(None);
     };
-    if record.verify().is_err()
-        || record.pubkey != relay.keys.public_key()
-        || value(record, "d") != Some(coordinate.as_str())
-    {
-        bail!("invalid Linear issue route");
-    }
-    let channel = value(record, "h")
+    let channel = value(&record, "h")
         .and_then(|id| Uuid::parse_str(id).ok())
         .ok_or_else(|| anyhow::anyhow!("invalid issue route channel"))?;
     let allowed = config

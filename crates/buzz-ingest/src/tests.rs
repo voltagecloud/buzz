@@ -33,6 +33,7 @@ struct Store {
     fail_event_lookup: Option<String>,
     lose_root_response: bool,
     submissions: Vec<Event>,
+    queries: usize,
 }
 type Shared = Arc<Mutex<Store>>;
 fn tag<'a>(event: &'a Event, name: &str) -> Option<&'a str> {
@@ -72,6 +73,7 @@ async fn query(
     let filter = &filters[0];
     assert_eq!(filter["consistency"], "strong");
     let mut store = store.lock().unwrap();
+    store.queries += 1;
     if store.fail_event_lookup.as_ref().is_some_and(|id| {
         filter
             .get("ids")
@@ -171,15 +173,40 @@ async fn submit(
             }
         }
     }
-    if let Some(d) = tag(&event, "d") {
-        store.heads.insert(d.to_owned(), event.id.to_hex());
+    let id = event.id.to_hex();
+    let duplicate = (
+        StatusCode::OK,
+        Json(json!({"event_id":id,"accepted":true,"message":"duplicate:"})),
+    );
+    if store.events.contains_key(&id) {
+        return duplicate;
     }
-    store.events.insert(event.id.to_hex(), event.clone());
+    if let Some(d) = tag(&event, "d") {
+        // Model the relay's addressable replacement: the newest record wins,
+        // a same-second tie keeps the lowest ID, and a losing write is
+        // acknowledged as a duplicate without being stored.
+        let keeps_head = store
+            .heads
+            .get(d)
+            .and_then(|head| store.events.get(head))
+            .is_some_and(|head| {
+                head.created_at > event.created_at
+                    || (head.created_at == event.created_at && head.id.to_hex() < id)
+            });
+        if keeps_head {
+            return duplicate;
+        }
+        store.heads.insert(d.to_owned(), id.clone());
+    }
+    store.events.insert(id.clone(), event.clone());
     if event.kind.as_u16() == 9 && tag(&event, "e").is_none() && store.lose_root_response {
         store.lose_root_response = false;
         return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({})));
     }
-    (StatusCode::OK, Json(json!(["OK", event.id, true, ""])))
+    (
+        StatusCode::OK,
+        Json(json!({"event_id":id,"accepted":true,"message":""})),
+    )
 }
 async fn external() -> (String, Shared, tokio::task::JoinHandle<()>) {
     let store = Shared::default();
@@ -539,6 +566,65 @@ async fn github_retries_preserve_plans_and_do_not_duplicate_threads_or_effects()
             .count(),
         1
     );
+    // A check linked to four PRs fans out to four threads. A retry replays
+    // completed occurrences first, so each must cost two reads and no writes;
+    // otherwise later threads never fit within the delivery deadline.
+    let mut fan_out = checks.clone();
+    fan_out["check_run"]["id"] = json!(89);
+    fan_out["check_run"]["pull_requests"] =
+        json!([{"number":7},{"number":8},{"number":9},{"number":10}]);
+    assert_eq!(
+        request(
+            &restarted,
+            "github",
+            &fan_out,
+            "check-fan-out",
+            false,
+            0,
+            "check_run"
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let replay = {
+        let store = store.lock().unwrap();
+        (store.queries, store.submissions.len())
+    };
+    assert_eq!(
+        request(
+            &restarted,
+            "github",
+            &fan_out,
+            "check-fan-out",
+            false,
+            0,
+            "check_run"
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    {
+        let store = store.lock().unwrap();
+        assert_eq!(
+            store.submissions.len(),
+            replay.1,
+            "a completed replay writes nothing"
+        );
+        assert!(
+            store.queries - replay.0 <= 8,
+            "four completed occurrences took {} relay reads",
+            store.queries - replay.0
+        );
+    }
+    assert_eq!(
+        messages(&store)
+            .iter()
+            .filter(|event| tag(event, "ext-id") == Some("89"))
+            .count(),
+        4
+    );
     let mut too_many = payload.clone();
     too_many["pull_request"]["labels"] = json!((0..17)
         .map(|i| json!({"name":format!("label-{i}")}))
@@ -707,6 +793,37 @@ async fn authenticated_ci_bursts_preserve_every_delivery() {
     let (url, store, server) = external().await;
     let keys = Keys::generate();
     let router = app(config(&url), &keys);
+    // Unsigned traffic must not use up the provider's per-second budget.
+    for _ in 0..25 {
+        assert_eq!(
+            request(
+                &router,
+                "github",
+                &github(),
+                "unsigned",
+                true,
+                0,
+                "pull_request"
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    // A stalled unsigned upload releases its admission slot after one second.
+    let stalled = axum::http::Request::builder()
+        .method("POST")
+        .uri("/ingest/github")
+        .body(axum::body::Body::from_stream(
+            futures_util::stream::pending::<Result<Bytes, std::io::Error>>(),
+        ))
+        .unwrap();
+    let started = std::time::Instant::now();
+    assert_eq!(
+        router.clone().oneshot(stalled).await.unwrap().status(),
+        StatusCode::REQUEST_TIMEOUT
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(3));
     let mut tasks = tokio::task::JoinSet::new();
     for index in 0..5 {
         let router = router.clone();
@@ -761,6 +878,83 @@ async fn linear_current_mapping_overrides_saved_issue_route() {
         .unwrap();
     assert_eq!(
         tag(&imported, "h"),
+        Some("0b6c1f0e-2a7d-4c1e-9f3a-5d2b8e4c7a11")
+    );
+    let channel_of = |body: &str| {
+        messages(&store)
+            .into_iter()
+            .find(|event| event.content.contains(body))
+            .and_then(|event| tag(&event, "h").map(str::to_owned))
+    };
+    let unmapped = |id: &str, body: &str| json!({"type":"Comment","action":"create","webhookTimestamp":now,"data":{"id":id,"issueId":"redirect-issue","body":body},"url":"https://linear.app/issue/ENG-9#comment"});
+    // The issue returns to its team channel, where its anchor already exists.
+    // Comments without routing metadata must follow it back.
+    let mut returned = issue.clone();
+    returned["action"] = json!("update");
+    returned["data"]["title"] = json!("Back with the team");
+    assert_eq!(
+        request(&router, "linear", &returned, "route-return", false, 0, "")
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        request(
+            &router,
+            "linear",
+            &unmapped("unmapped-1", "Follows the team"),
+            "route-unmapped-1",
+            false,
+            0,
+            ""
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(channel_of("Follows the team").as_deref(), Some(CHANNEL));
+    // The relay keeps a route head that is not older than this write, as in a
+    // same-second tie, and acknowledges the write as a duplicate. The current
+    // explicit route must still replace it.
+    {
+        let mut store = store.lock().unwrap();
+        let coordinate = "route:linear:issue:redirect-issue";
+        let current = store.events[&store.heads[coordinate]].clone();
+        let ahead = nostr::EventBuilder::new(current.kind, current.content.clone())
+            .tags(current.tags.clone().to_vec())
+            .custom_created_at(nostr::Timestamp::from(
+                nostr::Timestamp::now().as_secs() + 60,
+            ))
+            .sign_with_keys(&keys)
+            .unwrap();
+        store.heads.insert(coordinate.into(), ahead.id.to_hex());
+        store.events.insert(ahead.id.to_hex(), ahead);
+    }
+    let mut hooked = comment.clone();
+    hooked["data"]["id"] = json!("hooked-again");
+    hooked["data"]["body"] = json!("Hooked again");
+    assert_eq!(
+        request(&router, "linear", &hooked, "route-hooked", false, 0, "")
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        request(
+            &router,
+            "linear",
+            &unmapped("unmapped-2", "Follows the hook"),
+            "route-unmapped-2",
+            false,
+            0,
+            ""
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        channel_of("Follows the hook").as_deref(),
         Some("0b6c1f0e-2a7d-4c1e-9f3a-5d2b8e4c7a11")
     );
     server.abort();

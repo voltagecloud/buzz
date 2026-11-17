@@ -1829,6 +1829,7 @@ dependencies = [
  "base64 0.22.1",
  "buzz-core",
  "chrono",
+ "futures-util",
  "hex",
  "hmac 0.13.0",
  "nostr 0.44.7",

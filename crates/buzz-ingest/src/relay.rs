@@ -77,9 +77,13 @@ impl Relay {
         Ok(events)
     }
 
-    pub async fn submit(&self, event: &Event) -> Result<()> {
+    /// Submit one signed event. Returns `false` when the relay reports a
+    /// duplicate: it already held the event, or it kept a newer addressable
+    /// head for the same coordinate and did not store this write.
+    pub async fn submit(&self, event: &Event) -> Result<bool> {
         let response = self.post("/events", serde_json::to_value(event)?).await?;
-        // /events returns ["OK", id, accepted, message], as buzz-cli normalizes.
+        // /events returns {event_id, accepted, message}; NIP-01 relays use
+        // ["OK", id, accepted, message].
         let accepted = response
             .get("accepted")
             .and_then(Value::as_bool)
@@ -102,7 +106,17 @@ impl Relay {
         if accepted != Some(true) || acknowledged != Some(event.id.to_hex().as_str()) {
             bail!("relay did not accept event");
         }
-        Ok(())
+        let message = response
+            .get("message")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                response
+                    .as_array()
+                    .and_then(|parts| parts.get(3))
+                    .and_then(Value::as_str)
+            })
+            .unwrap_or_default();
+        Ok(!message.starts_with("duplicate:"))
     }
 
     pub async fn ready(&self) -> Result<()> {
