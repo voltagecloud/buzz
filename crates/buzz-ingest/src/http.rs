@@ -261,14 +261,20 @@ async fn process(app: &App, source: usize, secret: &str, request: Request) -> Re
                     .is_some_and(|id| app.config.linear_webhooks.contains_key(id));
             let route = if !explicit {
                 if let Some(issue) = normalize::linear_issue(&payload) {
-                    plan::linear_channel(&app.relay, issue, &app.config)
+                    match plan::linear_channel(&app.relay, issue, &app.config)
                         .await
                         .map_err(|_| {
                             (
                                 StatusCode::SERVICE_UNAVAILABLE,
                                 "issue route lookup failed; retry",
                             )
-                        })?
+                        })? {
+                        Some(plan::LinearRoute::Mapped(channel)) => Some(channel),
+                        Some(plan::LinearRoute::Unmapped) => {
+                            return Ok(json!({"accepted":true,"occurrences":0,"ignored":true}));
+                        }
+                        None => None,
+                    }
                 } else {
                     None
                 }
@@ -296,6 +302,25 @@ async fn process(app: &App, source: usize, secret: &str, request: Request) -> Re
     let identity = serde_json::to_vec(&identity_payload)
         .map_err(|_| (StatusCode::BAD_REQUEST, "invalid payload identity"))?;
     let body_hash = hex::encode(Sha256::digest(identity));
+    if source == 1
+        && payload.get("type").and_then(Value::as_str) == Some("Issue")
+        && items.is_empty()
+        && (payload.pointer("/data/teamId").is_some()
+            || payload.pointer("/data/projectId").is_some())
+    {
+        let issue = payload
+            .pointer("/data/id")
+            .and_then(Value::as_str)
+            .ok_or((StatusCode::BAD_REQUEST, "missing Linear issue identity"))?;
+        plan::invalidate_linear_route(&app.relay, issue, &body_hash)
+            .await
+            .map_err(|_| {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "issue route invalidation incomplete; retry delivery",
+                )
+            })?;
+    }
     // Each occurrence of one delivery is a distinct thread with its own
     // journal coordinates, so they publish concurrently. A retry then replays
     // finished targets alongside the remaining ones, not ahead of them.

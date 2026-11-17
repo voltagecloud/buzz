@@ -54,6 +54,10 @@ async fn read(relay: &Relay, channel: Uuid, coordinate: &str) -> Result<Option<P
     let Some(record) = records.first() else {
         return Ok(None);
     };
+    decode(relay, channel, coordinate, record).map(Some)
+}
+
+fn decode(relay: &Relay, channel: Uuid, coordinate: &str, record: &Event) -> Result<Plan> {
     if record.verify().is_err()
         || record.pubkey != relay.keys.public_key()
         || record.kind.as_u16() != KIND_INTEGRATION_RECORD as u16
@@ -74,7 +78,7 @@ async fn read(relay: &Relay, channel: Uuid, coordinate: &str) -> Result<Option<P
     if value(record, "message") != Some(plan.event.id.to_hex().as_str()) {
         bail!("integration record points to a different event");
     }
-    Ok(Some(plan))
+    Ok(plan)
 }
 
 /// The current record at `coordinate` in any channel, verified as this
@@ -290,15 +294,19 @@ pub(crate) async fn publish(relay: &Relay, item: &Occurrence, body_hash: &str) -
         }
     };
     let accepted = exists(relay, item.channel, &plan.event).await?;
-    if !accepted && stale(&plan) {
+    let anchor = root.event.id.to_hex();
+    if !accepted && (stale(&plan) || value(&plan.event, "e") != Some(anchor.as_str())) {
         // Only an authoritative successful empty lookup permits changing IDs.
-        freshen(relay, &mut plan)?;
+        if stale(&plan) {
+            freshen(relay, &mut plan)?;
+        }
         let mut tags = plan.event.tags.clone().to_vec();
         tags.retain(|tag| tag.as_slice().first().map(String::as_str) != Some("e"));
         tags.push(Tag::parse(["e", &root.event.id.to_hex(), "", "root"])?);
         tags.push(Tag::parse(["e", &root.event.id.to_hex(), "", "reply"])?);
         plan.event = EventBuilder::new(Kind::Custom(9), plan.event.content.clone())
             .tags(tags)
+            .custom_created_at(plan.event.created_at)
             .sign_with_keys(&relay.keys)?;
     }
     save(relay, item.channel, &delivery, &plan).await?;
@@ -309,19 +317,74 @@ pub(crate) async fn publish(relay: &Relay, item: &Occurrence, body_hash: &str) -
     Ok(())
 }
 
+/// A known issue can have an active channel or a durably retired route.
+pub(crate) enum LinearRoute {
+    Mapped(Uuid),
+    Unmapped,
+}
+
+fn record_channel(record: &Event) -> Result<Uuid> {
+    value(record, "h")
+        .and_then(|id| Uuid::parse_str(id).ok())
+        .ok_or_else(|| anyhow::anyhow!("invalid issue route channel"))
+}
+
+/// Retire a previously mapped issue before acknowledging an unmapped update.
+/// The ignored-payload journal prevents completed replays undoing a later route.
+pub(crate) async fn invalidate_linear_route(
+    relay: &Relay,
+    issue: &str,
+    body_hash: &str,
+) -> Result<()> {
+    if issue.is_empty() || issue.len() > 512 {
+        bail!("invalid Linear issue identity");
+    }
+    let coordinate = format!("route:linear:issue:{issue}");
+    let Some(record) = head(relay, &coordinate).await? else {
+        return Ok(());
+    };
+    let channel = record_channel(&record)?;
+    let mut plan = decode(relay, channel, &coordinate, &record)?;
+    let fingerprint = format!("unmapped:linear:{issue}:{body_hash}");
+    if let Some(previous) = head(relay, &fingerprint).await? {
+        let saved = decode(relay, record_channel(&previous)?, &fingerprint, &previous)?;
+        if saved.payload_sha256.as_deref() != Some(body_hash)
+            || value(&saved.event, "ext-route-state") != Some("unmapped")
+        {
+            bail!("invalid saved route invalidation");
+        }
+        return Ok(());
+    }
+    plan.payload_sha256 = Some(body_hash.to_owned());
+    if value(&plan.event, "ext-route-state") != Some("unmapped") {
+        let mut tags = plan.event.tags.to_vec();
+        tags.push(tag("ext-route-state", "unmapped")?);
+        plan.event = EventBuilder::new(Kind::Custom(9), plan.event.content.clone())
+            .tags(tags)
+            .sign_with_keys(&relay.keys)?;
+        // Store the retired route first; a failed later write remains a retry,
+        // while metadata-free comments already stop using the old channel.
+        save(relay, channel, &coordinate, &plan).await?;
+    }
+    save(relay, channel, &fingerprint, &plan).await
+}
+
 /// Resolve comments whose signed payload omits project/team information.
 /// Explicit webhook mappings take precedence over this previously stored route.
 pub(crate) async fn linear_channel(
     relay: &Relay,
     issue: &str,
     config: &crate::config::Config,
-) -> Result<Option<Uuid>> {
-    let Some(record) = head(relay, &format!("route:linear:issue:{issue}")).await? else {
+) -> Result<Option<LinearRoute>> {
+    let coordinate = format!("route:linear:issue:{issue}");
+    let Some(record) = head(relay, &coordinate).await? else {
         return Ok(None);
     };
-    let channel = value(&record, "h")
-        .and_then(|id| Uuid::parse_str(id).ok())
-        .ok_or_else(|| anyhow::anyhow!("invalid issue route channel"))?;
+    let channel = record_channel(&record)?;
+    let plan = decode(relay, channel, &coordinate, &record)?;
+    if value(&plan.event, "ext-route-state") == Some("unmapped") {
+        return Ok(Some(LinearRoute::Unmapped));
+    }
     let allowed = config
         .linear_projects
         .values()
@@ -331,5 +394,5 @@ pub(crate) async fn linear_channel(
     if !allowed {
         bail!("Linear issue route is outside configured channels");
     }
-    Ok(Some(channel))
+    Ok(Some(LinearRoute::Mapped(channel)))
 }

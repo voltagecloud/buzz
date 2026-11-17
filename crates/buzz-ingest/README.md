@@ -41,6 +41,9 @@ A previously saved issue route is used only when none of those mappings applies.
 Changing an explicit mapping redirects subsequent activity to the configured channel.
 Use `linear_webhooks` when comments on existing issues omit project/team fields.
 Previously mirrored issues also retain a relay-backed routing record.
+An issue update that explicitly leaves all mapped scopes retires its saved route before acknowledgement.
+Later comments without scope metadata are ignored until a new mapped occurrence restores the route.
+Partial issue updates without project/team fields do not retire a known route.
 No Linear API credential or data mutation is required.
 [Linear issue payloads carry label UUIDs](https://github.com/linear/linear-solutions/blob/main/integration_guides/scenarios/03-webhooks/README.md).
 Map names such as `agent` with `linear_labels`; unmapped labels retain their UUID.

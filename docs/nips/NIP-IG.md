@@ -41,6 +41,15 @@ It reads records and exact message IDs with `consistency: strong`. Lookup
 failure propagates; it never authorizes a new plan. An accepted event is reused.
 An unaccepted plan outside the relay timestamp window receives a fresh timestamp
 only after an authoritative empty ID lookup; its new plan precedes publication.
+If recovery replaces a missing anchor, every unaccepted reply is rebound and
+re-signed for that anchor, even when the reply's timestamp is still fresh.
+
+A Linear route retired after an explicit unmapped update carries
+`ext-route-state=unmapped` in its saved event. That control event is stored only
+in journal records; it is not published as a kind 9 message. Retirement precedes
+acknowledgement, and an ignored-payload fingerprint prevents a completed
+retirement replay from undoing a later mapped route. Metadata-free comments on
+a retired issue are ignored; a new mapped occurrence restores normal routing.
 
 Run one publisher replica with a Recreate deployment. The current implementation
 serializes requests in that process. It does not coordinate competing writers

@@ -30,6 +30,7 @@ struct Store {
     heads: BTreeMap<String, String>,
     fail_queries: usize,
     fail_reply: usize,
+    fail_record_prefix: Option<String>,
     fail_event_lookup: Option<String>,
     lose_root_response: bool,
     submissions: Vec<Event>,
@@ -136,6 +137,15 @@ async fn submit(
     event.verify().unwrap();
     let mut store = store.lock().unwrap();
     store.submissions.push(event.clone());
+    if event.kind.as_u16() == buzz_core::kind::KIND_INTEGRATION_RECORD as u16
+        && store
+            .fail_record_prefix
+            .as_ref()
+            .is_some_and(|prefix| tag(&event, "d").is_some_and(|d| d.starts_with(prefix)))
+    {
+        store.fail_record_prefix = None;
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({})));
+    }
     if event.kind.as_u16() == 9 {
         // Model relay timestamp admission. A stale unaccepted saved plan must
         // be refreshed, while an accepted old event is reused by exact lookup.
@@ -1174,6 +1184,287 @@ async fn linear_current_mapping_overrides_saved_issue_route() {
     assert_eq!(
         channel_of("Follows the overlapping redirect").as_deref(),
         Some("0b6c1f0e-2a7d-4c1e-9f3a-5d2b8e4c7a11")
+    );
+    server.abort();
+}
+
+/// An acknowledged scope removal cannot keep sending comments to the old
+/// channel, including after restart or a completed removal replay.
+#[tokio::test]
+async fn linear_unmapped_scope_retires_route_before_acknowledgement() {
+    let (url, store, server) = external().await;
+    let keys = Keys::generate();
+    let cfg = config(&url);
+    let first = app(cfg.clone(), &keys);
+    let now = nostr::Timestamp::now().as_secs() * 1000;
+    let issue = json!({"type":"Issue","action":"create","webhookTimestamp":now,"data":{"id":"retired-issue","identifier":"ENG-10","teamId":"TEAM","title":"Mapped issue"},"url":"https://linear.app/issue/ENG-10"});
+    assert_eq!(
+        request(&first, "linear", &issue, "mapped", false, 0, "")
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let comment = |id: &str, text: &str| json!({"type":"Comment","action":"create","webhookTimestamp":now,"data":{"id":id,"issueId":"retired-issue","body":text},"url":"https://linear.app/issue/ENG-10#comment"});
+    let partial = json!({"type":"Issue","action":"update","webhookTimestamp":now,"data":{"id":"retired-issue","title":"No scope information"},"url":"https://linear.app/issue/ENG-10"});
+    assert_eq!(
+        request(&first, "linear", &partial, "partial", false, 0, "")
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        request(
+            &first,
+            "linear",
+            &comment("partial-comment", "Still mapped"),
+            "partial-comment",
+            false,
+            0,
+            ""
+        )
+        .await
+        .1["occurrences"],
+        1
+    );
+    let published = messages(&store).len();
+    let mut removed = issue.clone();
+    removed["action"] = json!("update");
+    removed["data"]["teamId"] = json!("UNMAPPED");
+    store.lock().unwrap().fail_queries = 1;
+    assert_eq!(
+        request(&first, "linear", &removed, "lookup-fails", false, 0, "")
+            .await
+            .0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    store.lock().unwrap().fail_record_prefix = Some("route:linear:issue:".into());
+    assert_eq!(
+        request(&first, "linear", &removed, "retirement-fails", false, 0, "")
+            .await
+            .0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    // A later journal failure still leaves the retired route durable. The
+    // failed delivery is retried instead of reporting an authoritative success.
+    store.lock().unwrap().fail_record_prefix = Some("unmapped:linear:".into());
+    assert_eq!(
+        request(
+            &first,
+            "linear",
+            &removed,
+            "fingerprint-fails",
+            false,
+            0,
+            ""
+        )
+        .await
+        .0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    let restarted = app(cfg, &keys);
+    let response = request(
+        &restarted,
+        "linear",
+        &comment("hidden", "Must not reach the old channel"),
+        "hidden",
+        false,
+        0,
+        "",
+    )
+    .await;
+    assert_eq!(response.0, StatusCode::OK);
+    assert_eq!(response.1["ignored"], true);
+    assert_eq!(messages(&store).len(), published);
+    assert_eq!(
+        request(&restarted, "linear", &removed, "retired", false, 0, "")
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(messages(&store).len(), published);
+    let mut returned = issue.clone();
+    returned["action"] = json!("update");
+    returned["data"]["title"] = json!("Returned to the mapped team");
+    assert_eq!(
+        request(&restarted, "linear", &returned, "returned", false, 0, "")
+            .await
+            .0,
+        StatusCode::OK
+    );
+    // A completed unmapped update replay must not retire the restored route.
+    assert_eq!(
+        request(
+            &restarted,
+            "linear",
+            &removed,
+            "old-removal-replay",
+            false,
+            0,
+            ""
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let response = request(
+        &restarted,
+        "linear",
+        &comment("visible", "Back in the mapped channel"),
+        "visible",
+        false,
+        0,
+        "",
+    )
+    .await;
+    assert_eq!(response.0, StatusCode::OK);
+    assert_eq!(response.1["occurrences"], 1);
+    let visible = messages(&store)
+        .into_iter()
+        .find(|e| e.content.contains("Back in the mapped channel"))
+        .unwrap();
+    assert_eq!(tag(&visible, "h"), Some(CHANNEL));
+    server.abort();
+}
+
+/// Recovery can replace an old missing root while its unsent reply is still
+/// inside the timestamp window. Both NIP-10 references must follow the new root.
+#[tokio::test]
+async fn github_recovery_rebinds_a_fresh_reply_to_its_recreated_anchor() {
+    let (url, store, server) = external().await;
+    let keys = Keys::generate();
+    let router = app(config(&url), &keys);
+    let payload = github();
+    store.lock().unwrap().fail_reply = 1;
+    assert_eq!(
+        request(
+            &router,
+            "github",
+            &payload,
+            "fresh-reply",
+            false,
+            0,
+            "pull_request"
+        )
+        .await
+        .0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    let root = messages(&store)
+        .into_iter()
+        .find(|e| tag(e, "e").is_none())
+        .unwrap();
+    let aged = nostr::EventBuilder::new(root.kind, root.content.clone())
+        .tags(root.tags.to_vec())
+        .custom_created_at(nostr::Timestamp::from(
+            nostr::Timestamp::now().as_secs() - 1000,
+        ))
+        .sign_with_keys(&keys)
+        .unwrap();
+    let fresh_time;
+    {
+        let mut locked = store.lock().unwrap();
+        locked.events.remove(&root.id.to_hex());
+        let records: Vec<_> = locked
+            .heads
+            .values()
+            .map(|id| locked.events[id].clone())
+            .collect();
+        fresh_time = records
+            .iter()
+            .find_map(|record| {
+                let plan: Value =
+                    serde_json::from_slice(&STANDARD.decode(&record.content).unwrap()).unwrap();
+                let saved: Event = serde_json::from_value(plan["event"].clone()).unwrap();
+                tag(&saved, "e").map(|_| saved.created_at)
+            })
+            .unwrap();
+        assert!(
+            nostr::Timestamp::now()
+                .as_secs()
+                .abs_diff(fresh_time.as_secs())
+                < 10
+        );
+        for record in records {
+            let mut plan: Value =
+                serde_json::from_slice(&STANDARD.decode(&record.content).unwrap()).unwrap();
+            let saved: Event = serde_json::from_value(plan["event"].clone()).unwrap();
+            let replacement = if tag(&saved, "e").is_none() {
+                aged.clone()
+            } else {
+                let mut tags = saved.tags.to_vec();
+                tags.retain(|tag| tag.as_slice()[0] != "e");
+                tags.push(nostr::Tag::parse(["e", &aged.id.to_hex(), "", "root"]).unwrap());
+                tags.push(nostr::Tag::parse(["e", &aged.id.to_hex(), "", "reply"]).unwrap());
+                nostr::EventBuilder::new(saved.kind, saved.content)
+                    .tags(tags)
+                    .custom_created_at(saved.created_at)
+                    .sign_with_keys(&keys)
+                    .unwrap()
+            };
+            plan["event"] = serde_json::to_value(&replacement).unwrap();
+            let mut tags = record.tags.to_vec();
+            tags.retain(|tag| tag.as_slice()[0] != "message");
+            tags.push(nostr::Tag::parse(["message", &replacement.id.to_hex()]).unwrap());
+            let rewritten = nostr::EventBuilder::new(
+                record.kind,
+                STANDARD.encode(serde_json::to_vec(&plan).unwrap()),
+            )
+            .tags(tags)
+            .custom_created_at(record.created_at)
+            .sign_with_keys(&keys)
+            .unwrap();
+            locked
+                .heads
+                .insert(tag(&rewritten, "d").unwrap().into(), rewritten.id.to_hex());
+            locked.events.insert(rewritten.id.to_hex(), rewritten);
+        }
+    }
+    assert_eq!(
+        request(
+            &router,
+            "github",
+            &payload,
+            "fresh-reply",
+            false,
+            0,
+            "pull_request"
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let published = messages(&store);
+    assert_eq!(published.len(), 2);
+    let anchor = published.iter().find(|e| tag(e, "e").is_none()).unwrap();
+    let reply = published.iter().find(|e| tag(e, "e").is_some()).unwrap();
+    let (root_id, parent) = buzz_core::nip10::parse_thread_markers(&reply.tags)
+        .resolve()
+        .unwrap();
+    assert_eq!(root_id, anchor.id.to_hex());
+    assert_eq!(parent, root_id);
+    assert_ne!(root_id, aged.id.to_hex());
+    assert_eq!(
+        reply.created_at, fresh_time,
+        "fresh replies keep their frozen timestamp"
+    );
+    assert_eq!(
+        request(
+            &router,
+            "github",
+            &payload,
+            "new-header",
+            false,
+            0,
+            "pull_request"
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        messages(&store).len(),
+        2,
+        "recovery replay duplicated an accepted message"
     );
     server.abort();
 }
