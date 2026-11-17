@@ -235,13 +235,37 @@ async fn replace_parameterized_event_in_transaction_impl(
         }
     }
 
-    let dominated = existing
-        .iter()
-        .chain(watermark.iter())
-        .any(|(accepted_ts, accepted_id)| {
-            created_at < *accepted_ts
-                || (created_at == *accepted_ts && incoming_id >= accepted_id.as_slice())
-        });
+    // A NIP-IG route record orders by the source version it reflects, not by
+    // `created_at`. A write delayed past a newer version, even one sent before
+    // a publisher restart, therefore cannot replace it. An unreadable route
+    // compares lowest, and an equal route keeps the current head.
+    let route_ordered = kind_i32 == buzz_core::kind::KIND_INTEGRATION_RECORD as i32
+        && buzz_core::integration::is_route_coordinate(d_tag);
+    let dominated = if route_ordered && existing.is_some() {
+        let tags: Option<serde_json::Value> = sqlx::query_scalar(
+            "SELECT tags FROM events \
+             WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL \
+             ORDER BY created_at DESC, id ASC LIMIT 1",
+        )
+        .bind(community_id.as_uuid())
+        .bind(kind_i32)
+        .bind(pubkey_bytes.as_slice())
+        .bind(d_tag)
+        .fetch_optional(tx.conn())
+        .await?;
+        let saved = tags
+            .and_then(|tags| serde_json::from_value::<nostr::Tags>(tags).ok())
+            .and_then(|tags| buzz_core::integration::route(&tags).ok());
+        buzz_core::integration::route(&event.tags).ok() <= saved
+    } else {
+        existing
+            .iter()
+            .chain(watermark.iter())
+            .any(|(accepted_ts, accepted_id)| {
+                created_at < *accepted_ts
+                    || (created_at == *accepted_ts && incoming_id >= accepted_id.as_slice())
+            })
+    };
     if dominated {
         return Ok(ParameterizedReplaceResult::new(
             event,
@@ -1763,6 +1787,108 @@ mod postgres_tests {
                 .1,
             "an older event must not replace the live head",
         );
+    }
+
+    /// A NIP-IG route record replaces its head only with a greater route,
+    /// whatever its write time. A route write that lands after a newer one,
+    /// as after a publisher restart, therefore changes nothing. Other
+    /// coordinates, and other kinds, keep write-time ordering.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn route_records_replace_by_source_version_not_write_time() {
+        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+        let db = setup_db().await;
+        let community = CommunityId::from_uuid(make_community(&db.pool).await);
+        let keys = Keys::generate();
+        let now = Timestamp::now().as_secs();
+        let (low, high) = (
+            "00000000-0000-4000-8000-000000000001",
+            "00000000-0000-4000-8000-000000000002",
+        );
+        let record = |kind: u32, d: &str, version: Option<&str>, route: Option<&str>, at: u64| {
+            let mut tags = vec![Tag::parse(["d", d]).expect("d tag")];
+            tags.extend(version.map(|v| Tag::parse(["updated", v]).expect("version tag")));
+            tags.extend(route.map(|r| Tag::parse(["route", r]).expect("route tag")));
+            EventBuilder::new(Kind::Custom(kind as u16), "")
+                .tags(tags)
+                .custom_created_at(Timestamp::from(at))
+                .sign_with_keys(&keys)
+                .expect("sign record")
+        };
+        let live = |kind: u32, d: String| {
+            let pool = db.pool.clone();
+            let pubkey = keys.public_key().to_bytes();
+            async move {
+                sqlx::query_scalar::<_, Vec<u8>>(
+                    "SELECT id FROM events WHERE community_id=$1 AND kind=$2 AND pubkey=$3 \
+                     AND d_tag=$4 AND deleted_at IS NULL",
+                )
+                .bind(community.as_uuid())
+                .bind(kind as i32)
+                .bind(pubkey)
+                .bind(d)
+                .fetch_all(&pool)
+                .await
+                .expect("load live head")
+            }
+        };
+        let integration = buzz_core::kind::KIND_INTEGRATION_RECORD;
+        let route = format!("route:linear:{}", "ab".repeat(32));
+        // (version, channel, write time, stored) in submission order.
+        let steps: &[(Option<&str>, Option<&str>, u64, bool)] = &[
+            (Some("5"), Some(low), now, true),
+            // An older version written later, as a late write after a restart.
+            (Some("4"), Some(high), now + 60, false),
+            // For one version, a clear is below a channel.
+            (Some("5"), None, now + 60, false),
+            // An equal route keeps the current head.
+            (Some("5"), Some(low), now + 61, false),
+            // For one version, a greater channel ID outranks, even written earlier.
+            (Some("5"), Some(high), now - 60, true),
+            // A record without a version cannot replace a versioned one.
+            (None, Some(low), now + 120, false),
+            // A newer clear replaces the route, even written earlier.
+            (Some("6"), None, now - 120, true),
+        ];
+        let mut head = None;
+        for (index, (version, channel, at, stored)) in steps.iter().enumerate() {
+            let event = record(integration, &route, *version, *channel, *at);
+            let (_, inserted) = db
+                .replace_parameterized_event(community, &event, &route, None)
+                .await
+                .expect("replace route record");
+            assert_eq!(inserted, *stored, "route step {index}");
+            if inserted {
+                head = Some(event.id.as_bytes().to_vec());
+            }
+        }
+        assert_eq!(
+            live(integration, route).await,
+            vec![head.expect("route head")]
+        );
+
+        // Earlier releases' route plans, and other kinds with a route-shaped
+        // `d`, keep write-time ordering.
+        for (kind, d) in [
+            (integration, "route:linear:issue:ENG-1".to_owned()),
+            (
+                buzz_core::kind::KIND_PROJECT,
+                format!("route:linear:{}", "cd".repeat(32)),
+            ),
+        ] {
+            let first = record(kind, &d, Some("9"), Some(high), now);
+            let later = record(kind, &d, Some("1"), Some(low), now + 1);
+            let earlier = record(kind, &d, Some("99"), Some(high), now - 1);
+            for (event, stored) in [(&first, true), (&later, true), (&earlier, false)] {
+                let (_, inserted) = db
+                    .replace_parameterized_event(community, event, &d, None)
+                    .await
+                    .expect("replace write-time record");
+                assert_eq!(inserted, stored, "{d}");
+            }
+            assert_eq!(live(kind, d).await, vec![later.id.as_bytes().to_vec()]);
+        }
     }
 
     #[tokio::test]

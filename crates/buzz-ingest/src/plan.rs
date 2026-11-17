@@ -1,9 +1,9 @@
 //! Relay-backed write-ahead plans. Records are committed before readable messages.
 
-use crate::{normalize::Occurrence, relay::Relay};
+use crate::{config::Config, normalize::Occurrence, relay::Relay};
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
-use buzz_core::kind::KIND_INTEGRATION_RECORD;
+use buzz_core::{integration, kind::KIND_INTEGRATION_RECORD};
 use nostr::{Event, EventBuilder, Kind, Tag, Timestamp};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -219,10 +219,6 @@ pub(crate) async fn publish(relay: &Relay, item: &Occurrence, body_hash: &str) -
             bail!("delivery identity conflicts with saved payload");
         }
     }
-    // This payload reconciled the issue route before its fingerprint plan was
-    // saved. A replay under a new delivery ID must not undo a later redirect.
-    let route =
-        (item.source == "linear" && b.is_none()).then(|| format!("route:linear:{}", item.thread));
     let mut root = match read(relay, item.channel, &root_coord).await? {
         Some(plan) => plan,
         None => Plan {
@@ -240,26 +236,12 @@ pub(crate) async fn publish(relay: &Relay, item: &Occurrence, body_hash: &str) -
             .sign_with_keys(&relay.keys)?,
         },
     };
-    let root_exists = exists(relay, item.channel, &root.event).await?;
-    if !root_exists {
+    if !exists(relay, item.channel, &root.event).await? {
         if stale(&root) {
             freshen(relay, &mut root)?;
         }
         save(relay, item.channel, &root_coord, &root).await?;
-        if let Some(route) = &route {
-            save(relay, item.channel, route, &root).await?;
-        }
         relay.submit(&root.event).await?;
-    } else if let Some(route) = &route {
-        // Current explicit routing can return an issue to a channel whose
-        // anchor already exists. Unmapped comments must follow it there.
-        if read(relay, item.channel, route)
-            .await?
-            .map(|plan| plan.event.id)
-            != Some(root.event.id)
-        {
-            save(relay, item.channel, route, &root).await?;
-        }
     }
     let mut plan = match (a, b) {
         (Some(a), Some(b)) if a.event.id != b.event.id => {
@@ -317,81 +299,175 @@ pub(crate) async fn publish(relay: &Relay, item: &Occurrence, body_hash: &str) -
     Ok(())
 }
 
-/// A known issue can have an active channel or a durably retired route.
+/// The saved route of a known issue: a channel, or cleared after the issue
+/// left every mapped scope.
 pub(crate) enum LinearRoute {
     Mapped(Uuid),
     Unmapped,
 }
 
-fn record_channel(record: &Event) -> Result<Uuid> {
-    value(record, "h")
-        .and_then(|id| Uuid::parse_str(id).ok())
-        .ok_or_else(|| anyhow::anyhow!("invalid issue route channel"))
+/// The routing decision of one Linear issue version: the channel for later
+/// comments without routing metadata, or none after the issue left every
+/// mapped scope. Its version is the payload's signed `updatedAt`.
+pub(crate) use buzz_core::integration::Route;
+
+fn route_coordinate(issue: &str) -> String {
+    format!("route:linear:{}", hex::encode(Sha256::digest(issue)))
 }
 
-/// Retire a previously mapped issue before acknowledging an unmapped update.
-/// The ignored-payload journal prevents completed replays undoing a later route.
-pub(crate) async fn invalidate_linear_route(
-    relay: &Relay,
-    issue: &str,
-    body_hash: &str,
-) -> Result<()> {
-    if issue.is_empty() || issue.len() > 512 {
-        bail!("invalid Linear issue identity");
-    }
-    let coordinate = format!("route:linear:issue:{issue}");
-    let Some(record) = head(relay, &coordinate).await? else {
-        return Ok(());
-    };
-    let channel = record_channel(&record)?;
-    let mut plan = decode(relay, channel, &coordinate, &record)?;
-    let fingerprint = format!("unmapped:linear:{issue}:{body_hash}");
-    if let Some(previous) = head(relay, &fingerprint).await? {
-        let saved = decode(relay, record_channel(&previous)?, &fingerprint, &previous)?;
-        if saved.payload_sha256.as_deref() != Some(body_hash)
-            || value(&saved.event, "ext-route-state") != Some("unmapped")
-        {
-            bail!("invalid saved route invalidation");
-        }
-        return Ok(());
-    }
-    plan.payload_sha256 = Some(body_hash.to_owned());
-    if value(&plan.event, "ext-route-state") != Some("unmapped") {
-        let mut tags = plan.event.tags.to_vec();
-        tags.push(tag("ext-route-state", "unmapped")?);
-        plan.event = EventBuilder::new(Kind::Custom(9), plan.event.content.clone())
-            .tags(tags)
-            .sign_with_keys(&relay.keys)?;
-        // Store the retired route first; a failed later write remains a retry,
-        // while metadata-free comments already stop using the old channel.
-        save(relay, channel, &coordinate, &plan).await?;
-    }
-    save(relay, channel, &fingerprint, &plan).await
-}
-
-/// Resolve comments whose signed payload omits project/team information.
-/// Explicit webhook mappings take precedence over this previously stored route.
-pub(crate) async fn linear_channel(
-    relay: &Relay,
-    issue: &str,
-    config: &crate::config::Config,
-) -> Result<Option<LinearRoute>> {
-    let coordinate = format!("route:linear:issue:{issue}");
-    let Some(record) = head(relay, &coordinate).await? else {
-        return Ok(None);
-    };
-    let channel = record_channel(&record)?;
-    let plan = decode(relay, channel, &coordinate, &record)?;
-    if value(&plan.event, "ext-route-state") == Some("unmapped") {
-        return Ok(Some(LinearRoute::Unmapped));
-    }
-    let allowed = config
+fn linear_channels(config: &Config) -> impl Iterator<Item = Uuid> + '_ {
+    config
         .linear_projects
         .values()
         .chain(config.linear_teams.values())
         .chain(config.linear_webhooks.values())
-        .any(|known| *known == channel);
-    if !allowed {
+        .copied()
+}
+
+/// Marks the route channel. A read that names the route channel returns the
+/// marker exactly when it can return the channel's routes, so a route missing
+/// from a read with the marker is missing, not hidden.
+const ROUTE_MARKER: &str = "route-channel:linear";
+
+/// The issue's saved route in the route channel, and whether the same read
+/// returned the route channel marker. Read errors propagate.
+async fn route_head(relay: &Relay, routes: Uuid, issue: &str) -> Result<(Option<Route>, bool)> {
+    let coordinate = route_coordinate(issue);
+    let records = relay
+        .query(json!({"kinds":[KIND_INTEGRATION_RECORD],"authors":[relay.keys.public_key().to_hex()],"#d":[coordinate, ROUTE_MARKER],"#h":[routes.to_string()],"limit":2}))
+        .await?;
+    let (mut route, mut marked) = (None, false);
+    for record in &records {
+        if record.verify().is_err()
+            || record.pubkey != relay.keys.public_key()
+            || record.kind.as_u16() != KIND_INTEGRATION_RECORD as u16
+        {
+            bail!("invalid integration record");
+        }
+        match value(record, "d") {
+            Some(d) if d == coordinate && route.is_none() => {
+                route = Some(integration::route(&record.tags).map_err(anyhow::Error::msg)?);
+            }
+            Some(ROUTE_MARKER) if !marked => marked = true,
+            _ => bail!("ambiguous integration record"),
+        }
+    }
+    Ok((route, marked))
+}
+
+/// The issue's saved route, or `None` when it has none. A route channel that
+/// the publisher cannot read can hide a saved route, so the route channel
+/// marker must be in the same read; it is written once when missing.
+async fn known_route(relay: &Relay, routes: Uuid, issue: &str) -> Result<Option<Route>> {
+    for attempt in 0..2 {
+        match route_head(relay, routes, issue).await? {
+            (Some(route), _) => return Ok(Some(route)),
+            (None, true) => return Ok(None),
+            (None, false) if attempt == 0 => {
+                // The relay stores this only from a writer of the channel.
+                let marker = EventBuilder::new(Kind::Custom(KIND_INTEGRATION_RECORD as u16), "")
+                    .tags([tag("d", ROUTE_MARKER)?, tag("h", &routes.to_string())?])
+                    .sign_with_keys(&relay.keys)?;
+                relay.submit(&marker).await?;
+            }
+            (None, false) => {}
+        }
+    }
+    bail!("Linear route channel is unreadable")
+}
+
+/// Save `next` as the route of `issue` unless the saved route is greater.
+/// Linear can deliver and retry issue versions in any order. Comparing the
+/// signed versions, not write times, lets every order converge on the newest
+/// version's decision. An older retry or replay therefore cannot restore a
+/// cleared route or clear a restored one.
+///
+/// A clear is saved even without a previous route, so a late older mapped
+/// version cannot create one. The first versioned route also replaces a route
+/// saved by a release before version ordering. Records live in the configured
+/// route channel, which no mapped channel membership affects.
+pub(crate) async fn route_linear_issue(
+    relay: &Relay,
+    config: &Config,
+    issue: &str,
+    next: Route,
+) -> Result<()> {
+    let Some(routes) = config.linear_route_channel else {
+        // Without a Linear mapping no route can be saved or read.
+        return Ok(());
+    };
+    if route_head(relay, routes, issue)
+        .await?
+        .0
+        .is_some_and(|saved| saved >= next)
+    {
+        return Ok(());
+    }
+    let mut tags = vec![
+        tag("d", &route_coordinate(issue))?,
+        tag("h", &routes.to_string())?,
+        tag(integration::TAG_ROUTE_VERSION, &next.version.to_string())?,
+    ];
+    if let Some(channel) = next.channel {
+        tags.push(tag(integration::TAG_ROUTE, &channel.to_string())?);
+    }
+    let record = EventBuilder::new(Kind::Custom(KIND_INTEGRATION_RECORD as u16), "")
+        .tags(tags)
+        .sign_with_keys(&relay.keys)?;
+    // The relay keeps the greatest route under its coordinate lock and
+    // reports any other write as a duplicate. An earlier write whose outcome
+    // is unknown, even from before a restart, can therefore land late without
+    // replacing a newer route.
+    if relay.submit(&record).await? {
+        return Ok(());
+    }
+    // Confirm that the saved route is not older. A relay without route
+    // ordering, or an unreadable route channel, fails here for retry.
+    match route_head(relay, routes, issue).await?.0 {
+        Some(saved) if saved >= next => Ok(()),
+        _ => bail!("issue route did not reach its version"),
+    }
+}
+
+/// The route that releases before version ordering saved for `issue`: its
+/// channel, or `None` after the issue was retired. These records carry no
+/// issue version, so they apply only until the issue has a versioned route.
+async fn released_route(relay: &Relay, issue: &str) -> Result<Option<Option<Uuid>>> {
+    let coordinate = format!("route:linear:issue:{issue}");
+    let Some(record) = head(relay, &coordinate).await? else {
+        return Ok(None);
+    };
+    let channel = value(&record, "h")
+        .and_then(|id| Uuid::parse_str(id).ok())
+        .context("invalid released issue route channel")?;
+    let plan = decode(relay, channel, &coordinate, &record)?;
+    let retired = value(&plan.event, "ext-route-state") == Some("unmapped");
+    Ok(Some((!retired).then_some(channel)))
+}
+
+/// Resolve comments whose signed payload omits project/team information.
+/// Explicit webhook mappings take precedence over this saved route.
+pub(crate) async fn linear_channel(
+    relay: &Relay,
+    issue: &str,
+    config: &Config,
+) -> Result<Option<LinearRoute>> {
+    let Some(routes) = config.linear_route_channel else {
+        return Ok(None);
+    };
+    // A versioned route outranks a released one, whichever was written later,
+    // so a released record cannot undo an ordered decision.
+    let channel = match known_route(relay, routes, issue).await? {
+        Some(route) => route.channel,
+        None => match released_route(relay, issue).await? {
+            Some(channel) => channel,
+            None => return Ok(None),
+        },
+    };
+    let Some(channel) = channel else {
+        return Ok(Some(LinearRoute::Unmapped));
+    };
+    if !linear_channels(config).any(|known| known == channel) {
         bail!("Linear issue route is outside configured channels");
     }
     Ok(Some(LinearRoute::Mapped(channel)))

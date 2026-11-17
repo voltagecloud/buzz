@@ -30,6 +30,7 @@ Set `BUZZ_INGEST_CONFIG` to this JSON file:
   "linear_projects": {"<project UUID>": "<channel UUID>"},
   "linear_webhooks": {"<webhook UUID>": "<channel UUID>"},
   "linear_labels": {"<label UUID>": "agent"},
+  "linear_route_channel": "<publisher-only channel UUID>",
   "slack_channels": {"<Slack team ID>/<public channel ID>": "<channel UUID>"},
   "slack_workspace_url": "https://voltagecloud.slack.com"
 }
@@ -37,13 +38,31 @@ Set `BUZZ_INGEST_CONFIG` to this JSON file:
 
 Every mapping is optional; configure between one and 256 total entries.
 Linear project mappings precede team mappings, then signed `webhookId` mappings.
-A previously saved issue route is used only when none of those mappings applies.
+A saved issue route is used only when none of those mappings applies.
 Changing an explicit mapping redirects subsequent activity to the configured channel.
 Use `linear_webhooks` when comments on existing issues omit project/team fields.
-Previously mirrored issues also retain a relay-backed routing record.
-An issue update that explicitly leaves all mapped scopes retires its saved route before acknowledgement.
-Later comments without scope metadata are ignored until a new mapped occurrence restores the route.
-Partial issue updates without project/team fields do not retire a known route.
+Mirrored issues also keep a relay-backed route for such comments. Each Issue
+payload with a mapping, team, or project saves the decision of its version:
+its mapped channel, or a cleared route after the issue leaves every mapped
+scope. The newest version by Linear's signed `updatedAt` wins, whatever the
+delivery order, so a delayed or retried older payload cannot change the route.
+The decision is saved before acknowledgement, even for an issue that was never
+mapped. Comments never change a route. Comments without scope metadata on a
+cleared issue are acknowledged and ignored. A partial Issue update without
+project or team fields and without a matching signed `webhookId` changes no
+route. Any other Issue payload without a valid `updatedAt` is refused.
+The relay keeps the greatest route for each issue, so a route write that lands
+late, also after a publisher restart, cannot replace a newer one.
+Routes are saved in `linear_route_channel`, a private channel whose only member
+is the publisher. It is required with any Linear mapping and must not be a
+mapped channel, so a removed membership in a mapped channel hides no route.
+Without the route channel membership, route writes and comments that need a
+route return 503 for retry. Do not change the route channel; NIP-IG describes
+what a change does.
+Routes saved by releases before version ordering carry no issue version. Such
+a route still applies until the issue's first versioned route replaces it,
+whatever that version is. See [NIP-IG](../../docs/nips/NIP-IG.md#routes-of-earlier-releases)
+for the upgrade order and constraints.
 No Linear API credential or data mutation is required.
 [Linear issue payloads carry label UUIDs](https://github.com/linear/linear-solutions/blob/main/integration_guides/scenarios/03-webhooks/README.md).
 Map names such as `agent` with `linear_labels`; unmapped labels retain their UUID.
@@ -67,6 +86,8 @@ It reads configuration and credentials at startup; restart after changes.
    push access. CI publishes both native architectures from main; PRs build only.
 2. Register the dedicated publisher as a relay member through `buzz-admin`.
    Add its public key to each mapped channel through channel administration.
+   For Linear, create a private route channel with the publisher as its only
+   member, and deploy a relay that orders route records before the publisher.
 3. Store the publisher key and selected provider secrets in a Kubernetes Secret.
 4. Deploy the companion CD chart with one replica, Recreate, and the image digest.
 5. Configure provider callbacks at `/ingest/github`, `/ingest/linear`, and
@@ -114,5 +135,5 @@ cargo run -p buzz-ingest
 The tests drive the real HTTP router and NIP-98 client against a fake relay.
 They exercise signature refusal, freshness, private Slack exclusion, write-ahead
 ordering, lost acknowledgements, restart recovery, payload replay, stale pending
-plans, strong-read failures, and mapping. External provider delivery and production
-relay admission require deployment validation.
+plans, strong-read failures, mapping, and issue route ordering. External
+provider delivery and production relay admission require deployment validation.

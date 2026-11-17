@@ -254,6 +254,20 @@ pub(crate) fn linear_issue(payload: &Value) -> Option<&str> {
         .filter(|id| !id.is_empty())
 }
 
+/// The issue and signed `updatedAt`, in Unix nanoseconds, of an `Issue`
+/// payload. Issue routes are ordered by this version, so a payload that would
+/// change a route without a valid one is refused.
+pub(crate) fn linear_version(payload: &Value) -> Result<(&str, i64)> {
+    let issue = required(text(payload, "/data/id"))?;
+    let Some(updated) = chrono::DateTime::parse_from_rfc3339(text(payload, "/data/updatedAt"))
+        .ok()
+        .and_then(|at| at.timestamp_nanos_opt())
+    else {
+        bail!("missing or invalid Linear updatedAt");
+    };
+    Ok((issue, updated))
+}
+
 pub(crate) fn linear(
     config: &Config,
     payload: &Value,

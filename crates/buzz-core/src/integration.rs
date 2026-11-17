@@ -71,6 +71,80 @@ pub const TAG_CHANNEL: &str = "ext-channel";
 /// yet.
 pub const TAG_MESSAGE: &str = "message";
 
+/// On a kind:30624 route record: the source version that the route reflects,
+/// a decimal `i64`. Linear routes use the issue's `updatedAt` in Unix
+/// nanoseconds.
+pub const TAG_ROUTE_VERSION: &str = "updated";
+
+/// On a kind:30624 route record: the channel that receives the routed
+/// activity. A cleared route omits it.
+pub const TAG_ROUTE: &str = "route";
+
+/// The decision of one versioned route record.
+///
+/// Routes order by source version, then by channel. For one version, a
+/// cleared route (`None`) is lowest and a greater channel ID outranks another.
+/// The relay keeps the greatest route at each route coordinate, so delayed
+/// and retried writes converge on the newest version in any landing order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Route {
+    /// Source version that the route reflects.
+    pub version: i64,
+    /// Channel that receives the routed activity, or `None` when cleared.
+    pub channel: Option<uuid::Uuid>,
+}
+
+/// True when `d` addresses a versioned route record: `route:<source>:<key>`,
+/// where `<source>` is 1 to 32 lowercase ASCII letters or digits and `<key>`
+/// is 64 lowercase hex digits.
+///
+/// Other coordinates keep ordinary addressable replacement. These include
+/// the `route:linear:issue:<id>` plans of earlier releases.
+pub fn is_route_coordinate(d: &str) -> bool {
+    let Some((source, key)) = d
+        .strip_prefix("route:")
+        .and_then(|rest| rest.split_once(':'))
+    else {
+        return false;
+    };
+    (1..=32).contains(&source.len())
+        && source
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        && key.len() == 64
+        && key.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Read the route of a route record from its tags. A valid record has exactly
+/// one [`TAG_ROUTE_VERSION`] tag and at most one [`TAG_ROUTE`] tag.
+pub fn route(tags: &nostr::Tags) -> Result<Route, &'static str> {
+    let mut version = None;
+    let mut channel = None;
+    for tag in tags.iter() {
+        let parts = tag.as_slice();
+        let slot = match parts.first().map(String::as_str) {
+            Some(TAG_ROUTE_VERSION) => &mut version,
+            Some(TAG_ROUTE) => &mut channel,
+            _ => continue,
+        };
+        if slot.replace(parts.get(1)).is_some() {
+            return Err("route record repeats its version or channel");
+        }
+    }
+    let version = version
+        .flatten()
+        .and_then(|raw| raw.parse().ok())
+        .ok_or("route record requires one decimal version")?;
+    let channel = match channel {
+        None => None,
+        Some(raw) => Some(
+            raw.and_then(|raw| uuid::Uuid::parse_str(raw).ok())
+                .ok_or("route record channel must be a UUID")?,
+        ),
+    };
+    Ok(Route { version, channel })
+}
+
 /// Most `ext-*` fields read from one event. Bounds work on a hostile event.
 pub const MAX_FIELDS: usize = 32;
 
@@ -193,6 +267,71 @@ mod tests {
         let v = f.get("big").unwrap();
         assert!(v.len() <= MAX_FIELD_BYTES);
         assert!(v.chars().all(|c| c == 'é'));
+    }
+
+    #[test]
+    fn route_records_parse_and_order_by_version_then_channel() {
+        let key = "ab".repeat(32);
+        assert!(is_route_coordinate(&format!("route:linear:{key}")));
+        for other in [
+            format!("route:linear:issue:{key}"),
+            "route:linear:issue:ENG-1".to_owned(),
+            format!("route:Linear:{key}"),
+            format!("route::{key}"),
+            format!("route:linear:{}", "AB".repeat(32)),
+            format!("route:linear:{}", &key[1..]),
+            format!("thread:{key}"),
+        ] {
+            assert!(!is_route_coordinate(&other), "{other}");
+        }
+
+        let low = "00000000-0000-4000-8000-000000000001";
+        let high = "00000000-0000-4000-8000-000000000002";
+        let parse = |raw: &[&[&str]]| route(&tags(raw));
+        let at = |version: i64, channel: Option<&str>| Route {
+            version,
+            channel: channel.map(|c| c.parse().unwrap()),
+        };
+        assert_eq!(parse(&[&["updated", "7"]]), Ok(at(7, None)));
+        assert_eq!(
+            parse(&[&["d", "x"], &["updated", "-3"], &["route", high]]),
+            Ok(at(-3, Some(high)))
+        );
+        for invalid in [
+            &[][..],
+            &[&["route", low][..]][..],
+            &[&["updated"][..]][..],
+            &[&["updated", "1.5"][..]][..],
+            &[&["updated", "1"][..], &["updated", "1"][..]][..],
+            &[&["updated", "1"][..], &["route"][..]][..],
+            &[&["updated", "1"][..], &["route", "general"][..]][..],
+            &[
+                &["updated", "1"][..],
+                &["route", low][..],
+                &["route", low][..],
+            ][..],
+        ] {
+            assert!(parse(invalid).is_err(), "{invalid:?}");
+        }
+
+        // A version outranks any channel; for one version a channel
+        // outranks a clear, and a greater channel ID another channel.
+        let mut routes = vec![
+            at(2, None),
+            at(1, Some(high)),
+            at(1, None),
+            at(1, Some(low)),
+        ];
+        routes.sort();
+        assert_eq!(
+            routes,
+            vec![
+                at(1, None),
+                at(1, Some(low)),
+                at(1, Some(high)),
+                at(2, None)
+            ]
+        );
     }
 
     #[test]

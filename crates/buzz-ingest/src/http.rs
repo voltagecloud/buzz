@@ -302,22 +302,30 @@ async fn process(app: &App, source: usize, secret: &str, request: Request) -> Re
     let identity = serde_json::to_vec(&identity_payload)
         .map_err(|_| (StatusCode::BAD_REQUEST, "invalid payload identity"))?;
     let body_hash = hex::encode(Sha256::digest(identity));
+    // Each Issue version decides where later comments without routing
+    // metadata go: its mapped channel, or none once it left every mapped
+    // scope. A partial update without team or project fields decides nothing.
+    // Save the decision before acknowledging, so a failed write is retried.
+    // Comments version only themselves and never change the route.
+    let channel = items.first().map(|item| item.channel);
     if source == 1
         && payload.get("type").and_then(Value::as_str) == Some("Issue")
-        && items.is_empty()
-        && (payload.pointer("/data/teamId").is_some()
+        && (channel.is_some()
+            || payload.pointer("/data/teamId").is_some()
             || payload.pointer("/data/projectId").is_some())
     {
-        let issue = payload
-            .pointer("/data/id")
-            .and_then(Value::as_str)
-            .ok_or((StatusCode::BAD_REQUEST, "missing Linear issue identity"))?;
-        plan::invalidate_linear_route(&app.relay, issue, &body_hash)
+        let (issue, updated) = normalize::linear_version(&payload)
+            .map_err(|_| (StatusCode::BAD_REQUEST, "malformed Linear issue version"))?;
+        let route = plan::Route {
+            version: updated,
+            channel,
+        };
+        plan::route_linear_issue(&app.relay, &app.config, issue, route)
             .await
             .map_err(|_| {
                 (
                     StatusCode::SERVICE_UNAVAILABLE,
-                    "issue route invalidation incomplete; retry delivery",
+                    "issue route update incomplete; retry delivery",
                 )
             })?;
     }
