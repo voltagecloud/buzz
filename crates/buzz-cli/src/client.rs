@@ -60,21 +60,6 @@ pub fn build_imeta_tag(d: &BlobDescriptor) -> Vec<String> {
     tag
 }
 
-/// MIME types accepted for upload.
-const ALLOWED_MIMES: &[&str] = &[
-    "image/jpeg",
-    "image/png",
-    "image/gif",
-    "image/webp",
-    "video/mp4",
-];
-
-/// Maximum file size for image uploads (50 MB).
-const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
-
-/// Maximum file size for video uploads (500 MB).
-const MAX_VIDEO_BYTES: u64 = 500 * 1024 * 1024;
-
 /// Sign a NIP-98 HTTP auth event (kind:27235) and return the Authorization header value.
 ///
 /// The event includes:
@@ -1219,6 +1204,7 @@ impl BuzzClient {
             return Err(CliError::Usage(format!("{file_path} is not a file")));
         }
 
+        crate::upload_validation::validate_filename(file_path)?;
         let bytes = std::fs::read(file_path)
             .map_err(|e| CliError::Other(format!("failed to read {file_path}: {e}")))?;
 
@@ -1227,28 +1213,7 @@ impl BuzzClient {
 
     /// Upload already bounded in-memory content through the existing Blossom path.
     pub(crate) async fn upload_bytes(&self, bytes: Vec<u8>) -> Result<BlobDescriptor, CliError> {
-        // 2. Detect MIME from magic bytes
-        let mime = infer::get(&bytes)
-            .map(|t| t.mime_type().to_string())
-            .unwrap_or_else(|| "application/octet-stream".to_string());
-
-        if !ALLOWED_MIMES.contains(&mime.as_str()) {
-            return Err(CliError::Usage(format!("unsupported file type: {mime}")));
-        }
-
-        // 3. Size check
-        let max = if mime.starts_with("video/") {
-            MAX_VIDEO_BYTES
-        } else {
-            MAX_IMAGE_BYTES
-        };
-        if bytes.len() as u64 > max {
-            return Err(CliError::Usage(format!(
-                "file too large: {} bytes (max {})",
-                bytes.len(),
-                max
-            )));
-        }
+        let mime = crate::upload_validation::validate_upload(&bytes)?;
 
         // 4. SHA-256
         let sha256 = hex::encode(Sha256::digest(&bytes));
