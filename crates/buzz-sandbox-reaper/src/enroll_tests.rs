@@ -488,6 +488,54 @@ async fn paseo_pairing_is_kept_only_in_the_daemon_secret_and_returned() {
     assert_eq!(listed.len(), 64);
 }
 
+#[tokio::test]
+async fn paseo_agent_refresh_preserves_the_codex_credential() {
+    use crate::mobile_launch::Registration;
+    use nostr::nips::nip19::ToBech32;
+
+    let cluster = sandbox_fake::Shared::default();
+    let (enrollment, _) = enrollment(&[("ghp_fixtureGitHubTokenDoNotLeak", "ada-l")]).await;
+    let enrollment = enrollment.with_paseo(daemon_secrets(&cluster));
+    let owner = nostr::Keys::parse(&"33".repeat(32)).unwrap();
+    let agent = nostr::Keys::parse(&"22".repeat(32)).unwrap();
+    let mut configured = profile();
+    configured["owner_pubkey"] = json!(owner.public_key().to_hex());
+    configured["models"]["codex_access_token"] = json!("at-fixture");
+    assert_eq!(enrollment.run(&developer(), configured).await["ok"], true);
+
+    let initial = daemon_secret(&cluster).unwrap();
+    assert_eq!(initial.1["CODEX_ACCESS_TOKEN"], "at-fixture");
+    enrollment.agents_changed(&developer()).await.unwrap();
+    assert!(
+        daemon_secret(&cluster).unwrap() == initial,
+        "an unchanged list rewrote the daemon Secret"
+    );
+
+    Registration::new(
+        owner.public_key(),
+        agent.public_key(),
+        json!({"relay_url": "wss://relay.example.invalid",
+            "private_key_nsec": agent.secret_key().to_bech32().unwrap()}),
+    )
+    .unwrap()
+    .save(sandbox_fake::client(&cluster), "buzz-agent-staging-dev")
+    .await
+    .unwrap();
+    enrollment.agents_changed(&developer()).await.unwrap();
+
+    let mut updated = daemon_secret(&cluster).unwrap().1;
+    let agents: Value =
+        serde_json::from_str(&updated.remove("BUZZ_PASEO_AGENTS").unwrap()).unwrap();
+    assert_eq!(agents.as_array().unwrap().len(), 1);
+    assert_eq!(agents[0]["agent"], agent.public_key().to_hex());
+    let mut expected = initial.1;
+    expected.remove("BUZZ_PASEO_AGENTS");
+    assert!(
+        updated == expected,
+        "refresh changed a field outside the agent list"
+    );
+}
+
 /// `profile` describes the stored profile, naming no credential value.
 #[tokio::test]
 async fn describe_names_what_is_stored_and_no_credential() {
