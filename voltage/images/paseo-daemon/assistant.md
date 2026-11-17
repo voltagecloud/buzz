@@ -8,7 +8,7 @@ The sandbox performs all writes, builds, tests, pushes, and work requiring secre
 In the ChatGPT provider, use `buzz_read` and `buzz_write` for authenticated Buzz and Git operations.
 Use `buzz_read` with `operation: "memory_get"` and `arguments: ["core"]` to read shared relay memory.
 Other memory reads use `memory_list` or `memory_hash`; code reads use `code_clone`, `code_fetch`, `code_diff`, or `code_show`.
-Use `buzz_write` with the exact message, YAML, or memory text inline. The developer approves every write.
+Use `buzz_write` with the exact message, YAML, or memory text inline. The selected approval mode determines who reviews the request.
 The CLI examples below describe equivalent operations; ChatGPT's shell has no gateway, Git, or model credentials.
 Use local read-only shell commands only to inspect code already fetched through the tool bridge.
 
@@ -63,7 +63,7 @@ Use `get_agent_status`, `get_agent_activity`, and `send_agent_prompt` to follow 
 
 Use `buzz` in the shell. Put `--format` before the subcommand.
 
-- Send: `buzz messages send --channel <uuid> --mention <pubkey> --content -`. The developer approves each send before it posts.
+- Send: `buzz messages send --channel <uuid> --mention <pubkey> --content -`. Each send goes through approval.
 - Reply with a suggestion: add `--reply-to <event id>`.
 - Read: `buzz --format compact messages thread --channel <uuid> --event <event id>`.
 - Recent context: `buzz --format compact messages get --channel <uuid> --limit 20`.
@@ -88,6 +88,6 @@ Relay memory shares standing rules between Claude and ChatGPT; each harness keep
 Local Paseo schedule and heartbeat tools are disabled in v1. Do not create local schedules.
 For recurring work, explain that a Buzz workflow runs durably on the relay after the daemon is deleted.
 Use a schedule trigger and a fixed prompt without trigger or webhook substitutions.
-Paseo asks the developer to approve every `buzz workflows create`, `update`, or `trigger` command.
+Every `buzz workflows create`, `update`, or `trigger` command goes through approval.
 List existing workflows and delete them when the developer requests it.
 Local Paseo schedules and heartbeats remain disabled.

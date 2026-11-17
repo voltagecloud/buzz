@@ -19,12 +19,14 @@ After a credential change, an operator must restart the daemon to reload its Sec
 
 ### Codex sandbox prerequisite
 
-Codex runs with read-only filesystem access, disabled command networking, and user-reviewed approvals.
-Network operations and changes outside that sandbox require approval. Implementation work still belongs in Buzz sandboxes.
+Codex runs with read-only filesystem access and disabled command networking.
+Choose **Auto-review** to let Codex review eligible approvals, or **Default Permissions** to review them yourself.
+Shell escalation and permission expansion are disabled in both modes.
+For **Full Access** and implementation work, hand off to a Codex agent in an isolated Buzz sandbox.
 Image-owned requirements prevent full-access mode and deny reads of credential files and process environments.
 Codex shell processes receive no gateway, Git, model, or pairing credentials.
 Its scoped `buzz_read` tool provides authenticated reads and code fetches through the existing CLIs.
-The `buzz_write` tool requires user approval for each message, workflow change, or relay-memory write, with exact text supplied inline.
+The `buzz_write` tool submits each message, workflow change, or relay-memory write for review, with exact text supplied inline. Auto-review can decide eligible tool prompts.
 
 Codex uses bubblewrap, which needs unprivileged user namespaces. The default container syscall filter blocks those operations.
 The image supplies a capability-free OCI seccomp profile derived from [Moby's pinned default](https://github.com/moby/profiles/blob/f862455628f78f84c937e967e4a03902fb1dee11/seccomp/default.json).
@@ -343,7 +345,7 @@ Visual client interaction remains part of the human acceptance test.
 | Approved scheduled Buzz workflows | Buzz relay | Continue without the daemon, under the narrowed #161 authority contract. |
 
 The assistant reads recorded context as historical data, not fresh instructions.
-Memory reads (`buzz mem ls`, `get`, `hash`) run without approval. Every write (`set`, `patch`, `rm`) needs the developer's approval, and the assistant is told to pass memory text inline so the approval shows the exact bytes. Tool permissions are not a security boundary for a provider with shell access, so this reduces mistakes rather than guaranteeing that a prompt-injected assistant cannot persist text: read what you approve.
+Memory reads (`buzz mem ls`, `get`, `hash`) run without approval. A write (`set`, `patch`, `rm`) submits its exact inline text for review. Claude prompts the developer. Codex follows the selected approval mode.
 Memory is tied to the gateway key: its addresses and encryption derive from it, so a new gateway key starts with empty memory. The owner can still read the old entries with `buzz mem ls --agent <old gateway pubkey>`.
 Rules you paste into the assistant chat to seed memory are developer messages, which the recorder posts to the recording channel; do not paste anything you would not post there.
 The developer can audit the memory with their own key: `buzz mem ls --agent <gateway pubkey>`, then `buzz mem get <slug> --agent <gateway pubkey>`.
@@ -353,10 +355,10 @@ A Kubernetes Secret survives pod deletion; neither an `emptyDir` nor container d
 Local schedule and heartbeat tools are disabled for the assistant.
 Any schedule created manually through a paired client remains pod-local and disappears on replacement.
 For recurring tasks, the assistant proposes a Buzz workflow with a schedule trigger and literal prompt.
-Paseo asks for approval on every workflow create, update, and trigger command.
+Workflow create, update, and trigger commands go through approval.
 The assistant can list workflows and delete them on request.
 
-Paseo also asks for approval on every `buzz messages send`, so the developer sees each post before it is published.
+Each `buzz messages send` goes through approval. Choose manual review if you want to see each post before publication.
 The assistant can read files only under `~/code`; reads of `/proc`, `/sys`, `/etc`, `/run`, `~/.paseo`, `~/.claude`, `~/.config`, and Git or SSH credentials are denied.
 These rules reduce what a prompt-injected assistant can leak; they are not a hard boundary, because the `buzz` CLI and the Git helper need the gateway key and the read token in the daemon's environment.
 The gateway key's limited, revocable delegation and the read-only token are the boundary.

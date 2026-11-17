@@ -117,7 +117,7 @@ function execute([command, args, input], signal) {
 const tools = [
   { name: "buzz_read", description: "Read Buzz channels, threads, workflows, owner-scoped memory, or code. Flags match the corresponding buzz command. Memory get/hash takes [slug]; code operations take [owner/repository, optional revisions].",
     annotations: { readOnlyHint: true }, operations: readOperations },
-  { name: "buzz_write", description: "Requires user approval. Send a message, modify a workflow, or write owner-scoped relay memory. Supply exact message/YAML/memory text inline. Memory patch arguments are [slug, base_hash]; other memory writes take [slug]. Text is literal; file input is unsupported.",
+  { name: "buzz_write", description: "Requires approval under the selected Codex review mode. Send a message, modify a workflow, or write owner-scoped relay memory. Supply exact message/YAML/memory text inline. Memory patch arguments are [slug, base_hash]; other memory writes take [slug]. Text is literal; file input is unsupported.",
     annotations: { readOnlyHint: false }, operations: writeOperations },
 ].map(({ operations, ...tool }) => ({ ...tool, inputSchema: { type: "object", additionalProperties: false, required: ["operation"], properties: {
   operation: { type: "string", enum: operations }, arguments: { type: "array", maxItems: 24, items: { type: "string", maxLength: 2048 } }, text: { type: "string", maxLength: 65536 },

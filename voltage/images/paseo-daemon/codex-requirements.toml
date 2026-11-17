@@ -1,7 +1,9 @@
 # The personal daemon reviews and delegates; sandbox agents implement changes.
 # Keep these requirements in the read-only image, outside the assistant's home.
-allowed_approval_policies = ["on-request"]
-allowed_approvals_reviewers = ["user"]
+allowed_approval_policies = [
+  { granular = { sandbox_approval = false, rules = false, mcp_elicitations = true, request_permissions = false, skill_approval = false } },
+]
+allowed_approvals_reviewers = ["user", "auto_review"]
 allowed_sandbox_modes = ["read-only"]
 
 [permissions.filesystem]
