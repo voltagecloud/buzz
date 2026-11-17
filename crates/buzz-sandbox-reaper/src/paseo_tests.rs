@@ -111,9 +111,22 @@ fn daemon_environment_preserves_identity_and_refuses_malformed_saved_fields() {
     let mut legacy = first.clone();
     legacy.insert("CODEX_ACCESS_TOKEN".into(), "legacy-unused-token".into());
     let next = daemon_env(&profile, &agents, Some(legacy)).unwrap();
-    assert_eq!(next.len(), 6);
-    assert!(!next.contains_key("CODEX_ACCESS_TOKEN"));
+    assert_eq!(next.len(), 7);
+    assert_eq!(next["CODEX_ACCESS_TOKEN"], "at-fixture");
     assert_eq!(profile["models"]["codex_access_token"], "at-fixture");
+    assert!(!next.contains_key("OPENAI_API_KEY"));
+    assert!(!next.contains_key("OPENROUTER_API_KEY"));
+    let mut rotated = profile.clone();
+    rotated["models"]["codex_access_token"] = json!("at-replacement");
+    let replaced = daemon_env(&rotated, &agents, Some(next.clone())).unwrap();
+    assert_eq!(replaced["CODEX_ACCESS_TOKEN"], "at-replacement");
+    rotated["models"]
+        .as_object_mut()
+        .unwrap()
+        .remove("codex_access_token");
+    let removed = daemon_env(&rotated, &agents, Some(replaced)).unwrap();
+    assert!(!removed.contains_key("CODEX_ACCESS_TOKEN"));
+    assert_eq!(removed["BUZZ_PRIVATE_KEY"], first["BUZZ_PRIVATE_KEY"]);
     for key in [
         "PASEO_PASSWORD",
         "PASEO_SERVER_ID",

@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 # Headless Paseo daemon (paseo.sh) that runs one developer's personal
 # assistant (PA) in front of their Buzz agents. The daemon is the unmodified
-# upstream image. This image adds the `buzz` CLI, the Claude assistant runtime, the PA
+# upstream image. This image adds the `buzz` CLI, the native assistant runtimes, the PA
 # instructions, and a wrapper that writes Paseo's config from the environment.
 # See README.md next to this file.
 # Build from the repository root; Dockerfile.dockerignore next to this file
@@ -41,13 +41,18 @@ RUN cargo build --locked --release -p buzz-cli --bin buzz \
     && install -D -m 0755 -s target/release/buzz /out/buzz \
     && rm -rf target
 
-# Use the same integrity-locked Claude Code release as the developer image.
-# Copy only the native executable into the manager; no package tools or adapters.
-FROM node:22-trixie-slim@sha256:154ba2f4d6fec323d28e4f4bb86bba4677f1223391a1979cf521304e03a98dfa AS claude-runtime
+# Use the developer image's integrity-locked Claude Code and Codex releases.
+# Copy native executables and Codex resources, without package tools or adapters.
+FROM node:22-trixie-slim@sha256:154ba2f4d6fec323d28e4f4bb86bba4677f1223391a1979cf521304e03a98dfa AS assistant-runtimes
 WORKDIR /opt/buzz-runtimes
 COPY voltage/images/buzz-agent/package.json voltage/images/buzz-agent/package-lock.json ./
+COPY voltage/images/paseo-daemon/seccomp.mjs /tmp/seccomp.mjs
 RUN npm ci --omit=dev --no-audit --no-fund \
-    && install -D -m 0755 node_modules/@anthropic-ai/claude-code/bin/claude.exe /out/claude
+    && install -D -m 0755 node_modules/@anthropic-ai/claude-code/bin/claude.exe /out/claude \
+    && mkdir -p /out/codex \
+    && case "$(node -p process.arch)" in x64) platform=x64; triple=x86_64 ;; arm64) platform=arm64; triple=aarch64 ;; *) exit 1 ;; esac \
+    && cp -a "node_modules/@openai/codex-linux-${platform}/vendor/${triple}-unknown-linux-musl/." /out/codex/ \
+    && node /tmp/seccomp.mjs /out/seccomp
 
 # ghcr.io/getpaseo/paseo:0.15.3 (linux/amd64 and linux/arm64)
 FROM ghcr.io/getpaseo/paseo@sha256:57048c43a2c2988434273c7f8a4b25aa585bca6c1720493ae52e2fa91497b99a
@@ -55,8 +60,18 @@ LABEL maintainer="Voltage <hello@voltage.cloud>"
 USER root
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # Paseo's Claude provider resolves the executable from PATH.
-COPY --from=claude-runtime /out/claude /usr/local/bin/claude
-RUN HOME=/tmp claude --version | grep -qx '2.1.325 (Claude Code)'
+COPY --from=assistant-runtimes /out/claude /usr/local/bin/claude
+COPY --from=assistant-runtimes /out/codex /opt/paseo-buzz/codex
+COPY --from=assistant-runtimes /out/seccomp/ /etc/paseo-buzz/
+# COPY --chmod also sets newly created parent directories to that mode.
+# Create this directory first so UID 1000 can traverse it.
+RUN install -d -m 0755 /etc/codex
+COPY --chmod=0644 voltage/images/paseo-daemon/codex-requirements.toml /etc/codex/requirements.toml
+COPY --chmod=0644 voltage/images/paseo-daemon/codex-config.toml /etc/codex/config.toml
+RUN ln -s /opt/paseo-buzz/codex/bin/codex /usr/local/bin/codex \
+    && ln -s /opt/paseo-buzz/codex/codex-resources/bwrap /usr/local/bin/bwrap \
+    && HOME=/tmp claude --version | grep -qx '2.1.325 (Claude Code)' \
+    && HOME=/tmp codex --version | grep -qx 'codex-cli 0.169.0'
 # Install analysis tools from Debian before removing package managers.
 # Debian's yq is the Python jq wrapper, not mikefarah/yq. Python is for
 # analysis only; no pip, compilers, build/test tools, or scanners are added.
@@ -78,7 +93,7 @@ COPY --chmod=0644 voltage/images/paseo-daemon/assistant.md /etc/paseo-buzz/assis
 COPY --chmod=0755 voltage/images/paseo-daemon/entrypoint.sh /usr/local/bin/paseo-buzz-entrypoint
 COPY --chmod=0755 voltage/images/paseo-daemon/code.mjs /usr/local/bin/paseo-code
 COPY --chmod=0755 voltage/images/paseo-daemon/workspaces.mjs /usr/local/bin/paseo-workspaces
-COPY --chmod=0644 voltage/images/paseo-daemon/providers.mjs voltage/images/paseo-daemon/agents-watch.mjs voltage/images/paseo-daemon/restore.mjs /usr/local/lib/paseo-buzz/
+COPY --chmod=0644 voltage/images/paseo-daemon/providers.mjs voltage/images/paseo-daemon/agents-watch.mjs voltage/images/paseo-daemon/restore.mjs voltage/images/paseo-daemon/tools.mjs /usr/local/lib/paseo-buzz/
 # Relay-only and TLS-only. The listener is loopback, for the in-container
 # CLI, the agent MCP server, and the health check. Clients, including the web
 # app at app.paseo.sh, reach the daemon only through the relay. The daemon's

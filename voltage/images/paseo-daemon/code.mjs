@@ -9,7 +9,7 @@ const [action, repository, ...args] = process.argv.slice(2);
 // The bridge supplies an isolated process group and kills the whole group at
 // its deadline. Keep Git and its descendants inside it. Older helpers reject
 // this flag before starting Git, so rolling upgrades fail safely.
-const inheritGroup = action === "view" && args.at(-1) === "--inherit-process-group";
+const inheritGroup = ["clone", "fetch", "diff", "show", "view"].includes(action) && args.at(-1) === "--inherit-process-group";
 if (inheritGroup) args.pop();
 const canonicalRepository = (value) => {
   if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}\/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/.test(value) || value.includes("..")) throw new Error("use owner/repository without traversal");

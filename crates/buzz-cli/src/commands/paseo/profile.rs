@@ -37,7 +37,7 @@ const MODELS: [(&str, &str, &str); 5] = [
         "claude_oauth_token",
         "Claude subscription token (sk-ant-oat01-...)",
         "Run `claude setup-token`, sign in to claude.ai with your Voltage account, and approve.\n  \
-         Your Paseo assistant needs this token.",
+         Enables the Claude personal assistant in Paseo. A Codex access token enables the ChatGPT alternative.",
     ),
     (
         "anthropic_api_key",
@@ -417,7 +417,7 @@ pub(super) fn assistant_token(
         ""
     };
     prompt.note(&format!(
-        "Your profile has no Claude subscription token, so your Paseo assistant cannot run.{replaces}\n{label}: {help}"
+        "Your profile has no Claude subscription token or Codex access token for a native Paseo assistant.{replaces}\n{label}: {help}"
     ));
     let Some(token) = prompt.secret(&format!("{label} (Enter to skip)"))? else {
         return Ok(None);
