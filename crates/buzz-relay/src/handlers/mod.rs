@@ -41,6 +41,8 @@ pub mod imeta;
 /// Transport-neutral event ingestion pipeline.
 pub mod ingest;
 #[cfg(test)]
+mod integration_route_postgres_tests;
+#[cfg(test)]
 mod membership_notice_postgres_tests;
 /// Community moderation authorization seam (capability helper).
 pub mod moderation_authz;

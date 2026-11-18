@@ -19,6 +19,11 @@ pub(crate) struct Config {
     pub linear_webhooks: BTreeMap<String, Uuid>,
     #[serde(default)]
     pub linear_labels: BTreeMap<String, String>,
+    /// Channel for Linear issue route records. It is required with any Linear
+    /// mapping and must not be a mapped channel, so that only the publisher
+    /// needs to be its member.
+    #[serde(default)]
+    pub linear_route_channel: Option<Uuid>,
     #[serde(default)]
     pub slack_channels: BTreeMap<String, Uuid>,
     #[serde(default)]
@@ -47,6 +52,25 @@ impl Config {
         .any(|mappings| mappings.keys().any(String::is_empty))
         {
             bail!("Linear mapping keys must not be empty");
+        }
+        // Route records live in their own channel, so a removed membership in
+        // a mapped channel cannot hide them from the publisher.
+        let linear_mapped = !(self.linear_teams.is_empty()
+            && self.linear_projects.is_empty()
+            && self.linear_webhooks.is_empty());
+        if linear_mapped && self.linear_route_channel.is_none() {
+            bail!("Linear mappings require linear_route_channel");
+        }
+        if self.linear_route_channel.is_some_and(|routes| {
+            self.github_repos
+                .values()
+                .chain(self.linear_teams.values())
+                .chain(self.linear_projects.values())
+                .chain(self.linear_webhooks.values())
+                .chain(self.slack_channels.values())
+                .any(|mapped| *mapped == routes)
+        }) {
+            bail!("linear_route_channel must not be a mapped channel");
         }
         if self.linear_labels.len() > 256
             || self.linear_labels.iter().any(|(id, name)| {

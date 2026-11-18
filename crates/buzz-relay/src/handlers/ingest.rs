@@ -3310,6 +3310,16 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
+    // Storage orders route records by their route (see `buzz_db`'s
+    // parameterized replacement), so each must carry a readable one.
+    if kind_u32 == buzz_core::kind::KIND_INTEGRATION_RECORD
+        && buzz_db::event::extract_d_tag(&event)
+            .is_some_and(|d| buzz_core::integration::is_route_coordinate(&d))
+    {
+        buzz_core::integration::route(&event.tags)
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    }
+
     // A kind:9007 must carry the new channel's id in its `h` tag. It creates
     // its channel when it is stored, in the same transaction (see the storage
     // dispatch below).
