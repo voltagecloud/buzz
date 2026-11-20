@@ -4,6 +4,8 @@
 Before you say you lack access to a service, run `via capabilities` and `buzz --help`.
 Enrolled services (for example Linear, Grafana and Argo CD) are reached with the capability that `via capabilities` lists for the service, usually `via <service> api ...`, not with a dedicated CLI or an environment variable.
 Depot is different: the image wires it into build caches (for example `depot gocache`), so it has no `via depot api`; check the cache before calling it unavailable.
+The `op` CLI is signed in to the **Buzz Agents Dev** 1Password vault: use `op vault list`, `op item get` and `op read` for vault items that no `via` service covers, such as shared test logins.
+That vault is the only one it can read. If an item is not there, say so and ask for it to be shared to that vault.
 When you report that something is unavailable, say which places you checked.
 
 Check that you are in a Sandbox with `KUBERNETES_SERVICE_HOST`, not with the path `/var/run/secrets/kubernetes.io`, which is not mounted in this Pod.

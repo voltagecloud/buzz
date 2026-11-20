@@ -70,8 +70,8 @@ RUN case "$TARGETARCH" in \
     && tar -xzf /tmp/via.tar.gz -C /opt/agent-tools via \
     && curl -fsSL "https://cache.agilebits.com/dist/1P/op2/pkg/v2.34.0/op_linux_${TARGETARCH}_v2.34.0.zip" -o /tmp/op.zip \
     && echo "$op_sha  /tmp/op.zip" | sha256sum -c - \
-    && unzip -p /tmp/op.zip op > /usr/local/bin/op \
-    && chmod 0755 /usr/local/bin/op \
+    && unzip -p /tmp/op.zip op > /opt/agent-tools/op \
+    && chmod 0755 /opt/agent-tools/op \
     && curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_$gitleaks.tar.gz" -o /tmp/gitleaks.tar.gz \
     && echo "$gitleaks_sha  /tmp/gitleaks.tar.gz" | sha256sum -c - \
     && tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks \
@@ -148,6 +148,7 @@ COPY --chmod=0644 voltage/images/buzz-agent/environment.md /etc/buzz-agent/envir
 COPY --chmod=0755 voltage/images/buzz-agent/heavy-bin/ /opt/buzz-heavy/bin/
 COPY --chmod=0755 voltage/images/buzz-agent/gh.sh /usr/local/bin/gh
 COPY --chmod=0755 voltage/images/buzz-agent/via.sh /usr/local/bin/via
+COPY --chmod=0755 voltage/images/buzz-agent/op.sh /usr/local/bin/op
 COPY --chmod=0755 voltage/images/buzz-agent/entrypoint.sh /usr/local/bin/sprig-entrypoint
 RUN ln -s /usr/local/bin/buzz-heavy /usr/local/bin/buzz-agent-gate \
     && for name in buzz-acp buzz-agent buzz-dev-mcp rg tree buzz git-credential-nostr git-sign-nostr; do \
