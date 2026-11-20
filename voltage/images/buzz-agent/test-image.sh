@@ -17,6 +17,14 @@ docker run --rm --entrypoint /bin/bash "$IMAGE" -ceu '
   test "$("$CLAUDE_CODE_EXECUTABLE" --version)" = "$(claude --version)"
   kubectl version --client
   gh stack --help >/dev/null
+  # op signs in with the profile token file, unless the caller passed a token.
+  op --version >/dev/null
+  mkdir -p "$HOME/.config/buzz-agent"
+  printf ops_fixture > "$HOME/.config/buzz-agent/op-token"
+  sed "s#^exec /opt/agent-tools/op #exec /usr/bin/env #" /usr/local/bin/op > /tmp/op-env
+  sh /tmp/op-env | grep -qx OP_SERVICE_ACCOUNT_TOKEN=ops_fixture
+  OP_SERVICE_ACCOUNT_TOKEN=caller sh /tmp/op-env | grep -qx OP_SERVICE_ACCOUNT_TOKEN=caller
+  rm -r "$HOME/.config/buzz-agent" /tmp/op-env
   codex login --help | grep -q -- --device-auth
   claude setup-token --help >/dev/null
   # Startup appends the sub-agent guide to the harness instructions as this user.
